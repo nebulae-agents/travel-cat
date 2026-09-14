@@ -320,6 +320,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 productionRoot: environment.repository.root,
                 modelGenerator: generator,
                 imageGenerator: JourneyTestCodexImageGenerator(model: generator),
+                handwritingPreparer: PostcardHandwritingGenerator(model: generator),
                 referenceImageURL: reference,
                 compactImageURL: compactImage,
                 compactCatImageURL: compactCat

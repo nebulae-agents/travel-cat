@@ -11,6 +11,74 @@ import TravelUI
 @Suite(.serialized)
 struct JourneyTestControllerTests {
     @Test @MainActor
+    func handwritingFailurePublishesFallbackWithoutRegeneratingScene() async throws {
+        let harness = try Harness(), image = ImageFake(source: try harness.makeGeneratedPNG())
+        let service = PostcardHandwritingGenerator(model: NarrativeFake(), select: { _, _ in
+            throw PostcardHandwritingVerifier.Rejection.unsafeLayout
+        })
+        let controller = JourneyTestController(parentRoot: harness.parent, productionRoot: harness.production,
+            modelGenerator: NarrativeFake(), imageGenerator: image,
+            imageImporter: JourneyTestImageImporter(allowedRoot: harness.generated), handwritingPreparer: service,
+            referenceImageURL: nil, stageInterval: 0, sleep: { _ in })
+        controller.start(fastTestEnabled: true)
+        await controller.waitUntilIdleForTesting()
+        #expect(controller.errorMessage == nil)
+        #expect(await image.callCount == 1)
+        let session = try #require(controller.session)
+        let contents = try TravelRepository(root: session.root).loadContents()
+        let card = try #require(contents.events.first { $0.phase == .postcardReady })
+        #expect(card.postcardStatus == .ready)
+        let ref = try #require(contents.presentationReferences[card.id])
+        let physical = try #require(realpath(session.root.path, nil))
+        defer { free(physical) }
+        let store = PostcardPresentationStore(root: URL(fileURLWithPath: String(cString: physical)))
+        let value = try store.load(reference: ref, event: card,
+            expectedSourceRelativePath: try #require(card.postcardRelativePath))
+        #expect(value.manifest.handwriting == .localFallback(.generationFailed))
+    }
+
+    @Test @MainActor
+    func handwritingBindingErrorDoesNotRetrySceneOrConsumeLease() async throws {
+        let harness = try Harness(), image = ImageFake(source: try harness.makeGeneratedPNG())
+        let controller = JourneyTestController(parentRoot: harness.parent, productionRoot: harness.production,
+            modelGenerator: NarrativeFake(), imageGenerator: image,
+            imageImporter: JourneyTestImageImporter(allowedRoot: harness.generated), handwritingPreparer: BrokenInk(),
+            referenceImageURL: nil, stageInterval: 0, sleep: { _ in })
+        controller.start(fastTestEnabled: true)
+        await controller.waitUntilIdleForTesting()
+        #expect(await image.callCount == 1)
+        let session = try #require(controller.session), repository = try TravelRepository(root: session.root)
+        let contents = try repository.loadContents()
+        let card = try #require(contents.events.first { $0.phase == .postcardReady })
+        #expect(card.postcardStatus == .pendingImage)
+        #expect(try repository.imageRetry(for: card.id)?.attemptCount == 0)
+        #expect(contents.presentationReferences.isEmpty)
+    }
+
+    @Test @MainActor
+    func stoppingDuringHandwritingRejectsLateReferenceWithoutConsumingLease() async throws {
+        let harness = try Harness(), image = ImageFake(source: try harness.makeGeneratedPNG())
+        let entered = AsyncGate(), release = AsyncGate()
+        let controller = JourneyTestController(parentRoot: harness.parent, productionRoot: harness.production,
+            modelGenerator: NarrativeFake(), imageGenerator: image,
+            imageImporter: JourneyTestImageImporter(allowedRoot: harness.generated),
+            handwritingPreparer: LateInk(entered: entered, release: release),
+            referenceImageURL: nil, stageInterval: 0, sleep: { _ in })
+        controller.start(fastTestEnabled: true)
+        await entered.wait()
+        controller.stop()
+        await release.release()
+        await controller.waitUntilIdleForTesting()
+        #expect(await image.callCount == 1)
+        let session = try #require(controller.session), repository = try TravelRepository(root: session.root)
+        let contents = try repository.loadContents()
+        let card = try #require(contents.events.first { $0.phase == .postcardReady })
+        #expect(card.postcardStatus == .pendingImage)
+        #expect(try repository.imageRetry(for: card.id)?.attemptCount == 0)
+        #expect(contents.presentationReferences.isEmpty)
+    }
+
+    @Test @MainActor
     func compactJourneyUsesOnlyLocalContentAndWaitsFifteenSeconds() async throws {
         let harness = try Harness()
         let clock = MutableTestClock(now: Date(timeIntervalSince1970: 1_788_566_400))
@@ -738,6 +806,26 @@ private struct SlowCancellableModel: JourneyTestModelGenerating {
 }
 
 private struct TestFailure: Error {}
+
+private struct BrokenInk: PostcardHandwritingPreparing {
+    func prepare(event: TripEvent, sourceRelativePath: String, session: JourneyTestSession,
+                 leaseExpiresAt: Date, acceptedReference: PostcardPresentationReference?) async throws -> PostcardPresentationReference {
+        throw PostcardPresentationError.invalidBinding
+    }
+}
+
+private struct LateInk: PostcardHandwritingPreparing {
+    let entered: AsyncGate; let release: AsyncGate
+    func prepare(event: TripEvent, sourceRelativePath: String, session: JourneyTestSession,
+                 leaseExpiresAt: Date, acceptedReference: PostcardPresentationReference?) async throws -> PostcardPresentationReference {
+        let prepared = try await PostcardHandwritingGenerator(model: nil).prepare(event: event,
+            sourceRelativePath: sourceRelativePath, session: session, leaseExpiresAt: leaseExpiresAt,
+            acceptedReference: acceptedReference)
+        await entered.release()
+        await release.wait()
+        return prepared
+    }
+}
 
 private actor ExternalCallProbe {
     private(set) var modelCalls = 0

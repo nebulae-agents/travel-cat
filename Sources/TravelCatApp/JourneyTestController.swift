@@ -60,6 +60,7 @@ final class JourneyTestController: ObservableObject {
   private let modelGenerator: any JourneyTestModelGenerating
   private let imageGenerator: any JourneyTestImageGenerating
   private let imageImporter: JourneyTestImageImporter
+  private let handwritingPreparer: (any PostcardHandwritingPreparing)?
   private let referenceImageURL: URL?
   private let compactImageURL: URL?
   private let compactCatImageURL: URL?
@@ -80,6 +81,7 @@ final class JourneyTestController: ObservableObject {
     modelGenerator: any JourneyTestModelGenerating,
     imageGenerator: any JourneyTestImageGenerating,
     imageImporter: JourneyTestImageImporter = JourneyTestImageImporter(),
+    handwritingPreparer: (any PostcardHandwritingPreparing)? = nil,
     referenceImageURL: URL?,
     compactImageURL: URL? = nil,
     compactCatImageURL: URL? = nil,
@@ -99,6 +101,7 @@ final class JourneyTestController: ObservableObject {
     self.modelGenerator = modelGenerator
     self.imageGenerator = imageGenerator
     self.imageImporter = imageImporter
+    self.handwritingPreparer = handwritingPreparer
     self.referenceImageURL = referenceImageURL
     self.compactImageURL = compactImageURL
     self.compactCatImageURL = compactCatImageURL
@@ -331,24 +334,22 @@ final class JourneyTestController: ObservableObject {
     guard var work = try repository.pendingImages(mode: .fast).first else {
       throw JourneyTestControllerError.noPendingImage
     }
+    var relative: String
     while true {
+      try requireCurrent(token, session: session)
       do {
         let generated = try await imageGenerator.generateImage(
           prompt: try makeImagePrompt(scenePrompt: scenePrompt, profile: profile), session: session,
           referenceImage: try referenceImage(for: profile, session: session))
         try requireCurrent(token, session: session)
-        let relative = try imageImporter.importImage(
+        relative = try imageImporter.importImage(
           generated, tripID: work.event.tripID, eventID: work.event.id, session: session)
         try requireCurrent(token, session: session)
-        _ = try repository.markImage(
-          .init(
-            eventId: work.event.id, status: .ready, attemptedAt: clock(), relativePath: relative,
-            reason: nil, attemptToken: work.attemptToken, attemptCount: work.imageAttemptCount,
-            publishedNarrativeHash: work.publishedNarrativeHash), mode: .fast)
-        refresh(repository: repository)
-        return
+        break
+      } catch is CancellationError {
+        throw CancellationError()
       } catch {
-        guard runToken == token else { throw JourneyTestControllerError.staleCompletion }
+        try requireCurrent(token, session: session)
         let acknowledgement = try repository.markImage(
           .init(
             eventId: work.event.id, status: .failed, attemptedAt: clock(), relativePath: nil,
@@ -375,6 +376,18 @@ final class JourneyTestController: ObservableObject {
         work = leased
       }
     }
+    // Handwriting and publication have their own failure boundary: neither may retry a scene.
+    try requireCurrent(token, session: session)
+    let preparer = handwritingPreparer ?? PostcardHandwritingGenerator(model: nil)
+    let accepted = try repository.loadContents().presentationReferences[work.event.id]
+    let presentation = try await preparer.prepare(event: work.event, sourceRelativePath: relative,
+      session: session, leaseExpiresAt: work.leaseExpiresAt, acceptedReference: accepted)
+    try requireCurrent(token, session: session)
+    _ = try repository.markImage(
+      .init(eventId: work.event.id, status: .ready, attemptedAt: clock(), relativePath: relative,
+        reason: nil, attemptToken: work.attemptToken, attemptCount: work.imageAttemptCount,
+        publishedNarrativeHash: work.publishedNarrativeHash, presentation: presentation), mode: .fast)
+    refresh(repository: repository)
   }
 
   private func importCompactPostcard(
