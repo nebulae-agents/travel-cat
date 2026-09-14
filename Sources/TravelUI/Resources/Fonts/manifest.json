@@ -1,0 +1,34 @@
+{
+  "family": "LXGW WenKai Lite",
+  "fonts": [
+    {
+      "file": "LXGWWenKaiLite-Light.ttf",
+      "postScriptName": "LXGWWenKaiLite-Light",
+      "sha256": "b57d46de1db72c500a7f2ee374a66615f308e541627ec3623e9b9087e88d392e",
+      "size": 15612172,
+      "sourceURL": "https://github.com/lxgw/LxgwWenKai-Lite/releases/download/v1.522/LXGWWenKaiLite-Light.ttf"
+    },
+    {
+      "file": "LXGWWenKaiLite-Regular.ttf",
+      "postScriptName": "LXGWWenKaiLite-Regular",
+      "sha256": "140c99ba4e28e817cec49bf82a0c5fcdc4fe633fb9dfda16d0ee8d59a8545f15",
+      "size": 13872424,
+      "sourceURL": "https://github.com/lxgw/LxgwWenKai-Lite/releases/download/v1.522/LXGWWenKaiLite-Regular.ttf"
+    },
+    {
+      "file": "LXGWWenKaiLite-Medium.ttf",
+      "postScriptName": "LXGWWenKaiLite-Medium",
+      "sha256": "02eb0f8deed11b00481393f5720630ae1a44424f37f4157ea160a69a1c72a0b6",
+      "size": 13700636,
+      "sourceURL": "https://github.com/lxgw/LxgwWenKai-Lite/releases/download/v1.522/LXGWWenKaiLite-Medium.ttf"
+    }
+  ],
+  "license": "OFL-1.1",
+  "licenseFile": "OFL.txt",
+  "licenseSHA256": "c38b1994a5e48ac30ac7d1da7d0409fd8fd8127dfe28a13d6e787d5b1ef34a5e",
+  "licenseSourceURL": "https://raw.githubusercontent.com/lxgw/LxgwWenKai-Lite/v1.522/OFL.txt",
+  "noticeFile": "THIRD_PARTY_NOTICES.md",
+  "releaseCommit": "067a6d5",
+  "releaseURL": "https://github.com/lxgw/LxgwWenKai-Lite/releases/tag/v1.522",
+  "version": "1.522"
+}

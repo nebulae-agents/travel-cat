@@ -1,0 +1,51 @@
+{
+  "due": true,
+  "snapshot": {
+    "schemaVersion": 1,
+    "stateVersion": 3,
+    "tripID": "20000000-0000-0000-0000-000000000000",
+    "lastEventID": "20000000-0000-0000-0000-000000000003",
+    "phase": "exploring",
+    "nextActionAt": "2030-08-12T09:15:00.00000000000000000Z",
+    "lastUpdatedAt": "2030-08-12T09:10:00.00000000000000000Z",
+    "carriedItemID": "rain-charm",
+    "usedItemIDs": [
+      "train-ticket"
+    ],
+    "visitedPlaces": [
+      "Kamakura Station",
+      "Komachi Street"
+    ],
+    "mood": {
+      "level": 1,
+      "label": "好奇",
+      "quote": "灯笼的微光正把我领向海边。"
+    },
+    "openHook": "Follow the lantern trail toward the sea"
+  },
+  "previousEvent": {
+    "id": "20000000-0000-0000-0000-000000000003",
+    "tripID": "20000000-0000-0000-0000-000000000000",
+    "previousEventID": "20000000-0000-0000-0000-000000000002",
+    "occurredAt": "2030-08-12T09:10:00.00000000000000000Z",
+    "phase": "exploring",
+    "location": {
+      "country": "Japan",
+      "city": "Kamakura",
+      "place": "Komachi Street"
+    },
+    "transport": "on foot",
+    "summary": "黑猫沿着小町通的石板路追随灯笼微光，雨后的招牌倒映出通往海边的方向。",
+    "mood": {
+      "level": 1,
+      "label": "好奇",
+      "quote": "灯笼的微光正把我领向海边。"
+    },
+    "continuityReferences": [
+      "从镰仓站出发",
+      "使用过的 train-ticket"
+    ],
+    "openHook": "Follow the lantern trail toward the sea",
+    "postcardStatus": "none"
+  }
+}

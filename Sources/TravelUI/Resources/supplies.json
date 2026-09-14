@@ -1,0 +1,7 @@
+[
+  {"id":"matcha-cookie","name":"抹茶饼干","influence":"分享、店铺或味觉体验"},
+  {"id":"camera","name":"小相机","influence":"风景事件和自拍"},
+  {"id":"blanket","name":"小毯子","influence":"安静、露营或夜晚场景"},
+  {"id":"ticket-case","name":"车票夹","influence":"铁路和旧车站"},
+  {"id":"raincoat","name":"小雨衣","influence":"雨天的积极事件"}
+]

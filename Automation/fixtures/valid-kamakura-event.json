@@ -1,0 +1,15 @@
+{
+  "eventId": "10000000-0000-0000-0000-000000000001",
+  "tripId": "10000000-0000-0000-0000-000000000000",
+  "previousEventId": null,
+  "occurredAt": "2030-08-11T12:00:00Z",
+  "phase": "preparing",
+  "location": null,
+  "transport": null,
+  "summary": "黑猫把蓝围巾与旅行手册仔细收进行囊，准备沿着海岸寻找新的故事。",
+  "mood": {"level": 0, "label": "平静", "quote": "潮声会替今天记住方向。"},
+  "continuityReferences": ["窗边圈出的镰仓海岸线"],
+  "openHook": "沿海岸寻找风里的答案",
+  "consumedItemId": null,
+  "postcard": {"required": false, "scenePrompt": null}
+}

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$SCRIPT_DIR/travel-cat-launcher-lib.sh"
+
+case ${HOME-} in
+    /*) ;;
+    *) travel_cat_launcher_error "HOME must be an absolute path"; exit $? ;;
+esac
+travel_cat_reject_linked_ancestors "$HOME" || {
+    travel_cat_launcher_error "HOME has an unsafe linked ancestor"
+    exit $?
+}
+travel_cat_run_from_directories "$HOME/Applications" "/Applications" "$@"

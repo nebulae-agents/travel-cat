@@ -1,0 +1,20 @@
+{
+  "name": "travel-cat",
+  "version": "1.0.0",
+  "description": "Travel journal, postcards, and scheduled journeys for the default black cat or a compatible custom pet.",
+  "author": {
+    "name": "nebulae-agents"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["travel", "cat", "postcard", "desktop-pet"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Travel Cat",
+    "shortDescription": "让默认黑猫或自定义宠物定时旅行并寄回明信片",
+    "longDescription": "在一个持续的旅行日记任务中查看所选宠物的旅程、心情和明信片。",
+    "developerName": "nebulae-agents",
+    "category": "Lifestyle",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": ["当前旅程", "最新明信片", "旅行册"]
+  }
+}

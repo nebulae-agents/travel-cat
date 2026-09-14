@@ -1,0 +1,17 @@
+{
+  "due": true,
+  "snapshot": {
+    "schemaVersion": 1,
+    "stateVersion": 0,
+    "phase": "resting",
+    "nextActionAt": "2030-08-11T12:00:00.00000000000000000Z",
+    "lastUpdatedAt": "2030-08-11T11:00:00.00000000000000000Z",
+    "usedItemIDs": [],
+    "visitedPlaces": [],
+    "mood": {
+      "level": 0,
+      "label": "平静",
+      "quote": "今天适合慢一点。"
+    }
+  }
+}

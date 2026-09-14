@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "path": "Sources/TravelUI/Resources/Fonts/LXGWWenKaiLite-Light.ttf",
+      "bytes": 15612172,
+      "sha256": "b57d46de1db72c500a7f2ee374a66615f308e541627ec3623e9b9087e88d392e",
+      "reason": "Original bundled LXGW WenKai Lite font resource redistributed under the SIL Open Font License 1.1; see Sources/TravelUI/Resources/Fonts/OFL.txt."
+    },
+    {
+      "path": "Sources/TravelUI/Resources/Fonts/LXGWWenKaiLite-Medium.ttf",
+      "bytes": 13700636,
+      "sha256": "02eb0f8deed11b00481393f5720630ae1a44424f37f4157ea160a69a1c72a0b6",
+      "reason": "Original bundled LXGW WenKai Lite font resource redistributed under the SIL Open Font License 1.1; see Sources/TravelUI/Resources/Fonts/OFL.txt."
+    },
+    {
+      "path": "Sources/TravelUI/Resources/Fonts/LXGWWenKaiLite-Regular.ttf",
+      "bytes": 13872424,
+      "sha256": "140c99ba4e28e817cec49bf82a0c5fcdc4fe633fb9dfda16d0ee8d59a8545f15",
+      "reason": "Original bundled LXGW WenKai Lite font resource redistributed under the SIL Open Font License 1.1; see Sources/TravelUI/Resources/Fonts/OFL.txt."
+    }
+  ]
+}

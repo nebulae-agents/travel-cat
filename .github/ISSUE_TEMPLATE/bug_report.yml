@@ -1,0 +1,27 @@
+name: 问题反馈
+description: 报告经过脱敏的可复现问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿上传 .local、TravelPetData、私人图片、完整日志或凭据。安全漏洞请按 SECURITY.md 使用私密渠道报告。
+  - type: input
+    id: version
+    attributes:
+      label: 版本和环境
+      description: 源码提交、macOS 版本与芯片架构；不要填写私人目录。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤与预期结果
+      description: 使用虚构或脱敏数据，说明实际结果与预期差异。
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: 已检查事项
+      description: 相关测试结果、是否仅出现在真实界面或权限流程；不要粘贴未经脱敏的日志。

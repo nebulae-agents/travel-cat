@@ -1,0 +1,39 @@
+name: Source checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-checks:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      TRAVEL_CAT_SCRATCH_ROOT: ${{ runner.temp }}/travel-cat-swift
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify toolchain and offline source contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT
+          test -d "$DEVELOPER_DIR"
+          swift --version
+          python3 --version
+          node --version
+          python3 -m unittest discover -s Scripts/tests -p '*_tests.py'
+          Scripts/tests/project-upload-tools-tests.sh
+          Scripts/verify-travel-cat-plugin.sh
+          Scripts/verify-travel-cat-skill.sh
+          Scripts/verify-agent-contract.sh
+          Scripts/travel-cat-swift.sh test
+          Scripts/audit-project-upload.sh
