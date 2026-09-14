@@ -169,6 +169,17 @@ public enum PostcardMessagePlacementSearch {
                 }
             }
         }
+        // A square detail card can have a clear sky strip above the subject.
+        // Add only eight bounded candidates rather than multiplying the grid.
+        if profile == .detail {
+            for width: CGFloat in [0.92, 0.84] {
+                for height: CGFloat in [0.22, 0.20] {
+                    for y: CGFloat in [0.02, 0.98 - height] {
+                        result.append(CGRect(x: (1 - width) / 2, y: y, width: width, height: height))
+                    }
+                }
+            }
+        }
         return result
     }
 

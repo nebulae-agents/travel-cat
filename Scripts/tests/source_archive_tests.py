@@ -11,6 +11,17 @@ EXPORTER = Path(__file__).resolve().parents[1] / "export-source.py"
 
 
 class SourceArchiveTests(unittest.TestCase):
+    def test_public_ignore_rules_keep_formal_postcard_fixtures(self):
+        public_root = EXPORTER.parent.parent
+        self.write(".gitignore", (public_root / ".gitignore").read_text())
+        for path, ignored in (("postcards/private.png", True),
+                              ("Fixtures/Postcards/accepted-first.webp", False)):
+            result = subprocess.run(["git", "-C", str(self.repo), "-c", "core.excludesFile=/dev/null",
+                                     "check-ignore", "--no-index", "--", path],
+                                    capture_output=True, text=True)
+            self.assertIn(result.returncode, (0, 1))
+            self.assertEqual(result.returncode == 0, ignored, path)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="travel-cat-source-test-")
         self.addCleanup(self.temporary.cleanup)

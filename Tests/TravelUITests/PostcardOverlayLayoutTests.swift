@@ -441,11 +441,13 @@ final class PostcardOverlayLayoutTests: XCTestCase {
                 containerSize: size,
                 handwriting: .sereneSystemFallback
             )
-            let messageFrame = PostcardOverlayPresentation.frame(
+            let outerFrame = PostcardOverlayPresentation.frame(
                 for: region,
                 profile: .detail,
                 containerSize: size
-            ).insetBy(dx: 10, dy: 10)
+            )
+            let padding = PostcardOverlayTypography.messagePadding(profile: .detail, frame: outerFrame)
+            let messageFrame = outerFrame.insetBy(dx: padding, dy: padding)
             let placement = PostcardPawLayout.resolve(
                 message: message,
                 messageFrame: messageFrame,

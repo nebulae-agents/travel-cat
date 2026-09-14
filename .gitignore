@@ -1,6 +1,6 @@
 .DS_Store
 .local/
-postcards/
+/postcards/
 docs/verification/
 docs/superpowers/
 .env

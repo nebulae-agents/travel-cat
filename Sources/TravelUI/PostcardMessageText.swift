@@ -92,7 +92,8 @@ public struct PostcardMessageTextView: View {
 public extension PostcardOverlayLayout {
     func messageTextLayout(message: String, profile: PostcardOverlayProfile,
                            containerSize: CGSize) -> PostcardMessageLineLayout {
-        let padding: CGFloat = profile == .detail ? 10 : 4
+        let padding = PostcardOverlayTypography.messagePadding(profile: profile,
+            frame: messageFrame(profile: profile, containerSize: containerSize))
         let frame = messageFrame(profile: profile, containerSize: containerSize)
             .insetBy(dx: padding, dy: padding)
         return .resolve(message: message, frame: frame, fontSize: messageFontSize,

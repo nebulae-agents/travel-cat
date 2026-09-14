@@ -128,6 +128,10 @@ public struct PostcardLocationTypographyFit: Equatable, Sendable {
 }
 
 public enum PostcardOverlayTypography {
+    static func messagePadding(profile: PostcardOverlayProfile, frame: CGRect) -> CGFloat {
+        profile == .detail && frame.height >= 64 ? 10 : 4
+    }
+
     static func measurementFontTraits(
         fontSize: CGFloat,
         handwriting: PostcardHandwritingStyle
@@ -232,7 +236,7 @@ public enum PostcardOverlayTypography {
             baseBounds.lowerBound,
             baseBounds.upperBound * CGFloat(handwriting.sizeScale)
         )
-        let padding: CGFloat = profile == .detail ? 10 : 4
+        let padding = messagePadding(profile: profile, frame: frame)
         let availableWidth = max(frame.width - padding * 2, 1)
         // The larger detail face needs two points of SwiftUI fragment slack.
         // Compact's measured 12-point two-line text already fits a 29-point area;
@@ -1142,7 +1146,7 @@ public enum PostcardOverlaySolver {
             width: rect.width * containerSize.width,
             height: rect.height * containerSize.height
         )
-        let padding: CGFloat = profile == .detail ? 10 : 4
+        let padding = PostcardOverlayTypography.messagePadding(profile: profile, frame: outerFrame)
         let messageFrame = outerFrame.insetBy(dx: padding, dy: padding)
         let paw = PostcardPawLayout.resolve(
             message: message,
@@ -1489,12 +1493,13 @@ public enum PostcardOverlaySolver {
         handwriting: PostcardHandwritingStyle,
         protectedFrames: [CGRect] = []
     ) -> PostcardPawSignature {
-        let padding: CGFloat = profile == .detail ? 10 : 4
-        let messageFrame = PostcardOverlayPresentation.frame(
+        let outerFrame = PostcardOverlayPresentation.frame(
             for: region,
             profile: profile,
             containerSize: containerSize
-        ).insetBy(dx: padding, dy: padding)
+        )
+        let padding = PostcardOverlayTypography.messagePadding(profile: profile, frame: outerFrame)
+        let messageFrame = outerFrame.insetBy(dx: padding, dy: padding)
         let signatureBounds = protectedFrames.isEmpty ? nil : pawSignatureBounds(
             messageFrame: messageFrame,
             region: region,
@@ -1648,12 +1653,13 @@ public enum PostcardOverlaySolver {
             containerSize: containerSize,
             handwriting: handwriting
         )
-        let padding: CGFloat = profile == .detail ? 10 : 4
-        let frame = PostcardOverlayPresentation.frame(
+        let outerFrame = PostcardOverlayPresentation.frame(
             for: region,
             profile: profile,
             containerSize: containerSize
-        ).insetBy(dx: padding, dy: padding)
+        )
+        let padding = PostcardOverlayTypography.messagePadding(profile: profile, frame: outerFrame)
+        let frame = outerFrame.insetBy(dx: padding, dy: padding)
         let signatureBounds = pawProtectedFrames.isEmpty ? nil : pawSignatureBounds(
             messageFrame: frame,
             region: region,

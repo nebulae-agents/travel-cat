@@ -192,12 +192,16 @@ struct PostcardArtworkFrame<Artwork: View>: View {
     let height: CGFloat
     let profile: PostcardOverlayProfile
     let caption: String?
+    var imageSize: CGSize? = nil
     var handwriting: PostcardHandwritingStyle = .sereneSystemFallback
     @ViewBuilder let artwork: () -> Artwork
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            artwork().frame(height: height).clipped()
+            PostcardCanvasLayout(imageSize: imageSize, maximumHeight: height) {
+                artwork().clipped()
+            }
+            .clipShape(RoundedRectangle(cornerRadius: imageSize == nil ? 0 : 10))
             if let caption {
                 Text(caption)
                     .font(Font(PostcardOverlayTypography.measurementFont(
@@ -244,6 +248,7 @@ public struct PostcardArtworkView: View {
             height: height,
             profile: profile,
             caption: image != nil && messageBelowImage ? PostcardArtworkMetadata(event: event).visualMessage : nil,
+            imageSize: image.map { CGSize(width: $0.width, height: $0.height) },
             handwriting: PostcardMoodTypographyResolver().resolve(mood: event.mood)
         ) {
         GeometryReader { proxy in
