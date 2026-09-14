@@ -7,6 +7,21 @@ import XCTest
 @testable import TravelStorage
 
 final class PostcardPresentationStoreTests: XCTestCase {
+    func testViewportPreservesBytesAndLegacyAbsentField() throws {
+        let (root, event, path) = try fixture(); let store = PostcardPresentationStore(root: root)
+        let bytes = try png(width: 32, height: 16, alpha: 2)
+        let ref = try prepare(store, event, path, handwriting: .generated(bytes))
+        let loaded = try store.load(reference: ref, event: event, expectedSourceRelativePath: path)
+        XCTAssertEqual(loaded.handwritingData, bytes)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent(ref.relativePath))) as? [String: Any])
+        XCTAssertNotNil(object["handwritingViewport"])
+        object.removeValue(forKey: "handwritingViewport")
+        let legacy = try writeManifest(JSONSerialization.data(withJSONObject: object), root: root, ref: ref)
+        XCTAssertEqual(try store.load(reference: legacy, event: event, expectedSourceRelativePath: path).handwritingData, bytes)
+        object["handwritingViewport"] = ["x": 0.5, "y": 0.5, "width": 0.1, "height": 0.1]
+        let cropped = try writeManifest(JSONSerialization.data(withJSONObject: object), root: root, ref: ref)
+        XCTAssertThrowsError(try store.load(reference: cropped, event: event, expectedSourceRelativePath: path))
+    }
     func testRoundTripIsImmutableAndBindsExactQuote() throws {
         let (root, event, path) = try fixture()
         let store = PostcardPresentationStore(root: root)

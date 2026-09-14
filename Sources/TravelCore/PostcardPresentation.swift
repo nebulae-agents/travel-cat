@@ -46,10 +46,13 @@ public struct PostcardPresentationManifest: Codable, Equatable, Sendable {
     public let styleVersion: String
     public let placement: PostcardPresentationRect
     public let handwriting: PostcardPresentationHandwriting
+    /// Top-left normalized source pixel viewport; absence means the entire original PNG.
+    public let handwritingViewport: PostcardPresentationRect?
 
-    public init(schemaVersion: Int = 1, eventID: UUID, tripID: UUID, source: PostcardPresentationAsset, landscape: PostcardPresentationAsset, quote: String, quoteSHA256: String, styleVersion: String, placement: PostcardPresentationRect, handwriting: PostcardPresentationHandwriting) {
+    public init(schemaVersion: Int = 1, eventID: UUID, tripID: UUID, source: PostcardPresentationAsset, landscape: PostcardPresentationAsset, quote: String, quoteSHA256: String, styleVersion: String, placement: PostcardPresentationRect, handwriting: PostcardPresentationHandwriting, handwritingViewport: PostcardPresentationRect? = nil) {
         self.schemaVersion = schemaVersion; self.eventID = eventID; self.tripID = tripID
         self.source = source; self.landscape = landscape; self.quote = quote; self.quoteSHA256 = quoteSHA256
         self.styleVersion = styleVersion; self.placement = placement; self.handwriting = handwriting
+        self.handwritingViewport = handwritingViewport
     }
 }

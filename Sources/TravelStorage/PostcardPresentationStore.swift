@@ -9,6 +9,20 @@ public enum PostcardPresentationError: Error { case unsafePath, unsafeFile, chan
 
 /// Prepares immutable artifacts only. Repository code owns publication and reference selection.
 public struct PostcardPresentationStore: Sendable {
+    public struct HandwritingRaster: Sendable {
+        public let image: CGImage
+        public let width: Int
+        public let height: Int
+        /// Integer pixel bounds in top-left source coordinates.
+        public let inkBounds: CGRect
+        public let paddedViewport: PostcardPresentationRect
+        public let maximumAlpha: UInt8
+    }
+
+    public static func inspectHandwriting(_ data: Data) throws -> HandwritingRaster {
+        try Task.checkCancellation()
+        return try validateImage(data, path: "ink.png", landscape: false, handwriting: true)!
+    }
     public enum HandwritingInput: Sendable {
         case generated(Data)
         case localFallback(PostcardHandwritingFallbackReason)
@@ -33,7 +47,8 @@ public struct PostcardPresentationStore: Sendable {
         try Self.validateImage(sourceData, path: sourcePath, landscape: false, handwriting: false)
         let landscapeData = derivedLandscapeData ?? sourceData
         try Self.validateImage(landscapeData, path: derivedLandscapeData == nil ? sourcePath : "derived.png", landscape: true, handwriting: false)
-        if case let .generated(data) = handwriting { try Self.validateImage(data, path: "ink.png", landscape: false, handwriting: true) }
+        var viewport: PostcardPresentationRect?
+        if case let .generated(data) = handwriting { viewport = try Self.inspectHandwriting(data).paddedViewport }
         try Task.checkCancellation()
         let prefix = "postcards/\(event.tripID.uuidString.lowercased())"
         try files.ensureDirectory(prefix)
@@ -46,7 +61,7 @@ public struct PostcardPresentationStore: Sendable {
         case let .generated(data): ink = .generated(try files.writeAsset(data, prefix: prefix, suffix: "handwriting.png"))
         case let .localFallback(reason): ink = .localFallback(reason)
         }
-        let manifest = PostcardPresentationManifest(eventID: event.id, tripID: event.tripID, source: source, landscape: landscape, quote: event.mood.quote, quoteSHA256: Self.digest(Data(event.mood.quote.utf8)), styleVersion: styleVersion, placement: placement, handwriting: ink)
+        let manifest = PostcardPresentationManifest(eventID: event.id, tripID: event.tripID, source: source, landscape: landscape, quote: event.mood.quote, quoteSHA256: Self.digest(Data(event.mood.quote.utf8)), styleVersion: styleVersion, placement: placement, handwriting: ink, handwritingViewport: viewport)
         let data = try JSONEncoder().encode(manifest)
         guard data.count <= Self.maximumManifestBytes else { throw PostcardPresentationError.invalidManifest }
         try files.revalidate()
@@ -83,7 +98,10 @@ public struct PostcardPresentationStore: Sendable {
             if asset.relativePath != sourcePath { try Self.checkCanonical(asset.relativePath, prefix: prefix, extensions: ["png", "webp"]) }
             let data = try files.read(asset.relativePath == sourcePath ? Self.physicalSourcePath(sourcePath) : asset.relativePath, limit: Self.maximumImageBytes)
             guard Self.digest(data) == asset.sha256 else { throw PostcardPresentationError.invalidBinding }
-            try Self.validateImage(data, path: asset.relativePath, landscape: landscape, handwriting: ink)
+            let raster = try Self.validateImage(data, path: asset.relativePath, landscape: landscape, handwriting: ink)
+            if ink, let viewport = manifest.handwritingViewport {
+                guard viewport.isValid, viewport == raster?.paddedViewport else { throw PostcardPresentationError.invalidManifest }
+            }
             return data
         }
         let source = try readAsset(manifest.source, landscape: false, ink: false)
@@ -91,7 +109,9 @@ public struct PostcardPresentationStore: Sendable {
         let handwriting: Data?
         switch manifest.handwriting {
         case let .generated(asset): handwriting = try readAsset(asset, landscape: false, ink: true)
-        case .localFallback: handwriting = nil
+        case .localFallback:
+            guard manifest.handwritingViewport == nil else { throw PostcardPresentationError.invalidManifest }
+            handwriting = nil
         }
         try files.revalidate()
         return try body(ValidatedPresentation(manifest: manifest, sourceData: source, landscapeData: landscape, handwritingData: handwriting), { try files.revalidate() })
@@ -124,7 +144,9 @@ public struct PostcardPresentationStore: Sendable {
               extensions.contains((parts[2] as NSString).pathExtension) else { throw PostcardPresentationError.unsafePath }
     }
 
-    private static func validateImage(_ data: Data, path: String, landscape: Bool, handwriting: Bool) throws {
+    @discardableResult
+    private static func validateImage(_ data: Data, path: String, landscape: Bool, handwriting: Bool) throws -> HandwritingRaster? {
+        try Task.checkCancellation()
         if (path as NSString).pathExtension == "png" {
             guard data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]),
                   data.suffix(12).elementsEqual([0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]) else { throw PostcardPresentationError.invalidImage }
@@ -151,15 +173,24 @@ public struct PostcardPresentationStore: Sendable {
             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
             guard let pixels = context.data?.assumingMemoryBound(to: UInt8.self) else { throw PostcardPresentationError.invalidImage }
             var minimumX = width; var minimumY = height; var maximumX = -1; var maximumY = -1
+            var maximumAlpha: UInt8 = 0
             for y in 0..<height {
+                if y.isMultiple(of: 64) { try Task.checkCancellation() }
                 for x in 0..<width where pixels[(y * width + x) * 4 + 3] > 0 {
+                    maximumAlpha = max(maximumAlpha, pixels[(y * width + x) * 4 + 3])
                     minimumX = min(minimumX, x); minimumY = min(minimumY, y)
                     maximumX = max(maximumX, x); maximumY = max(maximumY, y)
                 }
             }
             guard maximumX >= minimumX, maximumY >= minimumY,
                   minimumX > 0, minimumY > 0, maximumX < width - 1, maximumY < height - 1 else { throw PostcardPresentationError.invalidImage }
+            let left = max(0, minimumX - 2), top = max(0, minimumY - 2)
+            let right = min(width, maximumX + 3), bottom = min(height, maximumY + 3)
+            return HandwritingRaster(image: image, width: width, height: height,
+                inkBounds: CGRect(x: minimumX, y: minimumY, width: maximumX - minimumX + 1, height: maximumY - minimumY + 1),
+                paddedViewport: .init(x: Double(left) / Double(width), y: Double(top) / Double(height), width: Double(right - left) / Double(width), height: Double(bottom - top) / Double(height)), maximumAlpha: maximumAlpha)
         }
+        return nil
     }
 }
 
