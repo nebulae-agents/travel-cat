@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import SwiftUI
 import TravelCore
 
@@ -91,6 +92,14 @@ public enum PostcardAnalysisCachePolicy {
 }
 
 struct PostcardArtworkLoadIdentity {
+    static func requestID(event: TripEvent, rootURL: URL?, reference: PostcardPresentationReference?) -> String {
+        let quoteDigest = SHA256.hash(data: Data(event.mood.quote.utf8)).map { String(format: "%02x", $0) }.joined()
+        return [
+            rootURL?.standardizedFileURL.path ?? "", event.postcardRelativePath ?? "",
+            event.id.uuidString, event.tripID.uuidString, quoteDigest,
+            reference?.relativePath ?? "", reference?.sha256 ?? "",
+        ].joined(separator: "\u{0}")
+    }
     static func shouldPublish(requestID: String, currentID: String) -> Bool {
         requestID == currentID
     }
@@ -193,16 +202,22 @@ struct PostcardArtworkFrame<Artwork: View>: View {
     let profile: PostcardOverlayProfile
     let caption: String?
     var imageSize: CGSize? = nil
+    var hasPresentation = false
+    var isGeneratedPresentation = false
     var handwriting: PostcardHandwritingStyle = .sereneSystemFallback
     @ViewBuilder let artwork: () -> Artwork
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            PostcardCanvasLayout(imageSize: imageSize, maximumHeight: height) {
+            PostcardCanvasLayout(
+                imageSize: hasPresentation ? CGSize(width: 3, height: 2) : imageSize,
+                maximumHeight: hasPresentation && profile == .compact
+                    ? max(height, TripAlbumLayout.readableCompactArtworkWidth / 1.5) : height
+            ) {
                 artwork().clipped()
             }
             .clipShape(RoundedRectangle(cornerRadius: imageSize == nil ? 0 : 10))
-            if let caption {
+            if let caption, !isGeneratedPresentation {
                 Text(caption)
                     .font(Font(PostcardOverlayTypography.measurementFont(
                         fontSize: profile == .detail ? 18 : 13,
@@ -224,18 +239,24 @@ public struct PostcardArtworkView: View {
     public let rootURL: URL?
     public let height: CGFloat
     public let profile: PostcardOverlayProfile
+    public let presentationReference: PostcardPresentationReference?
 
     @State private var image: CGImage?
     @State private var analysis: PostcardVisualAnalysis?
     @State private var analysisFailed = false
     @State private var currentRequestID = ""
     @State private var messageBelowImage = true
+    @State private var handwritingImage: CGImage?
+    @State private var presentationManifest: PostcardPresentationManifest?
+    @State private var showsFallbackIndicator = false
+    @State private var canvasWidth: CGFloat = 0
 
-    public init(event: TripEvent, rootURL: URL?, height: CGFloat, profile: PostcardOverlayProfile) {
+    public init(event: TripEvent, rootURL: URL?, height: CGFloat, profile: PostcardOverlayProfile, presentationReference: PostcardPresentationReference? = nil) {
         self.event = event
         self.rootURL = rootURL
         self.height = height
         self.profile = profile
+        self.presentationReference = presentationReference
     }
 
     public static func accessibilityText(event: TripEvent) -> String {
@@ -244,13 +265,34 @@ public struct PostcardArtworkView: View {
     }
 
     public var body: some View {
-        PostcardArtworkFrame(
-            height: height,
-            profile: profile,
-            caption: image != nil && messageBelowImage ? PostcardArtworkMetadata(event: event).visualMessage : nil,
-            imageSize: image.map { CGSize(width: $0.width, height: $0.height) },
-            handwriting: PostcardMoodTypographyResolver().resolve(mood: event.mood)
-        ) {
+        VStack(alignment: .leading, spacing: 4) {
+            PostcardArtworkFrame(
+                height: height,
+                profile: profile,
+                caption: image != nil && messageBelowImage ? PostcardArtworkMetadata(event: event).visualMessage : nil,
+                imageSize: image.map { CGSize(width: $0.width, height: $0.height) },
+                hasPresentation: presentationManifest != nil,
+                isGeneratedPresentation: handwritingImage != nil,
+                handwriting: PostcardMoodTypographyResolver().resolve(mood: event.mood)
+            ) {
+                artworkCanvas
+            }
+            if showsFallbackIndicator {
+                Text(image == nil ? "明信片图片暂不可用" : "手写暂不可用 · 已显示备用版本")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if handwritingImage != nil && profile == .compact && canvasWidth > 0
+                && canvasWidth < TripAlbumLayout.readableCompactArtworkWidth {
+                Text("点开大图阅读").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Self.accessibilityText(event: event))
+        .task(id: taskID) { await loadArtwork() }
+    }
+
+    private var artworkCanvas: some View {
         GeometryReader { proxy in
             let metadata = PostcardArtworkMetadata(event: event)
             let imageGeometry = resolvedImageGeometry(containerSize: proxy.size)
@@ -259,7 +301,7 @@ public struct PostcardArtworkView: View {
                 containerSize: visibleCanvas.size,
                 geometry: imageGeometry
             )
-            let previewCat = Self.previewCatDescriptor(event: event, rootURL: rootURL)
+            let previewCat = presentationManifest == nil ? Self.previewCatDescriptor(event: event, rootURL: rootURL) : nil
             ZStack {
                 Color.blue.opacity(0.12)
                 if let image, let imageGeometry {
@@ -271,7 +313,17 @@ public struct PostcardArtworkView: View {
                             profile: profile
                         )
                     }
-                    if overlayLayout.messagePlacement == .onImage {
+                    if let handwritingImage, let presentationManifest {
+                        let placement = presentationManifest.placement
+                        let frame = Self.rect(for: CGRect(x: placement.x, y: placement.y, width: placement.width, height: placement.height), in: visibleCanvas.size)
+                        Image(decorative: handwritingImage, scale: 1)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: frame.width, height: frame.height)
+                            .position(x: visibleCanvas.minX + frame.midX, y: visibleCanvas.minY + frame.midY)
+                        locationOverlay(metadata: metadata, layout: overlayLayout, containerSize: visibleCanvas.size)
+                            .position(x: visibleCanvas.midX, y: visibleCanvas.midY)
+                    } else if overlayLayout.messagePlacement == .onImage {
                         overlay(
                             metadata: metadata,
                             layout: overlayLayout,
@@ -285,15 +337,11 @@ public struct PostcardArtworkView: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .clipped()
+            .onChange(of: visibleCanvas.width, initial: true) { _, width in canvasWidth = width }
             .onChange(of: overlayLayout.messagePlacement, initial: true) { _, placement in
                 messageBelowImage = placement == .belowImage
             }
         }
-        }
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Self.accessibilityText(event: event))
-        .task(id: taskID) { await loadArtwork() }
     }
 
     @ViewBuilder
@@ -302,34 +350,14 @@ public struct PostcardArtworkView: View {
         layout: PostcardOverlayLayout,
         containerSize: CGSize
     ) -> some View {
-        let locationRect = Self.rect(for: layout.locationRect, in: containerSize)
         let messageRect = layout.messageFrame(profile: profile, containerSize: containerSize)
         let messageTextLayout = layout.messageTextLayout(
             message: metadata.visualMessage,
             profile: profile,
             containerSize: containerSize
         )
-        let locationFit = PostcardOverlayTypography.locationFit(
-            label: metadata.locationLabel,
-            region: layout.locationRegion,
-            profile: profile,
-            containerSize: containerSize
-        )
         ZStack(alignment: .topLeading) {
-            if layout.showsLocationLabel, let locationInk = layout.locationInkStyle {
-                PostcardLocationLabelView(
-                    label: metadata.locationLabel,
-                    profile: profile,
-                    minimumScaleFactor: locationFit.minimumScaleFactor,
-                    ink: locationInk
-                )
-                .frame(
-                    width: locationRect.width,
-                    height: locationRect.height,
-                    alignment: Self.alignment(for: layout.locationRegion)
-                )
-                .position(x: locationRect.midX, y: locationRect.midY)
-            }
+            locationOverlay(metadata: metadata, layout: layout, containerSize: containerSize)
 
             ZStack {
                 LinearGradient(
@@ -358,12 +386,26 @@ public struct PostcardArtworkView: View {
         .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
     }
 
+    @ViewBuilder
+    private func locationOverlay(metadata: PostcardArtworkMetadata, layout: PostcardOverlayLayout, containerSize: CGSize) -> some View {
+        let locationRect = Self.rect(for: layout.locationRect, in: containerSize)
+        let fit = PostcardOverlayTypography.locationFit(label: metadata.locationLabel, region: layout.locationRegion, profile: profile, containerSize: containerSize)
+        ZStack(alignment: .topLeading) {
+            if layout.showsLocationLabel, let locationInk = layout.locationInkStyle {
+                PostcardLocationLabelView(label: metadata.locationLabel, profile: profile, minimumScaleFactor: fit.minimumScaleFactor, ink: locationInk)
+                    .frame(width: locationRect.width, height: locationRect.height, alignment: Self.alignment(for: layout.locationRegion))
+                    .position(x: locationRect.midX, y: locationRect.midY)
+            }
+        }
+        .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
+    }
+
     private func resolvedImageGeometry(containerSize: CGSize) -> PostcardImageGeometry? {
         guard let image else { return nil }
         return PostcardImageGeometry(
-            imageSize: CGSize(width: image.width, height: image.height),
+            imageSize: presentationManifest != nil ? CGSize(width: 3, height: 2) : CGSize(width: image.width, height: image.height),
             containerSize: containerSize,
-            analysis: analysisFailed ? nil : analysis
+            analysis: presentationManifest != nil || analysisFailed ? nil : analysis
         )
     }
 
@@ -380,7 +422,7 @@ public struct PostcardArtworkView: View {
         }
 
         let resolvedAnalysis: PostcardVisualAnalysis?
-        if let previewCat = Self.previewCatDescriptor(event: event, rootURL: rootURL), let displayedAnalysis {
+        if presentationManifest == nil, let previewCat = Self.previewCatDescriptor(event: event, rootURL: rootURL), let displayedAnalysis {
             let frame = previewCat.placement.frame(
                 in: geometry?.containerSize ?? containerSize,
                 sourceAspectRatio: PreviewBlackCatPlacement.authorizedSourceAspectRatio
@@ -393,6 +435,13 @@ public struct PostcardArtworkView: View {
             resolvedAnalysis = displayedAnalysis.protecting(normalizedCatRect)
         } else {
             resolvedAnalysis = displayedAnalysis
+        }
+        if handwritingImage != nil, let placement = presentationManifest?.placement, let resolvedAnalysis {
+            return PostcardOverlaySolver.presentationLocation(
+                analysis: resolvedAnalysis, label: metadata.locationLabel,
+                handwritingRect: CGRect(x: placement.x, y: placement.y, width: placement.width, height: placement.height),
+                profile: profile, containerSize: containerSize
+            )
         }
 
         return PostcardArtworkLayoutResolver.resolve(
@@ -407,19 +456,40 @@ public struct PostcardArtworkView: View {
         let requestID = taskID
         currentRequestID = requestID
         image = nil
+        handwritingImage = nil
+        presentationManifest = nil
+        showsFallbackIndicator = false
         analysis = nil
         analysisFailed = false
         messageBelowImage = true
-        guard let relativePath = event.postcardRelativePath, let rootURL else { return }
+        guard let relativePath = event.postcardRelativePath, let rootURL else {
+            showsFallbackIndicator = presentationReference != nil
+            return
+        }
         do {
-            let loaded = try await PostcardImageCache.shared.image(relativePath: relativePath, rootURL: rootURL)
+            let loaded: CGImage
+            if presentationReference != nil {
+                let result = try await PostcardPresentationLoader.load(event: event, rootURL: rootURL, reference: presentationReference)
+                try Task.checkCancellation()
+                guard PostcardArtworkLoadIdentity.shouldPublish(requestID: requestID, currentID: currentRequestID) else { return }
+                loaded = result.image
+                handwritingImage = result.handwriting
+                presentationManifest = result.manifest
+                showsFallbackIndicator = result.showsFallbackIndicator
+            } else {
+                loaded = try await PostcardImageCache.shared.image(relativePath: relativePath, rootURL: rootURL)
+            }
             try Task.checkCancellation()
             guard PostcardArtworkLoadIdentity.shouldPublish(requestID: requestID, currentID: currentRequestID) else { return }
             image = loaded
             do {
-                let result = try await PostcardAnalysisCache.shared.analysis(
-                    for: loaded, rootURL: rootURL, relativePath: relativePath
-                )
+                let result: PostcardVisualAnalysis
+                if presentationReference != nil {
+                    let work = Task.detached { try PostcardVisualAnalyzer.analyze(loaded) }
+                    result = try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+                } else {
+                    result = try await PostcardAnalysisCache.shared.analysis(for: loaded, rootURL: rootURL, relativePath: relativePath)
+                }
                 try Task.checkCancellation()
                 guard PostcardArtworkLoadIdentity.shouldPublish(requestID: requestID, currentID: currentRequestID) else { return }
                 analysis = result
@@ -432,11 +502,12 @@ public struct PostcardArtworkView: View {
             guard !Task.isCancelled,
                   PostcardArtworkLoadIdentity.shouldPublish(requestID: requestID, currentID: currentRequestID) else { return }
             image = nil
+            showsFallbackIndicator = presentationReference != nil
         }
     }
 
     private var taskID: String {
-        (rootURL?.standardizedFileURL.path ?? "") + "\u{0}" + (event.postcardRelativePath ?? "")
+        PostcardArtworkLoadIdentity.requestID(event: event, rootURL: rootURL, reference: presentationReference)
     }
 
     private static func rect(

@@ -7,6 +7,40 @@ import TravelCore
 
 @MainActor
 final class PostcardCanvasRegressionTests: XCTestCase {
+    func testGeneratedLocationUsesStoredInkAndCatProtectionWithoutOrdinaryMessagePlacement() {
+        let cat = CGRect(x: 0.6, y: 0.3, width: 0.4, height: 0.7)
+        let ink = CGRect(x: 0, y: 0, width: 0.5, height: 0.7)
+        let analysis = PostcardVisualAnalysis(salientRegions: [], samples: .uniform(luminance: 0.9, red: 0.9, green: 0.9, blue: 0.9), foregroundRegions: [cat])
+        for profile in [PostcardOverlayProfile.compact, .detail] {
+            let layout = PostcardOverlaySolver.presentationLocation(analysis: analysis, label: "杭州", handwritingRect: ink, profile: profile, containerSize: CGSize(width: 345, height: 230))
+            XCTAssertTrue(layout.showsLocationLabel)
+            XCTAssertFalse(layout.locationSafetyRect.intersects(ink))
+            XCTAssertFalse(layout.locationSafetyRect.intersects(cat))
+        }
+    }
+    func testGeneratedLocationNeedsReliableForegroundBeforeDeclaringAnAreaSafe() {
+        let analysis = PostcardVisualAnalysis(salientRegions: [], samples: .uniform(luminance: 0.9, red: 0.9, green: 0.9, blue: 0.9))
+        let layout = PostcardOverlaySolver.presentationLocation(analysis: analysis, label: "杭州", handwritingRect: CGRect(x: 0, y: 0, width: 0.4, height: 0.4), profile: .compact, containerSize: CGSize(width: 320, height: 320 / 1.5))
+        XCTAssertFalse(layout.showsLocationLabel, "Ink protection cannot stand in for a detected cat boundary")
+    }
+    func testAcceptedLocalFontFallbackExpandsCanvasButKeepsQuote() throws {
+        let view = PostcardArtworkFrame(height: 120, profile: .compact, caption: "备用文字", imageSize: CGSize(width: 1024, height: 683), hasPresentation: true) { Color.red }
+        let renderer = ImageRenderer(content: view)
+        renderer.proposedSize = ProposedViewSize(width: 340, height: nil)
+        let image = try XCTUnwrap(renderer.cgImage)
+        XCTAssertGreaterThanOrEqual(image.width, 320)
+        XCTAssertGreaterThan(image.height, 214)
+    }
+    func testGeneratedCanvasUsesActualReadableWidthAndSuppressesOrdinaryCaption() throws {
+        for (width, expectedWidth, profile, height) in [(CGFloat(340), 320, PostcardOverlayProfile.compact, CGFloat(120)), (280, 280, .compact, 120), (456, 345, .detail, 230)] {
+            let view = PostcardArtworkFrame(height: height, profile: profile, caption: "MUST NOT APPEAR", imageSize: CGSize(width: 1500, height: 1000), hasPresentation: true, isGeneratedPresentation: true) { Color.red }
+            let renderer = ImageRenderer(content: view)
+            renderer.proposedSize = ProposedViewSize(width: width, height: nil)
+            let image = try XCTUnwrap(renderer.cgImage)
+            XCTAssertEqual(image.width, expectedWidth)
+            XCTAssertEqual(image.height, Int(ceil(Double(expectedWidth) / 1.5)))
+        }
+    }
     func testSquareArtworkDoesNotPaintWideSideGutters() throws {
         let view = PostcardArtworkFrame(height: 230, profile: .detail, caption: nil,
             imageSize: CGSize(width: 1024, height: 1024)) { Color.red }

@@ -7,6 +7,19 @@ import TravelUI
 @testable import TravelCatApp
 
 final class TravelCatAppSourceContractTests: XCTestCase {
+    func testAcceptedPresentationReferencesReachFormalAndTestRoutes() throws {
+        let app = try appSource()
+        let settings = try settingsSource()
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let views = try String(contentsOf: root.appendingPathComponent("Sources/TravelUI/TravelViews.swift"), encoding: .utf8)
+        XCTAssertTrue(app.contains("presentationReferences: loaded.presentationReferences"))
+        XCTAssertTrue(settings.contains("presentationReferences: contents.presentationReferences"))
+        for source in [app, views] {
+            XCTAssertTrue(source.contains("presentationReference: model.presentationReferences[event.id]"))
+            XCTAssertTrue(source.contains("presentationReferences: model.presentationReferences"))
+        }
+        XCTAssertTrue(views.contains("presentationReference: presentationReferences[event.id]"))
+    }
     func testApplicationHasNoLegacyHostPermissionOrLocatorEntryPoints() throws {
         let app = try appSource()
         for legacy in ["CodexPetContextMenuCoordinator", "CodexPetLocator", "contextMenuPermissionState", "enableCodexPetTravelMenu"] {

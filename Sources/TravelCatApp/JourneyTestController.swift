@@ -434,10 +434,11 @@ final class JourneyTestController: ObservableObject {
       {
         model.apply(
           next: contents.snapshot, events: contents.events,
+          presentationReferences: contents.presentationReferences,
           characterProfile: contents.characterProfile)
       } else {
         model = AppModel(
-          snapshot: contents.snapshot, events: contents.events, dataRoot: repository.root,
+          snapshot: contents.snapshot, events: contents.events, presentationReferences: contents.presentationReferences, dataRoot: repository.root,
           defaults: UserDefaults(
             suiteName: "JourneyTest.\(session?.id.uuidString ?? UUID().uuidString)")!,
           characterProfile: contents.characterProfile)

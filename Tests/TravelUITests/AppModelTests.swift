@@ -5,6 +5,21 @@ import TravelCore
 
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testAcceptedPresentationReferencesRefreshAtSameVersionAndPruneRemovedEvents() {
+        let event = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let snapshot = makeSnapshot(phase: .resting)
+        let first = PostcardPresentationReference(relativePath: "first.json", sha256: "first")
+        let second = PostcardPresentationReference(relativePath: "second.json", sha256: "second")
+        let model = AppModel(snapshot: snapshot, events: [event], presentationReferences: [event.id: first], defaults: isolatedDefaults(), supplies: [])
+        XCTAssertEqual(model.presentationReferences[event.id], first)
+        model.apply(next: snapshot, events: [event], presentationReferences: [event.id: second])
+        XCTAssertEqual(model.presentationReferences[event.id], second)
+        model.apply(next: snapshot, events: [])
+        XCTAssertTrue(model.presentationReferences.isEmpty)
+        model.apply(next: snapshot, events: [event], presentationReferences: [event.id: first])
+        model.replaceAfterHistoryClear(next: snapshot, events: [])
+        XCTAssertTrue(model.presentationReferences.isEmpty)
+    }
     private let tripID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
     private let firstID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
     private let secondID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!

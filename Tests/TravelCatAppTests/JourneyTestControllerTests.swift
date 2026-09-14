@@ -29,6 +29,7 @@ struct JourneyTestControllerTests {
         let card = try #require(contents.events.first { $0.phase == .postcardReady })
         #expect(card.postcardStatus == .ready)
         let ref = try #require(contents.presentationReferences[card.id])
+        #expect(controller.model?.presentationReferences[card.id] == ref)
         let physical = try #require(realpath(session.root.path, nil))
         defer { free(physical) }
         let store = PostcardPresentationStore(root: URL(fileURLWithPath: String(cString: physical)))

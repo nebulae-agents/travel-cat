@@ -21,6 +21,7 @@ public final class AppModel: ObservableObject {
     public typealias SupplyPersistence = @MainActor (String?) throws -> TripSnapshot
     @Published public private(set) var snapshot: TripSnapshot
     @Published public private(set) var events: [TripEvent]
+    @Published public private(set) var presentationReferences: [UUID: PostcardPresentationReference]
     @Published public private(set) var unreadPostcardIDs: [UUID]
     @Published public private(set) var readPostcardIDs: [UUID]
     @Published public private(set) var presentation: PetPresentation
@@ -39,6 +40,7 @@ public final class AppModel: ObservableObject {
     public init(
         snapshot: TripSnapshot,
         events: [TripEvent] = [],
+        presentationReferences: [UUID: PostcardPresentationReference] = [:],
         dataRoot: URL? = nil,
         defaults: UserDefaults = .standard,
         supplies: [Supply] = SupplyCatalog.loadOrEmpty(),
@@ -48,6 +50,7 @@ public final class AppModel: ObservableObject {
     ) {
         self.snapshot = snapshot
         self.events = events
+        self.presentationReferences = presentationReferences.filter { id, _ in events.contains { $0.id == id } }
         self.dataRoot = dataRoot
         self.defaults = defaults
         self.supplies = supplies
@@ -80,7 +83,7 @@ public final class AppModel: ObservableObject {
         unreadPostcardIDs.first
     }
 
-    public func apply(next: TripSnapshot, events: [TripEvent], characterProfile: CharacterProfile? = nil) {
+    public func apply(next: TripSnapshot, events: [TripEvent], presentationReferences: [UUID: PostcardPresentationReference]? = nil, characterProfile: CharacterProfile? = nil) {
         guard next.stateVersion >= snapshot.stateVersion else { return }
         let wasBase = presentation == basePresentation
         if next.stateVersion > snapshot.stateVersion {
@@ -93,6 +96,7 @@ public final class AppModel: ObservableObject {
             }
         }
         self.events = events
+        self.presentationReferences = (presentationReferences ?? self.presentationReferences).filter { id, _ in events.contains { $0.id == id } }
         if let characterProfile { self.characterProfile = characterProfile }
         refreshUnread()
         let arrived = arrivedEvents()
@@ -120,6 +124,7 @@ public final class AppModel: ObservableObject {
     public func replaceAfterHistoryClear(next: TripSnapshot, events: [TripEvent], characterProfile: CharacterProfile? = nil) {
         snapshot = next
         self.events = events
+        presentationReferences = [:]
         if let characterProfile { self.characterProfile = characterProfile }
         refreshUnread()
         postcardReturnPresentation = .status

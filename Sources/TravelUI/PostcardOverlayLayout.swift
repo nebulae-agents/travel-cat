@@ -1095,6 +1095,36 @@ public enum PostcardArtworkLayoutResolver {
 }
 
 public enum PostcardOverlaySolver {
+    /// Reuses the existing location safety and contrast evaluator without
+    /// inventing a second ordinary-message rectangle for generated handwriting.
+    static func presentationLocation(
+        analysis: PostcardVisualAnalysis,
+        label: String,
+        handwritingRect: CGRect,
+        profile: PostcardOverlayProfile,
+        containerSize: CGSize
+    ) -> PostcardOverlayLayout {
+        let subjects = analysis.protectedRegions + analysis.foregroundRegions
+        let protected = subjects.reduce(analysis) {
+            $0.protecting($1.insetBy(dx: -0.015, dy: -0.015))
+        }.protecting(handwritingRect)
+        let location = analysis.samples.isValid && !subjects.isEmpty
+            ? bestLocation(label: label, messageRect: handwritingRect,
+                           analysis: protected, profile: profile, containerSize: containerSize)
+            : nil
+        return PostcardOverlayLayout(
+            locationRegion: location?.candidate.safety.region ?? .topLeading,
+            locationRect: location?.candidate.contentRect ?? .zero,
+            locationSafetyRect: location?.candidate.safety.rect ?? .zero,
+            showsLocationLabel: location != nil,
+            locationInkStyle: location?.inkStyle,
+            messageRegion: .topLeading,
+            messageFontSize: 13,
+            inkStyle: PostcardInkResolver.unknownStyle,
+            accent: analysis.samples.average(in: location?.candidate.contentRect ?? handwritingRect)
+        )
+    }
+
     private struct Candidate {
         let region: PostcardOverlayRegion
         let rect: CGRect

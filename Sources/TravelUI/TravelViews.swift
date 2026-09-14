@@ -374,6 +374,7 @@ public struct StatusBubbleView: View {
 @MainActor
 public struct PostcardView: View {
     private let event: TripEvent
+    private let presentationReference: PostcardPresentationReference?
     private let rootURL: URL?
     private let open: (PetPresentation) -> Void
     private let back: PetPresentation
@@ -381,10 +382,12 @@ public struct PostcardView: View {
     public init(
         event: TripEvent,
         rootURL: URL? = nil,
+        presentationReference: PostcardPresentationReference? = nil,
         back: PetPresentation = .status,
         open: @escaping (PetPresentation) -> Void
     ) {
         self.event = event
+        self.presentationReference = presentationReference
         self.rootURL = rootURL
         self.back = back
         self.open = open
@@ -404,7 +407,7 @@ public struct PostcardView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    PostcardArtworkView(event: event, rootURL: rootURL, height: 230, profile: .detail)
+                    PostcardArtworkView(event: event, rootURL: rootURL, height: 230, profile: .detail, presentationReference: presentationReference)
                     .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     Text(PostcardDisplayLocation().resolveCompact(event.location))
@@ -436,6 +439,7 @@ public struct PostcardView: View {
 public struct TripAlbumView: View {
     private let tripID: UUID
     private let events: [TripEvent]
+    private let presentationReferences: [UUID: PostcardPresentationReference]
     private let rootURL: URL?
     private let calendar: Calendar
     private let now: Date
@@ -445,12 +449,14 @@ public struct TripAlbumView: View {
         tripID: UUID,
         events: [TripEvent],
         rootURL: URL? = nil,
+        presentationReferences: [UUID: PostcardPresentationReference] = [:],
         calendar: Calendar = .autoupdatingCurrent,
         now: Date = Date(),
         open: @escaping (PetPresentation) -> Void
     ) {
         self.tripID = tripID
         self.events = events
+        self.presentationReferences = presentationReferences
         self.rootURL = rootURL
         self.calendar = calendar
         self.now = now
@@ -544,7 +550,7 @@ public struct TripAlbumView: View {
                                     ) {
                                         ForEach(group.events) { event in
                                             Button { open(Self.postcardDestination(for: event)) } label: {
-                                                AlbumCard(event: event, rootURL: rootURL)
+                                                AlbumCard(event: event, rootURL: rootURL, presentationReference: presentationReferences[event.id])
                                             }
                                             .buttonStyle(.plain)
                                         }
@@ -616,10 +622,11 @@ public enum TripAlbumLayout {
 private struct AlbumCard: View {
     let event: TripEvent
     let rootURL: URL?
+    var presentationReference: PostcardPresentationReference? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            PostcardArtworkView(event: event, rootURL: rootURL, height: TripAlbumLayout.artworkHeight, profile: .compact)
+            PostcardArtworkView(event: event, rootURL: rootURL, height: TripAlbumLayout.artworkHeight, profile: .compact, presentationReference: presentationReference)
             Text(PostcardDisplayLocation().resolveCompact(event.location))
                 .font(.headline)
                 .lineLimit(1)
@@ -762,7 +769,8 @@ public struct PetRootView: View {
             if let event = model.events.first(where: { $0.id == id }) {
                 PostcardView(
                     event: event,
-                    rootURL: model.dataRoot
+                    rootURL: model.dataRoot,
+                    presentationReference: model.presentationReferences[event.id]
                 ) { destination in
                     if destination == .status { model.close() }
                     else { model.handle(destination) }
@@ -771,7 +779,7 @@ public struct PetRootView: View {
                 Button("返回") { model.close() }
             }
         case let .album(tripID):
-            TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot) { destination in
+            TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences) { destination in
                 if destination == .status { model.close() }
                 else { model.handle(destination) }
             }

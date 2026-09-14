@@ -66,6 +66,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             let model = AppModel(
                 snapshot: loaded.snapshot,
                 events: loaded.events,
+                presentationReferences: loaded.presentationReferences,
                 dataRoot: rootURL,
                 characterProfile: loaded.characterProfile,
                 persistSupply: repository.updateCarriedItem
@@ -617,14 +618,14 @@ struct MenuServiceRootView: View {
             statusView
         case let .postcard(id):
             if let event = model.events.first(where: { $0.id == id }) {
-                PostcardView(event: event, rootURL: model.dataRoot) { destination in
+                PostcardView(event: event, rootURL: model.dataRoot, presentationReference: model.presentationReferences[event.id]) { destination in
                     handlePostcardRoute(destination)
                 }
             } else {
                 statusView
             }
         case let .album(tripID):
-            TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot) { destination in
+            TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences) { destination in
                 handleAlbumRoute(destination)
             }
         case .pet, .awayTag, .supplies:

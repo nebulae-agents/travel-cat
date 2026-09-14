@@ -294,6 +294,7 @@ final class TravelCatEnvironment: ObservableObject {
             model.apply(
                 next: contents.snapshot,
                 events: contents.events,
+                presentationReferences: contents.presentationReferences,
                 characterProfile: contents.characterProfile
             )
         }
