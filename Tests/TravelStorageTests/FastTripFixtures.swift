@@ -193,6 +193,11 @@ struct FastTripAcceptanceResult: Equatable {
     var temporaryRootRemoved: Bool
 }
 
+private final class FastTripClock: TravelClock, @unchecked Sendable {
+    var now: Date
+    init(now: Date) { self.now = now }
+}
+
 struct FastTripRunner {
     func run(_ fixture: FastTripFixture) throws -> FastTripAcceptanceResult {
         let root = FileManager.default.temporaryDirectory
@@ -224,7 +229,8 @@ struct FastTripRunner {
             throw diagnostic(action: 1, "fixture contains no events")
         }
 
-        let repository = try TravelRepository(root: root)
+        let clock = FastTripClock(now: firstEvent.occurredAt)
+        let repository = try TravelRepository(root: root, clock: clock)
         if let carriedItemID = fixture.metadata.carriedItemID {
             _ = try repository.updateCarriedItem(carriedItemID)
         }
@@ -301,6 +307,7 @@ struct FastTripRunner {
                     event: event,
                     seed: fixture.metadata.seed &+ UInt64(snapshot.stateVersion)
                 )
+                clock.now = event.occurredAt
                 try repository.publish(event: event, next: snapshot)
                 let beforeRetry = try repository.loadContents()
                 let acknowledged = try repository.publish(event: event, next: snapshot)
@@ -338,6 +345,7 @@ struct FastTripRunner {
                     _ = try Self.validateReadyImage(at: imageURL)
                 }
                 let attemptedAt = beforeEvent.occurredAt.addingTimeInterval(1)
+                clock.now = attemptedAt
                 switch update.status {
                 case .ready:
                     let work = try requiredPendingImage(repository, eventID: update.eventID, now: attemptedAt)
@@ -354,6 +362,7 @@ struct FastTripRunner {
                 case .imageUnavailable, .rejected:
                     for offset in [0.0, 60.0, 180.0] {
                         let attemptTime = attemptedAt.addingTimeInterval(offset)
+                        clock.now = attemptTime
                         let work = try requiredPendingImage(repository, eventID: update.eventID, now: attemptTime)
                         _ = try repository.markImage(.init(
                             eventId: update.eventID,

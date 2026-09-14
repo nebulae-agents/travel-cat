@@ -14,6 +14,16 @@
       "$comment": "Foundation Date-representable RFC 3339 subset; runtime also enforces Gregorian calendar validity."
     },
     "relativePath": {"type": ["string", "null"]},
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relativePath", "sha256"],
+      "properties": {
+        "relativePath": {"type": "string", "pattern": "^postcards/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[a-z0-9][a-z0-9._-]*\\.json$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "$comment": "Optional immutable presentation manifest. Omit for legacy results; only ready results may select a presentation."
+    },
     "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 240},
     "attemptToken": {
       "type": "string",
@@ -35,7 +45,7 @@
           }
         }
       },
-      "else": {"properties": {"relativePath": {"type": "null"}}}
+      "else": {"properties": {"relativePath": {"type": "null"}}, "not": {"required": ["presentation"]}}
     }
   ]
 }

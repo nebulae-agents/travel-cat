@@ -31,6 +31,7 @@ public struct ImageResultEnvelope: Codable, Equatable, Sendable {
     public let attemptToken: String
     public let attemptCount: Int
     public let publishedNarrativeHash: String
+    public let presentation: PostcardPresentationReference?
 
     public init(
         eventId: UUID,
@@ -40,7 +41,8 @@ public struct ImageResultEnvelope: Codable, Equatable, Sendable {
         reason: String?,
         attemptToken: String,
         attemptCount: Int,
-        publishedNarrativeHash: String
+        publishedNarrativeHash: String,
+        presentation: PostcardPresentationReference?
     ) {
         self.eventId = eventId
         self.status = status
@@ -50,11 +52,16 @@ public struct ImageResultEnvelope: Codable, Equatable, Sendable {
         self.attemptToken = attemptToken
         self.attemptCount = attemptCount
         self.publishedNarrativeHash = publishedNarrativeHash
+        self.presentation = presentation
+    }
+
+    public init(eventId: UUID, status: ImageResultStatus, attemptedAt: Date, relativePath: String?, reason: String?, attemptToken: String, attemptCount: Int, publishedNarrativeHash: String) {
+        self.init(eventId: eventId, status: status, attemptedAt: attemptedAt, relativePath: relativePath, reason: reason, attemptToken: attemptToken, attemptCount: attemptCount, publishedNarrativeHash: publishedNarrativeHash, presentation: nil)
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case eventId, status, attemptedAt, relativePath, reason
-        case attemptToken, attemptCount, publishedNarrativeHash
+        case attemptToken, attemptCount, publishedNarrativeHash, presentation
     }
 
     public init(from decoder: Decoder) throws {
@@ -76,6 +83,7 @@ public struct ImageResultEnvelope: Codable, Equatable, Sendable {
         attemptToken = try values.decode(String.self, forKey: .attemptToken)
         attemptCount = try values.decode(Int.self, forKey: .attemptCount)
         publishedNarrativeHash = try values.decode(String.self, forKey: .publishedNarrativeHash)
+        presentation = values.contains(.presentation) ? try values.decode(StrictPresentationReference.self, forKey: .presentation).value : nil
         guard AttemptTokenValidator.isValid(attemptToken),
               (0...2).contains(attemptCount),
               publishedNarrativeHash.utf8.count == 64,
@@ -109,7 +117,7 @@ public struct ImageResultEnvelope: Codable, Equatable, Sendable {
                 )
             }
         case .failed, .rejectedIdentity:
-            guard relativePath == nil else {
+            guard relativePath == nil, presentation == nil else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .relativePath,
                     in: values,
@@ -146,6 +154,8 @@ public struct ImageRetry: Codable, Equatable, Sendable {
     var terminalResultHash: String?
     var imageContentHash: String?
     var terminalRelativePath: String?
+    var terminalPresentation: PostcardPresentationReference?
+    var currentPresentation: PostcardPresentationReference?
 
     public init(
         attemptCount: Int,
@@ -158,7 +168,9 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         terminalStatus: PostcardStatus? = nil,
         terminalResultHash: String? = nil,
         imageContentHash: String? = nil,
-        terminalRelativePath: String? = nil
+        terminalRelativePath: String? = nil,
+        terminalPresentation: PostcardPresentationReference? = nil,
+        currentPresentation: PostcardPresentationReference? = nil
     ) {
         self.attemptCount = attemptCount
         self.retryAt = retryAt
@@ -171,6 +183,8 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         self.terminalResultHash = terminalResultHash
         self.imageContentHash = imageContentHash
         self.terminalRelativePath = terminalRelativePath
+        self.terminalPresentation = terminalPresentation
+        self.currentPresentation = currentPresentation
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -178,7 +192,7 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         case retryAt = "imageRetryAt"
         case publishedNarrativeHash, lastResultHash, lastAttemptedAt
         case activeAttemptToken, leaseExpiresAt, terminalStatus, terminalResultHash
-        case imageContentHash, terminalRelativePath
+        case imageContentHash, terminalRelativePath, terminalPresentation, currentPresentation
     }
 
     public init(from decoder: Decoder) throws {
@@ -195,6 +209,8 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         terminalResultHash = try values.decodeIfPresent(String.self, forKey: .terminalResultHash)
         imageContentHash = try values.decodeIfPresent(String.self, forKey: .imageContentHash)
         terminalRelativePath = try values.decodeIfPresent(String.self, forKey: .terminalRelativePath)
+        terminalPresentation = values.contains(.terminalPresentation) ? try values.decode(StrictPresentationReference.self, forKey: .terminalPresentation).value : nil
+        currentPresentation = values.contains(.currentPresentation) ? try values.decode(StrictPresentationReference.self, forKey: .currentPresentation).value : nil
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -210,6 +226,8 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         try values.encodeIfPresent(terminalResultHash, forKey: .terminalResultHash)
         try values.encodeIfPresent(imageContentHash, forKey: .imageContentHash)
         try values.encodeIfPresent(terminalRelativePath, forKey: .terminalRelativePath)
+        try values.encodeIfPresent(terminalPresentation, forKey: .terminalPresentation)
+        try values.encodeIfPresent(currentPresentation, forKey: .currentPresentation)
     }
 
     mutating func recordFailure(now: Date, mode: TravelMode, resultHash: String) -> PostcardStatus {
@@ -343,6 +361,11 @@ struct ImageRetryStore: Codable, Equatable, Sendable {
         }
         guard schemaVersion == 1 || schemaVersion == 2 else { throw RepositoryError.malformedImageRetryState }
         for (key, retry) in entries {
+            try retry.terminalPresentation.map { try StrictPresentationReference.validate($0) }
+            try retry.currentPresentation.map { try StrictPresentationReference.validate($0) }
+            guard retry.terminalStatus == .ready || (retry.terminalPresentation == nil && retry.currentPresentation == nil) else {
+                throw RepositoryError.malformedImageRetryState
+            }
             let terminalIsConsistent: Bool
             switch retry.terminalStatus {
             case nil:
@@ -425,6 +448,7 @@ enum NarrativeHasher {
 
 extension ImageResultEnvelope {
     func requireValidFields() throws {
+        try presentation.map { try StrictPresentationReference.validate($0) }
         guard AttemptTokenValidator.isValid(attemptToken),
               (0...2).contains(attemptCount),
               publishedNarrativeHash.utf8.count == 64,
@@ -442,7 +466,27 @@ extension ImageResultEnvelope {
         case .ready:
             guard relativePath?.isEmpty == false else { throw RepositoryError.invalidImageResult }
         case .failed, .rejectedIdentity:
-            guard relativePath == nil else { throw RepositoryError.invalidImageResult }
+            guard relativePath == nil, presentation == nil else { throw RepositoryError.invalidImageResult }
         }
+    }
+}
+
+private struct StrictPresentationReference: Decodable {
+    let value: PostcardPresentationReference
+    private enum CodingKeys: String, CodingKey, CaseIterable { case relativePath, sha256 }
+    init(from decoder: Decoder) throws {
+        try StrictKeys.require(decoder, allowed: CodingKeys.allCases.map(\.rawValue))
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        value = PostcardPresentationReference(relativePath: try values.decode(String.self, forKey: .relativePath), sha256: try values.decode(String.self, forKey: .sha256))
+        try Self.validate(value)
+    }
+    static func validate(_ value: PostcardPresentationReference) throws {
+        let parts = value.relativePath.components(separatedBy: "/")
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789._-".utf8)
+        guard parts.count == 3, parts[0] == "postcards", parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.utf8.allSatisfy(allowed.contains) }),
+              UUID(uuidString: parts[1])?.uuidString.lowercased() == parts[1],
+              parts[2].utf8.first.map({ (48...57).contains($0) || (97...122).contains($0) }) == true,
+              (parts[2] as NSString).pathExtension == "json", value.sha256.utf8.count == 64,
+              value.sha256.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { throw RepositoryError.invalidImageResult }
     }
 }

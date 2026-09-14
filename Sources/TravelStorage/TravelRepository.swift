@@ -158,17 +158,20 @@ public struct RepositoryContents: Equatable, Sendable {
     public let events: [TripEvent]
     public let characterProfile: CharacterProfile
     public let selectedCharacterProfile: CharacterProfile
+    public let presentationReferences: [UUID: PostcardPresentationReference]
 
     public init(
         snapshot: TripSnapshot,
         events: [TripEvent],
         characterProfile: CharacterProfile = .defaultBlackCat,
-        selectedCharacterProfile: CharacterProfile? = nil
+        selectedCharacterProfile: CharacterProfile? = nil,
+        presentationReferences: [UUID: PostcardPresentationReference] = [:]
     ) {
         self.snapshot = snapshot
         self.events = events
         self.characterProfile = characterProfile
         self.selectedCharacterProfile = selectedCharacterProfile ?? characterProfile
+        self.presentationReferences = presentationReferences
     }
 }
 
@@ -228,7 +231,8 @@ public final class TravelRepository: @unchecked Sendable {
                 snapshot: snapshot,
                 events: events,
                 characterProfile: effectiveProfile,
-                selectedCharacterProfile: selectedProfile
+                selectedCharacterProfile: selectedProfile,
+                presentationReferences: try presentationReferencesUnlocked(events: events)
             )
         }
     }
@@ -296,7 +300,8 @@ public final class TravelRepository: @unchecked Sendable {
                 snapshot: snapshot,
                 events: events,
                 characterProfile: effectiveProfile,
-                selectedCharacterProfile: selectedProfile
+                selectedCharacterProfile: selectedProfile,
+                presentationReferences: try presentationReferencesUnlocked(events: events)
             ))
         }
     }
@@ -673,7 +678,7 @@ public final class TravelRepository: @unchecked Sendable {
 
     private func markReadyImage(_ result: ImageResultEnvelope) throws -> MarkImageAcknowledgement {
         try result.requireValidFields()
-        let tripID: UUID = try withExclusiveLock {
+        let initialEvent: TripEvent = try withExclusiveLock {
             let events = try readEventsUnlocked()
             var store = try loadRetryStoreUnlocked()
             var mutableEvents = events
@@ -683,15 +688,15 @@ public final class TravelRepository: @unchecked Sendable {
             }
             let retry = try retryForEventUnlocked(event, store: &store)
             try requireReadySubmission(result, event: event, retry: retry, resultHash: NarrativeHasher.hash(result))
-            return event.tripID
+            return event
         }
 
         // The bounded read, decode and content hash happen without the global repository lock.
-        let validated = try validateReadyImage(result.relativePath, tripID: tripID)
+        let validated = try validateReadyImage(result.relativePath, tripID: initialEvent.tripID)
         defer { validated.closeAll() }
-        imageValidationHook?()
-
-        return try withExclusiveLock {
+        func publish(_ revalidate: () throws -> Void) throws -> MarkImageAcknowledgement {
+          imageValidationHook?()
+          return try withExclusiveLock {
             var events = try readEventsUnlocked()
             var store = try loadRetryStoreUnlocked()
             try reconcileRetryStoreUnlocked(events: &events, store: &store)
@@ -699,10 +704,13 @@ public final class TravelRepository: @unchecked Sendable {
                 throw RepositoryError.eventNotFound(result.eventId)
             }
             let event = events[index]
+            guard try NarrativeHasher.hash(event) == NarrativeHasher.hash(initialEvent) else { throw RepositoryError.invalidImageResult }
             var retry = try retryForEventUnlocked(event, store: &store)
             let resultHash = try NarrativeHasher.hash(result)
             try requireReadySubmission(result, event: event, retry: retry, resultHash: resultHash)
             try requireUnchanged(validated)
+            try revalidate()
+            try Task.checkCancellation()
 
             if event.postcardStatus == .ready {
                 guard retry.imageContentHash == validated.contentHash else { throw RepositoryError.invalidImageResult }
@@ -718,6 +726,7 @@ public final class TravelRepository: @unchecked Sendable {
             retry.terminalResultHash = resultHash
             retry.imageContentHash = validated.contentHash
             retry.terminalRelativePath = validated.relativePath
+            retry.terminalPresentation = result.presentation
             store.schemaVersion = 2
             store.entries[retryKey(result.eventId)] = retry
             // Persist terminal intent first. Reconciliation can finish the journal after a crash.
@@ -726,7 +735,15 @@ public final class TravelRepository: @unchecked Sendable {
             events[index].postcardRelativePath = validated.relativePath
             try writer.write(try encodedJournal(events), to: journalURL)
             return MarkImageAcknowledgement(eventID: result.eventId, status: .ready)
+          }
         }
+        if let reference = result.presentation {
+            return try PostcardPresentationStore(root: physicalPresentationRoot()).withValidatedPresentation(reference: reference, event: initialEvent, expectedSourceRelativePath: validated.relativePath) { presentation, revalidate in
+                guard presentation.manifest.source.sha256 == validated.contentHash else { throw RepositoryError.invalidImageResult }
+                return try publish(revalidate)
+            }
+        }
+        return try publish({})
     }
 
     private func requireReadySubmission(
@@ -744,6 +761,7 @@ public final class TravelRepository: @unchecked Sendable {
             guard retry.terminalStatus == .ready,
                   retry.terminalResultHash == resultHash,
                   retry.terminalRelativePath == result.relativePath,
+                  retry.terminalPresentation == result.presentation,
                   event.postcardRelativePath == result.relativePath else {
                 throw RepositoryError.invalidImageTransition
             }
@@ -752,8 +770,55 @@ public final class TravelRepository: @unchecked Sendable {
         guard event.postcardStatus == .pendingImage,
               retry.activeAttemptToken == result.attemptToken,
               retry.attemptCount == result.attemptCount,
+              retry.leaseExpiresAt.map({ $0 > trustedNow }) == true,
               retry.retryAt.map({ $0 <= trustedNow }) ?? true else {
             throw RepositoryError.invalidImageResult
+        }
+    }
+
+    private func physicalPresentationRoot() throws -> URL {
+        guard let path = realpath(root.path, nil) else { throw RepositoryError.unsafePostcardPath }
+        defer { free(path) }
+        return URL(fileURLWithPath: String(cString: path))
+    }
+
+    private func presentationReferencesUnlocked(events: [TripEvent]) throws -> [UUID: PostcardPresentationReference] {
+        let store = try loadRetryStoreUnlocked()
+        var references: [UUID: PostcardPresentationReference] = [:]
+        for event in events where event.postcardStatus == .ready {
+            if let retry = store.entries[retryKey(event.id)] {
+                references[event.id] = retry.currentPresentation ?? retry.terminalPresentation
+            }
+        }
+        return references
+    }
+
+    /// Compare-and-swap only the presentation selection; the original terminal result remains replayable.
+    @discardableResult
+    public func publishPresentation(_ reference: PostcardPresentationReference, for eventID: UUID, expectedSourceSHA256: String, expectedPresentationSHA256: String?) throws -> PostcardPresentationReference {
+        try Task.checkCancellation()
+        let initial: TripEvent = try withExclusiveLock {
+            guard let event = try readEventsUnlocked().first(where: { $0.id == eventID }), event.postcardStatus == .ready else { throw RepositoryError.invalidImageTransition }
+            return event
+        }
+        guard let path = initial.postcardRelativePath else { throw RepositoryError.invalidImageResult }
+        return try PostcardPresentationStore(root: physicalPresentationRoot()).withValidatedPresentation(reference: reference, event: initial, expectedSourceRelativePath: path) { presentation, revalidate in
+            guard presentation.manifest.source.sha256 == expectedSourceSHA256 else { throw RepositoryError.invalidImageResult }
+            imageValidationHook?()
+            return try withExclusiveLock {
+                guard let event = try readEventsUnlocked().first(where: { $0.id == eventID }), event == initial else { throw RepositoryError.invalidImageTransition }
+                var store = try loadRetryStoreUnlocked()
+                guard var retry = store.entries[retryKey(eventID)], retry.terminalStatus == .ready,
+                      retry.terminalRelativePath == path, retry.imageContentHash == expectedSourceSHA256,
+                      (retry.currentPresentation ?? retry.terminalPresentation)?.sha256 == expectedPresentationSHA256 else { throw RepositoryError.invalidImageResult }
+                try requireNarrativeHash(event, retry: retry)
+                try revalidate()
+                try Task.checkCancellation()
+                retry.currentPresentation = reference
+                store.entries[retryKey(eventID)] = retry
+                try writeRetryStoreUnlocked(store)
+                return reference
+            }
         }
     }
 
@@ -915,14 +980,27 @@ public final class TravelRepository: @unchecked Sendable {
             }
             if events[index].postcardStatus == .pendingImage, retry.terminalStatus == .ready {
                 guard let path = retry.terminalRelativePath,
+                      retry.currentPresentation == nil,
                       retry.terminalResultHash != nil,
                       retry.imageContentHash != nil else { throw RepositoryError.malformedImageRetryState }
                 let image = try validateReadyImage(path, tripID: events[index].tripID)
                 defer { image.closeAll() }
                 guard image.contentHash == retry.imageContentHash else { throw RepositoryError.malformedImageRetryState }
+                if let reference = retry.terminalPresentation {
+                    try PostcardPresentationStore(root: physicalPresentationRoot()).withValidatedPresentation(reference: reference, event: events[index], expectedSourceRelativePath: path) { presentation, revalidate in
+                        guard presentation.manifest.source.sha256 == image.contentHash else { throw RepositoryError.malformedImageRetryState }
+                        try requireUnchanged(image)
+                        try revalidate()
+                        events[index].postcardStatus = .ready
+                        events[index].postcardRelativePath = path
+                        // Keep verified descriptors alive through the recovery journal write.
+                        try writer.write(try encodedJournal(events), to: journalURL)
+                        changedJournal = false
+                    }
+                }
                 events[index].postcardStatus = .ready
                 events[index].postcardRelativePath = path
-                changedJournal = true
+                changedJournal = retry.terminalPresentation == nil || changedJournal
             } else if events[index].postcardStatus == .pendingImage,
                       retry.attemptCount >= 3 || retry.terminalStatus == .imageUnavailable {
                 events[index].postcardStatus = .imageUnavailable
