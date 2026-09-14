@@ -455,6 +455,9 @@ class PublishArtifactsTests(unittest.TestCase):
 
     def test_ci_and_public_guidance_encode_the_supported_boundary(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        job_environment, steps = workflow.split("    steps:", 1)
+        self.assertNotIn("${{ runner.temp }}", job_environment)
+        self.assertIn("        env:\n          TRAVEL_CAT_SCRATCH_ROOT: ${{ runner.temp }}/travel-cat-swift", steps)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("runs-on: macos-15", workflow)
         self.assertIn("actions/checkout@v7", workflow)
