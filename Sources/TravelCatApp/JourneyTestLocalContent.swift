@@ -28,7 +28,7 @@ enum JourneyTestLocalContent {
       openHook: nil, consumedItemId: nil,
       postcard: PostcardRequest(
         required: stage == .postcardReady,
-        scenePrompt: stage == .postcardReady ? "黑猫在杭州园林水岸散步，旅行明信片，避免文字" : nil)
+        scenePrompt: stage == .postcardReady ? "黑猫在杭州园林水岸散步。 " + PostcardGenerationContract.prompt : nil)
     )
   }
 }

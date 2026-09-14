@@ -2,6 +2,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 import ImageIO
+import TravelCore
 import TravelStorage
 import TravelUI
 
@@ -20,7 +21,6 @@ enum JourneyTestCompactArtworkError: Error, LocalizedError, Equatable {
 }
 
 enum JourneyTestCompactArtwork {
-  private static let maximumDimension = 1_536
   private static let maximumInputBytes = 15 * 1_024 * 1_024
 
   static func compose(
@@ -36,20 +36,26 @@ enum JourneyTestCompactArtwork {
     guard sourceWidth > 0, sourceHeight > 0 else {
       throw JourneyTestCompactArtworkError.invalidAsset
     }
-    let scale = min(1, Double(maximumDimension) / Double(max(sourceWidth, sourceHeight)))
-    let width = max(1, Int((Double(sourceWidth) * scale).rounded()))
-    let height = max(1, Int((Double(sourceHeight) * scale).rounded()))
+    let width = PostcardGenerationContract.targetWidth
+    let height = PostcardGenerationContract.targetHeight
     guard let context = CGContext(
       data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
       space: CGColorSpaceCreateDeviceRGB(),
       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     else { throw JourneyTestCompactArtworkError.invalidAsset }
     context.interpolationQuality = .high
-    context.draw(background, in: CGRect(x: 0, y: 0, width: width, height: height))
+    let scale = max(CGFloat(width) / CGFloat(sourceWidth), CGFloat(height) / CGFloat(sourceHeight))
+    let backgroundWidth = CGFloat(sourceWidth) * scale
+    let backgroundHeight = CGFloat(sourceHeight) * scale
+    context.draw(background, in: CGRect(
+      x: (CGFloat(width) - backgroundWidth) / 2, y: (CGFloat(height) - backgroundHeight) / 2,
+      width: backgroundWidth, height: backgroundHeight))
     let topFrame = placement.frame(
       in: CGSize(width: width, height: height),
       sourceAspectRatio: CGFloat(cat.width) / CGFloat(cat.height))
-    guard !topFrame.isEmpty else { throw JourneyTestCompactArtworkError.invalidPlacement }
+    guard !topFrame.isEmpty,
+      CGRect(x: 0, y: 0, width: width, height: height).contains(topFrame)
+    else { throw JourneyTestCompactArtworkError.invalidPlacement }
     let frame = CGRect(
       x: topFrame.minX, y: CGFloat(height) - topFrame.maxY,
       width: topFrame.width, height: topFrame.height)

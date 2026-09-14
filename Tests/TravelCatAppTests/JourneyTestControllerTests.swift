@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import ImageIO
 import Testing
 import TravelCore
 import TravelStorage
@@ -174,6 +175,9 @@ struct JourneyTestControllerTests {
             JSONSerialization.jsonObject(with: Data(request.utf8)) as? [String: Any])
         #expect(object["input"] as? String == input)
         #expect((object["instructions"] as? String)?.contains("untrusted data") == true)
+        for requirement in ["1536", "1024", "3:2", "ears", "paws", "tail", "20-40%", "low-detail"] {
+            #expect((object["instructions"] as? String)?.contains(requirement) == true)
+        }
         #expect(request.localizedCaseInsensitiveContains("black-cat") == false)
     }
 
@@ -228,11 +232,13 @@ struct JourneyTestControllerTests {
             backgroundURL: background, catURL: cat,
             placement: definition.catPlacement, session: session)
 
-        let backgroundBitmap = try harness.bitmap(at: background)
         let compositeBitmap = try harness.bitmap(at: composite)
-        #expect(compositeBitmap.pixelsWide == backgroundBitmap.pixelsWide)
-        #expect(compositeBitmap.pixelsHigh == backgroundBitmap.pixelsHigh)
-        #expect(harness.changedPixelCount(from: backgroundBitmap, to: compositeBitmap) > 1_000)
+        #expect(compositeBitmap.pixelsWide == 1536)
+        #expect(compositeBitmap.pixelsHigh == 1024)
+        let frame = definition.catPlacement.frame(in: CGSize(width: 1536, height: 1024), sourceAspectRatio: 192.0 / 208.0)
+        for point in [CGPoint(x: frame.minX + 2, y: frame.minY + 2), CGPoint(x: frame.maxX - 2, y: frame.maxY - 2)] {
+            #expect(compositeBitmap.colorAt(x: Int(point.x), y: Int(point.y))?.usingColorSpace(.deviceRGB)?.redComponent == 0)
+        }
         let imported = try JourneyTestImageImporter(
             allowedRoot: composite.deletingLastPathComponent()
         ).importImage(composite, tripID: UUID(), eventID: UUID(), session: session)
@@ -314,10 +320,9 @@ struct JourneyTestControllerTests {
             backgroundURL: background, catURL: cat,
             placement: definition.catPlacement, session: session)
 
-        let backgroundBitmap = try #require(NSBitmapImageRep(data: Data(contentsOf: background)))
         let compositeBitmap = try #require(NSBitmapImageRep(data: Data(contentsOf: composite)))
-        #expect(compositeBitmap.pixelsWide == backgroundBitmap.pixelsWide)
-        #expect(compositeBitmap.pixelsHigh == backgroundBitmap.pixelsHigh)
+        #expect(compositeBitmap.pixelsWide == 1536)
+        #expect(compositeBitmap.pixelsHigh == 1024)
         #expect(try Data(contentsOf: sentinel) == Data("production-must-not-change".utf8))
         print("TRAVEL_CAT_COMPACT_ARTWORK=\(composite.path)")
     }
@@ -462,6 +467,42 @@ struct JourneyTestControllerTests {
         #expect(controller.errorMessage == nil)
         #expect(await image.callCount == 3)
         #expect(controller.model?.events.first(where: { $0.phase == .postcardReady })?.postcardStatus == .ready)
+    }
+
+    @Test
+    func importerRejectsMislabeledFormatAndRotatedLandscape() throws {
+        let harness = try Harness()
+        let session = try JourneyTestSession.create(parent: harness.parent, productionRoot: harness.production)
+        let source = try harness.makeGeneratedPNG()
+        let disguised = harness.generated.appendingPathComponent("png-disguised.webp")
+        try Data(contentsOf: source).write(to: disguised)
+        let rotated = harness.generated.appendingPathComponent("rotated.png")
+        let imageSource = try #require(CGImageSourceCreateWithURL(source as CFURL, nil))
+        let image = try #require(CGImageSourceCreateImageAtIndex(imageSource, 0, nil))
+        let destination = try #require(CGImageDestinationCreateWithURL(rotated as CFURL, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, [kCGImagePropertyOrientation: 6] as CFDictionary)
+        #expect(CGImageDestinationFinalize(destination))
+        let rotatedSource = try #require(CGImageSourceCreateWithURL(rotated as CFURL, nil))
+        let metadata = try #require(CGImageSourceCopyPropertiesAtIndex(rotatedSource, 0, nil) as? [CFString: Any])
+        #expect(metadata[kCGImagePropertyOrientation] as? Int == 6)
+        for invalid in [disguised, rotated] {
+            #expect(throws: JourneyTestImageImportError.self) {
+                try JourneyTestImageImporter(allowedRoot: harness.generated).importImage(invalid, tripID: UUID(), eventID: UUID(), session: session)
+            }
+        }
+    }
+
+    @Test
+    func importerRejectsNewSquarePortraitAndUndersizedArtwork() throws {
+        let harness = try Harness()
+        let session = try JourneyTestSession.create(parent: harness.parent, productionRoot: harness.production)
+        for (width, height) in [(1024, 1024), (1024, 1536), (768, 512), (1535, 1024)] {
+            let source = try harness.makeSolidPNG(named: "invalid-\(width)-\(height).png", width: width, height: height, color: .white)
+            #expect(throws: JourneyTestImageImportError.self) {
+                try JourneyTestImageImporter(allowedRoot: harness.generated).importImage(source, tripID: UUID(), eventID: UUID(), session: session)
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: session.root.appendingPathComponent("postcards").path))
     }
 
     @Test
@@ -871,7 +912,7 @@ private struct Harness {
     }
     func makeGeneratedPNG() throws -> URL {
         let url = generated.appendingPathComponent("new.png")
-        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 768, pixelsHigh: 768, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1152, pixelsHigh: 768, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         let data = bitmap.representation(using: .png, properties: [:])!
         try data.write(to: url)
         return url

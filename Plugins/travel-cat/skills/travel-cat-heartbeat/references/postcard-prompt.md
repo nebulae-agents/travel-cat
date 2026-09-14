@@ -17,7 +17,9 @@ For the legacy/default black cat only, use the flat signed bundle resources `pre
 
 ## Image request
 
-Generate one travel postcard scene grounded only in immutable published facts. Request a concise Chinese location and calm, low-detail quote-friendly empty space away from the subject. The generated image contains no baked-in quote, other text, logo, watermark, decorative paw stamp, extra subject, or duplicate/malformed limbs. Preserve the frozen identity and keep the subject's face readable.
+Generate one 1536 × 1024 landscape travel postcard in exact 3:2 aspect ratio, grounded only in immutable published facts. Request calm, low-detail quote-friendly empty space away from the subject; provide the concise Chinese location as metadata, never image text. The generated image contains no baked-in quote, other text, logo, watermark, decorative paw stamp, extra subject, or duplicate/malformed limbs. Preserve the frozen identity and keep the subject's face readable. Keep the entire pet, including ears, paws and tail, intact inside the image with breathing room. Never crop or stretch the pet.
+
+Accept new output only at exact 3:2, width at least 1152 and height at least 768, with neither axis above 32768 and no more than 100 million pixels. Inspect actual decoded image dimensions; a requested size or filename is not evidence. Existing stored legacy square postcards remain readable and are not subject to this new-output contract.
 
 Keep the pet at roughly 20-40% of the frame. Identity-preserve from the frozen profile and its references. For the legacy default only, this means the small round-faced, near-black cat with subtle violet highlights, large gold eyes, violet collar, and small gold bell. No text and no extra animals.
 
