@@ -19,6 +19,8 @@ final class PostcardHandwritingGeneratorTests: XCTestCase {
     XCTAssertEqual(value.manifest.handwriting, .localFallback(.generationFailed))
     let prompts = await model.prompts
     XCTAssertEqual(prompts.count, 2)
+    XCTAssertEqual(prompts[0], try PostcardHandwritingPolicy.prompt(event: f.event, hint: Self.hint))
+    XCTAssertEqual(prompts[1], try PostcardHandwritingPolicy.prompt(event: f.event, hint: Self.hint, correction: .invalidText))
     let first = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompts[0].utf8)) as? [String: Any])
     let correction = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompts[1].utf8)) as? [String: Any])
     XCTAssertEqual(first["quote"] as? String, f.event.mood.quote)

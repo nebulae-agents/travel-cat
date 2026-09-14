@@ -12,6 +12,7 @@ public enum TravelCLICommand: String, Equatable, Sendable {
     case pendingImages = "pending-images"
     case journal
     case markImage = "mark-image"
+    case preparePostcard = "prepare-postcard"
     case validateCandidate = "validate-candidate"
     case character
     case configureCharacter = "configure-character"
@@ -24,6 +25,52 @@ public enum TravelCLICommand: String, Equatable, Sendable {
             throw TravelCLIUsageError.invalidArguments
         }
         return command
+    }
+}
+
+public struct PostcardPreparationRequest: Decodable, Sendable {
+    public enum Action: String, Decodable, Sendable { case begin, finish }
+    public let action: Action
+    public let eventId: UUID
+    public let sourceRelativePath: String
+    public let fallbackReference: PostcardPresentationReference?
+    public let generatedImagePath: String?
+
+    public static func decode(_ data: Data) throws -> Self {
+        guard data.count <= 65_536 else { throw CharacterConfigurationRequestError.tooLarge }
+        do {
+            try StrictJSONPreflight.validate(data)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw CharacterConfigurationRequestError.invalidRequest
+            }
+            let value = try JSONDecoder().decode(Self.self, from: data)
+            let keys: Set<String> = value.action == .begin
+                ? ["action", "eventId", "sourceRelativePath"]
+                : ["action", "eventId", "sourceRelativePath", "fallbackReference", "generatedImagePath"]
+            guard Set(object.keys) == keys, canonical(value.sourceRelativePath, extensions: ["png", "webp"]) else {
+                throw CharacterConfigurationRequestError.invalidRequest
+            }
+            if value.action == .finish {
+                guard let ref = value.fallbackReference,
+                      let raw = object["fallbackReference"] as? [String: Any], Set(raw.keys) == ["relativePath", "sha256"],
+                      canonical(ref.relativePath, extensions: ["json"]), ref.sha256.utf8.count == 64,
+                      ref.sha256.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                      let path = value.generatedImagePath, path.hasPrefix("/"), !path.contains("\0"), path.utf8.count <= 4096 else {
+                    throw CharacterConfigurationRequestError.invalidRequest
+                }
+            }
+            return value
+        } catch { throw CharacterConfigurationRequestError.invalidRequest }
+    }
+
+    private static func canonical(_ path: String, extensions: Set<String>) -> Bool {
+        let parts = path.components(separatedBy: "/")
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789._-".utf8)
+        guard parts.count == 3, parts[0] == "postcards", let trip = UUID(uuidString: parts[1]),
+              trip.uuidString.lowercased() == parts[1], let first = parts[2].utf8.first,
+              (48...57).contains(first) || (97...122).contains(first),
+              parts[2].utf8.allSatisfy(allowed.contains), extensions.contains((parts[2] as NSString).pathExtension) else { return false }
+        return true
     }
 }
 

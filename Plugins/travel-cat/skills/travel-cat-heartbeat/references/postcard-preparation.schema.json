@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Postcard presentation preparation request",
+  "description": "At most 65536 UTF-8 bytes. Reject duplicate keys at every depth before schema validation. Preparation never leases or publishes. Request cannot override trusted roots.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "eventId",
+        "sourceRelativePath"
+      ],
+      "properties": {
+        "action": {
+          "const": "begin"
+        },
+        "eventId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sourceRelativePath": {
+          "type": "string",
+          "pattern": "^postcards/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[a-z0-9][a-z0-9._-]*\\.(png|webp)$"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "eventId",
+        "sourceRelativePath",
+        "fallbackReference",
+        "generatedImagePath"
+      ],
+      "properties": {
+        "action": {
+          "const": "finish"
+        },
+        "eventId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sourceRelativePath": {
+          "type": "string",
+          "pattern": "^postcards/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[a-z0-9][a-z0-9._-]*\\.(png|webp)$"
+        },
+        "fallbackReference": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relativePath",
+            "sha256"
+          ],
+          "properties": {
+            "relativePath": {
+              "type": "string",
+              "pattern": "^postcards/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[a-z0-9][a-z0-9._-]*\\.json$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "generatedImagePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/[^\\u0000]*$",
+          "description": "Absolute PNG output path beneath the configured trusted generated-images root. Cannot select or override that root; unsafe paths are operational failures."
+        }
+      }
+    }
+  ]
+}

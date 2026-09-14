@@ -2,21 +2,26 @@ import Darwin
 import Foundation
 
 /// Reads model-selected bytes only beneath a separately configured trusted directory.
-struct JourneyTestGeneratedImageReader: Sendable {
-  enum Rejection: Error { case unsafePath, unsafeFile, tooLarge, changedFile }
+public struct GeneratedPostcardImageReader: Sendable {
+  public enum Rejection: Error { case unsafePath, unsafeFile, tooLarge, changedFile }
   let allowedRoot: URL
   let maximumBytes: Int
   let beforeRevalidation: @Sendable () throws -> Void
 
+  public init(allowedRoot: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/generated_images"),
+              maximumBytes: Int = 15 * 1024 * 1024) {
+    self.init(allowedRoot: allowedRoot, maximumBytes: maximumBytes, beforeRevalidation: {})
+  }
+
   init(allowedRoot: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/generated_images"),
        maximumBytes: Int = 15 * 1024 * 1024,
-       beforeRevalidation: @escaping @Sendable () throws -> Void = {}) {
+       beforeRevalidation: @escaping @Sendable () throws -> Void) {
     self.allowedRoot = allowedRoot
     self.maximumBytes = min(maximumBytes, 15 * 1024 * 1024)
     self.beforeRevalidation = beforeRevalidation
   }
 
-  func read(path: String) throws -> Data {
+  public func read(path: String) throws -> Data {
     try Task.checkCancellation()
     guard allowedRoot.isFileURL, let resolved = realpath(allowedRoot.path, nil) else { throw Rejection.unsafePath }
     let root = String(cString: resolved)

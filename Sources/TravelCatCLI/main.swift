@@ -2,10 +2,11 @@ import Darwin
 import Foundation
 import TravelCore
 import TravelStorage
+import TravelUI
 
 @main
 enum TravelCatCLI {
-    private static let usage = "usage: travelcatctl status|journal|claim|publish|pending-images|mark-image|validate-candidate|character|configure-character|install-default-pet\n"
+    private static let usage = "usage: travelcatctl status|journal|claim|publish|pending-images|prepare-postcard|mark-image|validate-candidate|character|configure-character|install-default-pet\n"
 
     static func main() {
         do {
@@ -14,6 +15,7 @@ enum TravelCatCLI {
             let arguments = Array(CommandLine.arguments.dropFirst())
             let isInteractiveCharacterCommand = arguments == [TravelCLICommand.character.rawValue]
                 || arguments == [TravelCLICommand.configureCharacter.rawValue]
+                || arguments == [TravelCLICommand.preparePostcard.rawValue]
             if case RepositoryError.lockUnavailable = error, isInteractiveCharacterCommand {
                 writeStandardError("travelcatctl: repository busy\n")
                 exit(EX_TEMPFAIL)
@@ -63,6 +65,9 @@ enum TravelCatCLI {
         let characterRequest = command == .configureCharacter
             ? try CharacterConfigurationRequest.decode(readStandardInput(maximumBytes: 64 * 1_024))
             : nil
+        let preparationRequest = command == .preparePostcard
+            ? try PostcardPreparationRequest.decode(readStandardInput(maximumBytes: 65_536))
+            : nil
 
         let repository = try TravelRepository(root: configuration.root, clock: FixedClock(now: configuration.now))
 
@@ -95,6 +100,9 @@ enum TravelCatCLI {
         case .markImage:
             let envelope = try ImageResultEnvelope.decode(readStandardInput())
             try writeJSON(repository.markImage(envelope, mode: try configuration.resolvedMode()))
+        case .preparePostcard:
+            guard let preparationRequest else { throw CharacterConfigurationRequestError.invalidRequest }
+            try writeJSON(PostcardPreparation(repository: repository).execute(preparationRequest))
         case .validateCandidate:
             let contents = try repository.loadContents()
             let snapshot = contents.snapshot

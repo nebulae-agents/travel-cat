@@ -90,7 +90,7 @@ final class TravelCatPluginContractTests: XCTestCase {
 
         for name in [
             "event-contract.md", "postcard-prompt.md",
-            "event-candidate.schema.json", "image-result.schema.json",
+            "event-candidate.schema.json", "image-result.schema.json", "postcard-preparation.schema.json",
         ] {
             XCTAssertEqual(
                 try Data(contentsOf: canonical.appendingPathComponent(name)),
@@ -104,7 +104,7 @@ final class TravelCatPluginContractTests: XCTestCase {
         let automation = root.appendingPathComponent("Automation/schemas")
         let canonical = root.appendingPathComponent(".agents/skills/travel-cat-agent/references")
         let plugin = root.appendingPathComponent("Plugins/travel-cat/skills/travel-cat-heartbeat/references")
-        for name in ["event-candidate.schema.json", "image-result.schema.json"] {
+        for name in ["event-candidate.schema.json", "image-result.schema.json", "postcard-preparation.schema.json"] {
             let expected = try Data(contentsOf: automation.appendingPathComponent(name))
             XCTAssertEqual(try Data(contentsOf: canonical.appendingPathComponent(name)), expected)
             XCTAssertEqual(try Data(contentsOf: plugin.appendingPathComponent(name)), expected)
@@ -243,6 +243,9 @@ final class TravelCatPluginContractTests: XCTestCase {
         XCTAssertEqual(accepted.status, 0, accepted.stderr)
         XCTAssertEqual(accepted.stdout, "fixture:" + String(decoding: input, as: UTF8.self))
         let rejected = try fixture.invoke(user: user, system: system, command: "configure-character", stdin: input)
+        let preparation = try fixture.invoke(user: user, system: system, command: "prepare-postcard", stdin: input)
+        XCTAssertEqual(preparation.status, 0)
+        XCTAssertEqual(preparation.stdout, "fixture:" + String(decoding: input, as: UTF8.self))
         XCTAssertEqual(rejected.status, 64)
         XCTAssertFalse(rejected.stdout.contains("fixture:"))
     }

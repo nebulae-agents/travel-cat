@@ -43,6 +43,11 @@ class SourceArchiveTests(unittest.TestCase):
             "Sources/TravelUI/Resources/cute-black-cat-spritesheet.webp": "fixture bytes",
             "Sources/TravelUI/Resources/retained.log": "resource fixture",
             "Tests/example.swift": "// regression",
+            "Sources/TravelUI/PostcardPreparation.swift": "// shared preparation",
+            "Sources/TravelStorage/GeneratedPostcardImageReader.swift": "// bounded reader",
+            "Automation/schemas/postcard-preparation.schema.json": '{"oneOf":[]}',
+            ".agents/skills/travel-cat-agent/references/postcard-preparation.schema.json": '{"oneOf":[]}',
+            "Plugins/travel-cat/skills/travel-cat-heartbeat/references/postcard-preparation.schema.json": '{"oneOf":[]}',
             "Fixtures/example.err": "retained fixture",
             "Scripts/tool.sh": "#!/bin/sh\nexit 0\n",
             "Scripts/publish_github.py": "#!/usr/bin/env python3\n",
@@ -102,6 +107,11 @@ class SourceArchiveTests(unittest.TestCase):
                 ".github/workflows/ci.yml", ".github/ISSUE_TEMPLATE/bug_report.yml",
                 "config/deploy.demo.json",
                 "LICENSE", "NOTICE",
+                "Sources/TravelUI/PostcardPreparation.swift",
+                "Sources/TravelStorage/GeneratedPostcardImageReader.swift",
+                "Automation/schemas/postcard-preparation.schema.json",
+                ".agents/skills/travel-cat-agent/references/postcard-preparation.schema.json",
+                "Plugins/travel-cat/skills/travel-cat-heartbeat/references/postcard-preparation.schema.json",
             ):
                 self.assertIn("TravelCat/" + path, names)
             self.assertFalse(any("TravelPetData/" in p or "/.git/" in p or "provenance" in p

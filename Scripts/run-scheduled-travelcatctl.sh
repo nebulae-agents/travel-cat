@@ -10,7 +10,7 @@ if [ "$#" -ne 1 ]; then
 fi
 COMMAND=$1
 case "$COMMAND" in
-    status|journal|pending-images|claim|validate-candidate|publish|mark-image) ;;
+    status|journal|pending-images|claim|validate-candidate|publish|mark-image|prepare-postcard) ;;
     *) echo "scheduled-launcher: command is not allowlisted" >&2; exit 64 ;;
 esac
 

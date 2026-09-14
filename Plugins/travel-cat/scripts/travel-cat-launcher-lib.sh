@@ -80,7 +80,7 @@ travel_cat_run_from_directories() {
     system_apps=$2
     command=$3
     case "$command" in
-        status|journal|pending-images|claim|validate-candidate|publish|mark-image) ;;
+        status|journal|pending-images|claim|validate-candidate|publish|mark-image|prepare-postcard) ;;
         *) echo "travel-cat: command is not allowlisted" >&2; return 64 ;;
     esac
     launcher=$(travel_cat_find_launcher "$user_apps" "$system_apps") || return

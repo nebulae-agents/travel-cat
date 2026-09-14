@@ -106,7 +106,7 @@ final class PackagingContractTests: XCTestCase {
         XCTAssertFalse(launcher.contains("/debug/"))
         XCTAssertFalse(launcher.contains("eval"))
 
-        for command in ["status", "journal", "pending-images", "claim", "validate-candidate", "publish", "mark-image"] {
+        for command in ["status", "journal", "pending-images", "claim", "validate-candidate", "publish", "mark-image", "prepare-postcard"] {
             XCTAssertTrue(launcher.contains(command), "Launcher must allow the documented fixed command: \(command)")
         }
     }
@@ -141,7 +141,7 @@ final class PackagingContractTests: XCTestCase {
         XCTAssertTrue(launcher.contains("EXPECTED_SHA=${BINARY_LINE#binarySHA256=}"))
         XCTAssertTrue(launcher.contains("for DIGEST in \"$EXPECTED_SOURCE\" \"$EXPECTED_SHA\""))
 
-        for command in ["status", "journal", "pending-images", "claim", "validate-candidate", "publish", "mark-image"] {
+        for command in ["status", "journal", "pending-images", "claim", "validate-candidate", "publish", "mark-image", "prepare-postcard"] {
             XCTAssertTrue(launcher.contains(command), "Bundled launcher must allow: \(command)")
         }
         for command in ["character", "configure-character"] {

@@ -29,7 +29,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TravelCatCLI",
-            dependencies: ["TravelCore", "TravelStorage"]
+            dependencies: ["TravelCore", "TravelStorage", "TravelUI"]
         ),
         .testTarget(name: "TravelCoreTests", dependencies: ["TravelCore"]),
         .testTarget(name: "TravelStorageTests", dependencies: ["TravelStorage"]),

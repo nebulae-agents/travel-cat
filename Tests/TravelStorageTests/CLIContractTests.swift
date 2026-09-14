@@ -7,6 +7,64 @@ import TravelCore
 @testable import TravelStorage
 
 final class CLIContractTests: XCTestCase {
+    func testPreparePostcardCommandExistsAndRejectsInvalidRequestsBeforeStartup() throws {
+        XCTAssertEqual(try? TravelCLICommand.parse(arguments: ["prepare-postcard"]).rawValue, "prepare-postcard")
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for input in [#"{"action":"begin","eventId":"bad","sourceRelativePath":"a"}"#,
+                      #"{"action":"begin","action":"finish"}"#,
+                      #"{"action":"begin","root":"/tmp"}"#] {
+            let result = try runCLI(root: root, command: "prepare-postcard", standardInput: Data(input.utf8))
+            XCTAssertEqual(result.status, 65)
+            XCTAssertTrue(result.output.isEmpty)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        }
+    }
+
+    func testPreparePostcardBusyIsFailureWithoutInventedResult() throws {
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try TravelRepository(root: root)
+        let fd = open(root.appendingPathComponent(".repository.lock").path, O_RDWR)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { close(fd) }
+        XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0)
+        let result = try runCLI(root: root, command: "prepare-postcard", standardInput: Data(#"{"action":"begin","eventId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sourceRelativePath":"postcards/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/scene.png"}"#.utf8))
+        XCTAssertEqual(result.status, 75)
+        XCTAssertTrue(result.output.isEmpty)
+    }
+
+    func testPreparePostcardBoundsStandardInputAndDoesNotBootstrapOnOversize() throws {
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let result = try runCLI(root: root, command: "prepare-postcard", standardInput: Data(repeating: 32, count: 65_537))
+        XCTAssertEqual(result.status, 65)
+        XCTAssertTrue(result.output.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    func testPreparePostcardBeginUsesStoredEventAndPreservesState() throws {
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try TravelRepository(root: root)
+        let event = TripEvent.fixture(postcardStatus: .pendingImage)
+        try repository.publish(event: event, next: .fixture(stateVersion: 1, tripID: event.tripID, lastEventID: event.id))
+        let path = "postcards/\(event.tripID.uuidString.lowercased())/scene.png"
+        try writeImage(root.appendingPathComponent(path), width: 1152, height: 768)
+        let files = ["journal/events.jsonl", "state/current-trip.json", "state/image-retries.json"]
+        let before = try files.map { try Data(contentsOf: root.appendingPathComponent($0)) }
+        let request = try JSONSerialization.data(withJSONObject: ["action": "begin", "eventId": event.id.uuidString, "sourceRelativePath": path])
+        let result = try runCLI(root: root, command: "prepare-postcard", standardInput: request)
+        XCTAssertEqual(result.status, 0)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: result.output) as? [String: Any])
+        XCTAssertTrue(["generate", "fallback"].contains(object["status"] as? String ?? ""))
+        let reference = try JSONDecoder().decode(PostcardPresentationReference.self, from: JSONSerialization.data(withJSONObject: try XCTUnwrap(object["fallbackReference"])))
+        let manifest = try PostcardPresentationStore(root: root).load(reference: reference, event: event, expectedSourceRelativePath: path).manifest
+        XCTAssertEqual(manifest.quote, event.mood.quote)
+        XCTAssertEqual(manifest.handwriting, .localFallback(.generationFailed))
+        XCTAssertEqual(try files.map { try Data(contentsOf: root.appendingPathComponent($0)) }, before)
+    }
+
     func testValidateCandidateReportsBusyWhileClaimKeepsQuietOverlapBehavior() throws {
         let projectRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
