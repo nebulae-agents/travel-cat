@@ -6,6 +6,37 @@ import TravelStorage
 @testable import TravelUI
 
 final class PostcardHandwritingVerifierTests: XCTestCase {
+    func testBinaryInkDownsamplingEdgesAreNotStrokeInteriors() throws {
+        let base = try image(width: 1152, height: 768, gray: 1)
+        let ink = try png(width: 1200, height: 700,
+            rect: CGRect(x: 103, y: 83, width: 997, height: 499), gray: 0, alpha: 1)
+        let line = PostcardHandwritingVerifier.Observation(text: "中文！", confidence: 1,
+            bounds: CGRect(x: 0.1, y: 0.15, width: 0.8, height: 0.6))
+        XCTAssertNoThrow(try PostcardHandwritingVerifier.verify(event: event, base: base,
+            inkData: ink, analysis: analysis(), observations: [line]))
+    }
+
+    func testOpaqueSourceStrokesWithoutCompactReadableCoresAreRejected() throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 1200, height: 700,
+            bitsPerComponent: 8, bytesPerRow: 1200 * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        for x in stride(from: 100, to: 1100, by: 10) {
+            context.fill(CGRect(x: x, y: 100, width: 1, height: 500))
+        }
+        let bytes = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(bytes, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let line = PostcardHandwritingVerifier.Observation(text: "中文！", confidence: 1,
+            bounds: CGRect(x: 0.1, y: 0.15, width: 0.8, height: 0.6))
+        XCTAssertThrowsError(try PostcardHandwritingVerifier.verify(event: event,
+            base: image(width: 1152, height: 768, gray: 1), inkData: bytes as Data,
+            analysis: analysis(), observations: [line])) {
+            XCTAssertEqual($0 as? PostcardHandwritingVerifier.Rejection, .insufficientContrast)
+        }
+    }
+
     func testEstimatedHorizontalOverhangKeepsBytesViewportAndContrastGate() throws {
         let base = try image(width: 1152, height: 768, gray: 1)
         let ink = try png(width: 120, height: 70, rect: CGRect(x: 10, y: 8, width: 100, height: 50), gray: 0, alpha: 1)
@@ -130,6 +161,52 @@ final class PostcardHandwritingVerifierTests: XCTestCase {
 
     func testOpaqueDotCannotHideThinFaintStroke() throws {
         try assertOpaqueDotCannotHideFaintStroke(height: 1)
+    }
+
+    func testOpaqueBlockCannotHideFaintSourceComponentLostInReduction() throws {
+        for alpha: CGFloat in [0.2, 0.79] {
+            try assertOpaqueBlockCannotHideReducedComponent(alpha: alpha)
+        }
+    }
+
+    private func assertOpaqueBlockCannotHideReducedComponent(alpha: CGFloat) throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 1200, height: 700,
+            bitsPerComponent: 8, bytesPerRow: 1200 * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 0, alpha: alpha))
+        context.fill(CGRect(x: 100, y: 100, width: 1000, height: 3))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 100, y: 150, width: 100, height: 450))
+        let bytes = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(bytes, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let line = PostcardHandwritingVerifier.Observation(text: "中文！", confidence: 1,
+            bounds: CGRect(x: 0.1, y: 0.15, width: 0.8, height: 0.6))
+        XCTAssertThrowsError(try PostcardHandwritingVerifier.verify(event: event,
+            base: image(width: 1152, height: 768, gray: 1), inkData: bytes as Data,
+            analysis: analysis(), observations: [line])) {
+            XCTAssertEqual($0 as? PostcardHandwritingVerifier.Rejection, .insufficientContrast)
+        }
+    }
+
+    func testSinglePixelFaintFringeNextToOpacityCoreRemainsAccepted() throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 1200, height: 700,
+            bitsPerComponent: 8, bytesPerRow: 1200 * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 0, alpha: 0.2))
+        context.fill(CGRect(x: 100, y: 100, width: 1000, height: 500))
+        context.setFillColor(CGColor(gray: 0, alpha: 0.85))
+        context.fill(CGRect(x: 101, y: 101, width: 998, height: 498))
+        let bytes = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(bytes, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let line = PostcardHandwritingVerifier.Observation(text: "中文！", confidence: 1,
+            bounds: CGRect(x: 0.1, y: 0.15, width: 0.8, height: 0.6))
+        XCTAssertNoThrow(try PostcardHandwritingVerifier.verify(event: event,
+            base: image(width: 1152, height: 768, gray: 1), inkData: bytes as Data,
+            analysis: analysis(), observations: [line]))
     }
 
     private func assertOpaqueDotCannotHideFaintStroke(height: CGFloat) throws {

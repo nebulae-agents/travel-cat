@@ -168,7 +168,9 @@ public enum PostcardHandwritingVerifier {
         // Interpolation can overshoot source alpha. It cannot manufacture a stroke interior.
         guard raster.maximumAlpha >= 204 else { throw Rejection.insufficientContrast }
         let support = SourceInkSupport(image: raster.image)
-        // A faint thin component is not an antialiased edge unless a real core is nearby.
+        // Every faint source pixel must border a real opacity core. Geometric
+        // occupancy alone cannot establish one: an entire faint component may
+        // disappear during reduction and escape both composited inspections.
         for y in 0..<raster.height {
             if y.isMultiple(of: 64) { try Task.checkCancellation() }
             try support.prepare(y: y)
@@ -183,8 +185,7 @@ public enum PostcardHandwritingVerifier {
         try checkContrast(base: base, raster: raster, support: support, frame: frame, width: base.width)
     }
 
-    /// Alpha-only source tiles keep geometric stroke interiors independent of opacity and
-    /// resampling fringes. The two-row halo supports both erosion and edge coverage.
+    /// Alpha-only source tiles bound memory for source opacity and scaled occupancy checks.
     private final class SourceInkSupport {
         let image: CGImage
         var tile: CGContext?
@@ -216,13 +217,7 @@ public enum PostcardHandwritingVerifier {
         }
 
         func isCore(x: Int, y: Int) -> Bool {
-            alpha(x: x, y: y) >= 204 || isGeometricInterior(x: x, y: y)
-        }
-
-        func isGeometricInterior(x: Int, y: Int) -> Bool {
-            return (-1...1).allSatisfy { dy in
-                (-1...1).allSatisfy { dx in alpha(x: x + dx, y: y + dy) > 0 }
-            }
+            alpha(x: x, y: y) >= 204
         }
     }
 
@@ -235,6 +230,14 @@ public enum PostcardHandwritingVerifier {
         let drawTop = frame.minY * Double(height) - viewport.y * drawHeight
         let left = max(0, Int(floor(frame.minX * Double(width)))), top = max(0, Int(floor(frame.minY * Double(height))))
         let right = min(width, Int(ceil(frame.maxX * Double(width)))), bottom = min(height, Int(ceil(frame.maxY * Double(height))))
+        let sourceStepX = Double(raster.width) / drawWidth
+        let sourceStepY = Double(raster.height) / drawHeight
+        // Reduction blends a neighborhood, not just the source center. Our
+        // conservative interior policy requires two destination pixels of solid
+        // support on each side when reducing (not a claim about CoreGraphics'
+        // undocumented filter kernel), and the source 3×3 test when enlarging.
+        let radiusX = sourceStepX > 1 ? Int(ceil(2 * sourceStepX)) : 1
+        let radiusY = sourceStepY > 1 ? Int(ceil(2 * sourceStepY)) : 1
         var interiors = 0
         // Native resolution catches isolated low-contrast pixels hidden by compact averaging.
         // Placed ink uses 64-row tiles (at most 16 MiB), plus one source alpha tile
@@ -247,20 +250,45 @@ public enum PostcardHandwritingVerifier {
             // CGContext's bottom-left drawing origin is converted from the top-left viewport.
             ink.draw(raster.image, in: CGRect(x: drawX - Double(left), y: Double(tileHeight + row) - drawTop - drawHeight, width: drawWidth, height: drawHeight))
             guard let background = scene.data?.assumingMemoryBound(to: UInt8.self), let pixels = ink.data?.assumingMemoryBound(to: UInt8.self) else { throw Rejection.invalidImage }
-            for pixel in 0..<(tileWidth * tileHeight) {
-                if pixel.isMultiple(of: 4096) { try Task.checkCancellation() }
-                let i = pixel * 4, alpha = Double(pixels[i + 3]) / 255
-                let sourceX = Int(floor((Double(left + pixel % tileWidth) + 0.5 - drawX) / drawWidth * Double(raster.width)))
-                let sourceY = Int(floor((Double(row + pixel / tileWidth) + 0.5 - drawTop) / drawHeight * Double(raster.height)))
-                try support.prepare(y: sourceY)
-                guard alpha >= 0.8 || support.isGeometricInterior(x: sourceX, y: sourceY) else { continue }
-                interiors += 1
-                guard background[i + 3] == 255 else { throw Rejection.insufficientContrast }
-                let r = Double(background[i]) / 255, g = Double(background[i + 1]) / 255, b = Double(background[i + 2]) / 255
-                let luminance = PostcardTextContrast.relativeLuminance(red: r, green: g, blue: b)
-                let composite = PostcardTextContrast.relativeLuminance(red: Double(pixels[i]) / 255 + r * (1 - alpha),
-                    green: Double(pixels[i + 1]) / 255 + g * (1 - alpha), blue: Double(pixels[i + 2]) / 255 + b * (1 - alpha))
-                guard PostcardTextContrast.contrastRatio(foregroundLuminance: composite, backgroundLuminance: luminance) >= 4.5 else { throw Rejection.insufficientContrast }
+            for localY in 0..<tileHeight {
+                let sourceY = Int(floor((Double(row + localY) + 0.5 - drawTop) * sourceStepY))
+                let sourceXs = (0..<tileWidth).map { Int(floor((Double(left + $0) + 0.5 - drawX) * sourceStepX)) }
+                var geometricInteriors = (0..<tileWidth).map { x in
+                    pixels[(localY * tileWidth + x) * 4 + 3] < 204
+                        && sourceXs[x] >= radiusX && sourceXs[x] < raster.width - radiusX
+                        && sourceY >= radiusY && sourceY < raster.height - radiusY
+                }
+                // Visit support rows together so even extreme reductions retain
+                // the bounded source tile, rather than allocating a large halo
+                // or repeatedly decoding it for every destination pixel.
+                if geometricInteriors.contains(true) {
+                    for y in (sourceY - radiusY)...(sourceY + radiusY) {
+                        try Task.checkCancellation()
+                        try support.prepare(y: y)
+                        for x in 0..<tileWidth where geometricInteriors[x] {
+                            for sourceX in (sourceXs[x] - radiusX)...(sourceXs[x] + radiusX) {
+                                if support.alpha(x: sourceX, y: y) == 0 {
+                                    geometricInteriors[x] = false
+                                    break
+                                }
+                            }
+                        }
+                        if !geometricInteriors.contains(true) { break }
+                    }
+                }
+                for localX in 0..<tileWidth {
+                    let pixel = localY * tileWidth + localX
+                    if pixel.isMultiple(of: 4096) { try Task.checkCancellation() }
+                    let i = pixel * 4, alpha = Double(pixels[i + 3]) / 255
+                    guard alpha >= 0.8 || geometricInteriors[localX] else { continue }
+                    interiors += 1
+                    guard background[i + 3] == 255 else { throw Rejection.insufficientContrast }
+                    let r = Double(background[i]) / 255, g = Double(background[i + 1]) / 255, b = Double(background[i + 2]) / 255
+                    let luminance = PostcardTextContrast.relativeLuminance(red: r, green: g, blue: b)
+                    let composite = PostcardTextContrast.relativeLuminance(red: Double(pixels[i]) / 255 + r * (1 - alpha),
+                        green: Double(pixels[i + 1]) / 255 + g * (1 - alpha), blue: Double(pixels[i + 2]) / 255 + b * (1 - alpha))
+                    guard PostcardTextContrast.contrastRatio(foregroundLuminance: composite, backgroundLuminance: luminance) >= 4.5 else { throw Rejection.insufficientContrast }
+                }
             }
         }
         guard interiors > 0 else { throw Rejection.insufficientContrast }

@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import Foundation
 import SwiftUI
 import TravelCore
@@ -20,7 +21,12 @@ final class PostcardGeneratedPresentationAcceptanceTests: XCTestCase {
         XCTAssertEqual(status, "input-or-harness-error")
     }
     private struct Configuration: Decodable {
-        struct Fixture: Decodable { let scenePath: String; let inkPath: String; let quote: String }
+        struct Fixture: Decodable {
+            let scenePath: String; let inkPath: String; let quote: String
+            // Explicit opt-in for a user-approved local processing experiment only.
+            // The original still passes the default reader and remains hash-checked.
+            let derivativeInkPath: String?
+        }
         let fixtures: [Fixture]
         let outputDirectory: String
     }
@@ -49,8 +55,12 @@ final class PostcardGeneratedPresentationAcceptanceTests: XCTestCase {
             progress(index, "reading trusted inputs")
             var report: [String: Any] = ["fixture": index + 1, "quote": fixture.quote]
             do {
-                let base = try reader.read(path: fixture.scenePath), ink = try reader.read(path: fixture.inkPath)
+                let base = try reader.read(path: fixture.scenePath), originalInk = try reader.read(path: fixture.inkPath)
+                let derivativeReader = GeneratedPostcardImageReader(allowedRoot: output)
+                let ink = try fixture.derivativeInkPath.map { try derivativeReader.read(path: $0) } ?? originalInk
                 report["sceneSHA256"] = digest(base); report["inkSHA256"] = digest(ink)
+                report["originalInkSHA256"] = digest(originalInk)
+                report["usesProcessedDerivative"] = fixture.derivativeInkPath != nil
                 let now = Date(timeIntervalSince1970: 1_786_435_200), trip = UUID()
                 let event = TripEvent(id: UUID(), tripID: trip, previousEventID: nil, occurredAt: now,
                     phase: .preparing, location: nil, transport: nil, summary: "Real generated postcard acceptance",
@@ -80,7 +90,13 @@ final class PostcardGeneratedPresentationAcceptanceTests: XCTestCase {
                     let sceneURL = root.appendingPathComponent(scenePath)
                     try FileManager.default.createDirectory(at: sceneURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try base.write(to: sceneURL)
-                    let store = PostcardPresentationStore(root: root)
+                    // Foundation standardization can expose /tmp aliases. The
+                    // store deliberately refuses symlink ancestors; use the
+                    // actual physical scratch root, as production callers do.
+                    guard let physicalPath = realpath(root.path, nil) else { throw CocoaError(.fileNoSuchFile) }
+                    let physicalRoot = URL(fileURLWithPath: String(cString: physicalPath))
+                    free(physicalPath)
+                    let store = PostcardPresentationStore(root: physicalRoot)
                     let ref = try store.prepare(event: event, expectedSourceRelativePath: scenePath, derivedLandscapeData: base,
                         handwriting: .generated(ink), placement: placement, styleVersion: PostcardHandwritingPolicy.styleVersion)
                     _ = try repo.markImage(.init(eventId: event.id, status: .ready, attemptedAt: now,
@@ -124,7 +140,10 @@ final class PostcardGeneratedPresentationAcceptanceTests: XCTestCase {
                     XCTFail("Fixture \(index + 1): \(typed(error))")
                 }
                 try require(digest(try reader.read(path: fixture.scenePath)) == digest(base), "original scene hash changed")
-                try require(digest(try reader.read(path: fixture.inkPath)) == digest(ink), "original ink hash changed")
+                try require(digest(try reader.read(path: fixture.inkPath)) == digest(originalInk), "original ink hash changed")
+                if let derivativePath = fixture.derivativeInkPath {
+                    try require(digest(try derivativeReader.read(path: derivativePath)) == digest(ink), "processed ink hash changed")
+                }
             } catch {
                 report["status"] = "input-or-harness-error"; report["error"] = typed(error)
                 XCTFail("Fixture \(index + 1): \(typed(error))")
