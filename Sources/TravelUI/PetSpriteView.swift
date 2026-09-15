@@ -2,6 +2,27 @@ import AppKit
 import SwiftUI
 import TravelCore
 
+private struct PetPlaybackEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var petPlaybackEnabled: Bool {
+        get { self[PetPlaybackEnabledKey.self] }
+        set { self[PetPlaybackEnabledKey.self] = newValue }
+    }
+}
+
+struct PetPlaybackIdentity: Equatable {
+    let phase: TravelPhase
+    let profile: CharacterProfile
+    let reduceMotion: Bool
+    let visible: Bool
+    let available: Bool
+    let dataRoot: URL?
+    var enabled: Bool { !reduceMotion && visible && available }
+}
+
 public struct PetSpriteLayout: Equatable, Sendable {
     public let frameSize: CGSize
     public let columns: Int
@@ -90,15 +111,25 @@ public struct PetSpriteView: View {
     public let profile: CharacterProfile
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var frameIndex = 0
+    @Environment(\.petPlaybackEnabled) private var playbackEnabled
+    @State private var playback = PetPlaybackState()
+    @State private var playbackIdentity: PetPlaybackIdentity?
 
     private let layout = PetSpriteLayout.version2
     private let spriteSheet: NSImage?
     private let unavailable: Bool
+    private let dataRoot: URL?
+    private var requiresReducedMotion = false
+
+    init(state: TravelPhase, requiresReducedMotion: Bool) {
+        self.init(state: state)
+        self.requiresReducedMotion = requiresReducedMotion
+    }
 
     public init(state: TravelPhase, profile: CharacterProfile = .defaultBlackCat, dataRoot: URL? = nil) {
         self.state = state
         self.profile = profile
+        self.dataRoot = dataRoot
         switch CharacterSpriteResolver.resolve(profile: profile, dataRoot: dataRoot) {
         case let .available(url):
             spriteSheet = NSImage(contentsOf: url)
@@ -110,8 +141,10 @@ public struct PetSpriteView: View {
     }
 
     public var body: some View {
-        let animation = PetAnimation.animation(for: state)
-        let selectedFrame = min(frameIndex, animation.frameCount - 1)
+        let identity = animationTaskID
+        let active = playbackIdentity == identity && identity.enabled
+        let animation = active ? playback.animation : PetAnimation.animation(for: state)
+        let selectedFrame = active ? playback.frameIndex : 0
         let origin = layout.frameOrigin(row: animation.row, frame: selectedFrame) ?? .zero
         let scale = Self.displayScale
         let displaySize = CGSize(
@@ -144,21 +177,25 @@ public struct PetSpriteView: View {
         .clipped()
         .accessibilityLabel(profile.displayName)
         .task(id: animationTaskID) {
-            frameIndex = 0
-            guard !reduceMotion else { return }
+            playback.reset(phase: state, profile: profile, enabled: identity.enabled)
+            playbackIdentity = identity
+            guard identity.enabled else { return }
 
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(180))
+                do { try await Task.sleep(for: .milliseconds(180)) }
+                catch { return }
                 guard !Task.isCancelled else { return }
-                frameIndex = (frameIndex + 1) % animation.frameCount
+                playback.advance(choice: Int.random(in: Int.min...Int.max))
             }
         }
         .onDisappear {
-            frameIndex = 0
+            playback.reset(phase: state, profile: profile, enabled: false)
+            playbackIdentity = nil
         }
     }
 
-    private var animationTaskID: String {
-        "\(state.rawValue)-\(reduceMotion)"
+    private var animationTaskID: PetPlaybackIdentity {
+        PetPlaybackIdentity(phase: state, profile: profile, reduceMotion: reduceMotion || requiresReducedMotion,
+                            visible: playbackEnabled, available: !unavailable, dataRoot: dataRoot)
     }
 }

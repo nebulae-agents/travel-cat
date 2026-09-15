@@ -1,10 +1,26 @@
 import AppKit
 import SwiftUI
 import XCTest
+import Combine
 @testable import TravelUI
 
 @MainActor
 final class DesktopPetControllerTests: XCTestCase {
+    func testVisibilitySourceForwardsControllerNotifications() throws {
+        let suite = "DesktopPetControllerTests-notifications-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let controller = DesktopPetController(content: AnyView(EmptyView()), defaults: defaults)
+        defer { controller.windowController.close() }
+        var notifications = 0
+        let token = controller.objectWillChange.sink { notifications += 1 }
+        controller.hide()
+        XCTAssertTrue(controller.visibility.isHidden)
+        controller.show()
+        XCTAssertFalse(controller.visibility.isHidden)
+        XCTAssertEqual(notifications, 2)
+        withExtendedLifetime(token) {}
+    }
     func testHiddenPreferenceSurvivesRecreationAndExplicitShowClearsIt() throws {
         let suite = "DesktopPetControllerTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

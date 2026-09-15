@@ -5,6 +5,25 @@ import TravelCore
 final class CurrentPetStatusTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    @MainActor
+    func testCommittedReturnHomeSnapshotChangesDesktopScene() throws {
+        let suite = "CurrentPetStatusTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var returning = TripSnapshot.empty(now: now.addingTimeInterval(-60))
+        returning.phase = .returning
+        let model = AppModel(snapshot: returning, defaults: defaults, clock: { self.now })
+        XCTAssertEqual(CurrentPetStatus(snapshot: model.snapshot, events: model.events, now: now).scene, .away)
+        var home = returning
+        home.stateVersion += 1
+        home.phase = .resting
+        home.lastUpdatedAt = now.addingTimeInterval(-1)
+        model.apply(next: home, events: [])
+        let status = CurrentPetStatus(snapshot: model.snapshot, events: model.events, now: now)
+        XCTAssertEqual(status.scene, .home)
+        XCTAssertEqual(status.desktopSpritePhase, .resting)
+    }
+
     func testEveryPhaseHasAnHonestTitleAndScene() {
         let cases: [(TravelPhase, String, CurrentPetStatus.Scene)] = [
             (.resting, "在家", .home), (.preparing, "准备出游", .packing),
