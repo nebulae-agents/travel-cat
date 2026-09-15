@@ -15,6 +15,34 @@ struct PetCompanionPlacement: Equatable {
 enum PetCompanionLayout {
     static let gap: CGFloat = 12
 
+    static func offset(anchor: CGRect, companion: CGRect) -> CGPoint? {
+        guard anchor.isFiniteNonempty, companion.isFiniteNonempty else { return nil }
+        let result = CGPoint(x: companion.midX - anchor.midX, y: companion.midY - anchor.midY)
+        return result.x.isFinite && result.y.isFinite ? result : nil
+    }
+
+    static func place(anchor: CGRect, companionSize: CGSize, offset: CGPoint, visibleFrames: [CGRect]) -> PetCompanionPlacement? {
+        guard anchor.isFiniteNonempty, offset.x.isFinite, offset.y.isFinite else { return nil }
+        var frame = CGRect(x: anchor.midX + offset.x - companionSize.width / 2,
+                           y: anchor.midY + offset.y - companionSize.height / 2,
+                           width: companionSize.width, height: companionSize.height)
+        guard frame.isFiniteNonempty else { return nil }
+        let screens = visibleFrames.filter {
+            $0.isFiniteNonempty && $0.size.width >= companionSize.width && $0.size.height >= companionSize.height
+        }
+        guard !screens.isEmpty else { return nil }
+        // Keep the interactive center reachable, even when only transparent padding remains.
+        if !screens.contains(where: { $0.contains(CGPoint(x: frame.midX, y: frame.midY)) }) {
+            let screen = screens.min { lhs, rhs in
+                hypot(lhs.midX - anchor.midX, lhs.midY - anchor.midY)
+                    < hypot(rhs.midX - anchor.midX, rhs.midY - anchor.midY)
+            }!
+            frame.origin.x = max(screen.minX, min(frame.minX, screen.maxX - frame.width))
+            frame.origin.y = max(screen.minY, min(frame.minY, screen.maxY - frame.height))
+        }
+        return PetCompanionPlacement(frame: frame, edge: offset.x >= 0 ? .leading : .trailing)
+    }
+
     static func place(
         anchor: CGRect,
         companionSize: CGSize,

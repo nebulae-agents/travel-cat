@@ -124,7 +124,7 @@ public enum PostcardHandwritingVerifier {
         return context
     }
 
-    private static func recognize(_ image: CGImage, background: CGFloat) throws -> [Observation] {
+    static func recognize(_ image: CGImage, background: CGFloat) throws -> [Observation] {
         try Task.checkCancellation()
         // OCR inspection is bounded and in memory; the immutable PNG is never reencoded.
         let scale = min(1, 2048.0 / Double(max(image.width, image.height)))

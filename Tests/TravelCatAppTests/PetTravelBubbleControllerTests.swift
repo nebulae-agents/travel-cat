@@ -8,6 +8,152 @@ import TravelUI
 
 @MainActor
 final class PetTravelBubbleControllerTests: XCTestCase {
+    func testLostMouseUpCancelsDragAndAllowsNextClickWithoutSaving() throws {
+        let suite = "LostMouseUp-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let scheduler = ManualBubbleScheduler()
+        var pressed = true
+        let controller = PetTravelBubbleController(locator: StubBubbleLocator(selection: mascotSelection()).locate,
+            scheduler: scheduler, collapseAnimator: nil, offsetStore: PetCompanionOffsetStore(defaults: defaults),
+            primaryButtonPressed: { pressed })
+        defer { controller.close() }
+        var taps = 0
+        XCTAssertTrue(controller.show(delivery: .prompt(postcardPrompt()), onTap: { taps += 1 }, onAvailableForReplacement: {}))
+        let panel = try XCTUnwrap(controller.window as? PetTravelBubblePanel)
+        func mouse(_ type: NSEvent.EventType, _ x: CGFloat = 30) throws {
+            panel.sendEvent(try XCTUnwrap(NSEvent.mouseEvent(with: type, location: CGPoint(x: x, y: 30), modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)))
+        }
+        try mouse(.leftMouseDown)
+        try mouse(.leftMouseDragged, 50)
+        let staleWatch = try XCTUnwrap(scheduler.activeTokens.first)
+        pressed = false
+        scheduler.advance(by: 0.25)
+        XCTAssertNil(PetCompanionOffsetStore(defaults: defaults).load())
+        XCTAssertEqual(scheduler.activeCount, 2)
+        try mouse(.leftMouseUp)
+        XCTAssertEqual(taps, 0)
+        try mouse(.leftMouseDown)
+        try mouse(.leftMouseUp)
+        XCTAssertEqual(taps, 1)
+        scheduler.fireEvenIfCancelled(staleWatch)
+        XCTAssertEqual(scheduler.activeCount, 0)
+        XCTAssertEqual(controller.presentation, .hidden)
+        XCTAssertNil(PetCompanionOffsetStore(defaults: defaults).load())
+    }
+    func testInitialAutomaticOffsetFollowsAcrossMidpointWithoutBeingPersisted() throws {
+        let suite = "InitialOffset-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let scheduler = ManualBubbleScheduler()
+        let locator = StubBubbleLocator(selection: mascotSelection())
+        let controller = PetTravelBubbleController(locator: locator.locate, scheduler: scheduler, collapseAnimator: nil,
+            offsetStore: PetCompanionOffsetStore(defaults: defaults), screenFrames: { [CGRect(x: -1200, y: 0, width: 2400, height: 900)] })
+        defer { controller.close() }
+        XCTAssertTrue(controller.show(delivery: .prompt(postcardPrompt()), onTap: {}, onAvailableForReplacement: {}))
+        let panel = try XCTUnwrap(controller.window)
+        let initial = panel.frame
+        locator.selection = mascotSelection(anchor: CGRect(x: 200, y: 420, width: 120, height: 120))
+        scheduler.advance(by: 0.25)
+        XCTAssertEqual(panel.frame, initial.offsetBy(dx: -500, dy: 0))
+        scheduler.advance(by: 8)
+        XCTAssertEqual(panel.frame.midX, initial.midX - 500)
+        XCTAssertEqual(panel.frame.midY, initial.midY)
+        XCTAssertNil(PetCompanionOffsetStore(defaults: defaults).load())
+    }
+
+    func testPanelClickDispatchUsesHostedPawHitRegion() throws {
+        let scheduler = ManualBubbleScheduler()
+        let controller = PetTravelBubbleController(locator: StubBubbleLocator(selection: mascotSelection()).locate, scheduler: scheduler)
+        defer { controller.close() }
+        var taps = 0
+        XCTAssertTrue(controller.show(delivery: .prompt(postcardPrompt()), onTap: { taps += 1 }, onAvailableForReplacement: {}))
+        scheduler.advance(by: 8)
+        let panel = try XCTUnwrap(controller.window as? PetTravelBubblePanel)
+        XCTAssertNotNil(panel.onClick)
+        for point in [CGPoint(x: 1, y: 1), CGPoint(x: 33, y: 32)] {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                panel.sendEvent(try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)))
+            }
+            XCTAssertEqual(taps, point.x == 1 ? 0 : 1)
+        }
+    }
+    func testPanelRoutesThresholdDragAndCancellationWithoutClick() throws {
+        let panel = PetTravelBubblePanel(contentRect: CGRect(x: 100, y: 100, width: 66, height: 64), styleMask: [.nonactivatingPanel], backing: .buffered, defer: false)
+        defer { panel.close() }
+        var starts = 0
+        var completions: [Bool] = []
+        var clicks = 0
+        panel.onClick = { clicks += 1 }
+        panel.onDragStarted = {
+            starts += 1
+            return { completions.append($0) }
+        }
+        func mouse(_ type: NSEvent.EventType, _ x: CGFloat, _ y: CGFloat) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: CGPoint(x: x, y: y), modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        panel.sendEvent(try mouse(.leftMouseDown, 20, 20))
+        panel.sendEvent(try mouse(.leftMouseDragged, 22, 20))
+        XCTAssertEqual(starts, 0)
+        panel.sendEvent(try mouse(.leftMouseDragged, 40, 30))
+        XCTAssertEqual(starts, 1)
+        XCTAssertEqual(panel.frame.origin, CGPoint(x: 120, y: 110))
+        panel.sendEvent(try mouse(.leftMouseDragged, 30, 25))
+        XCTAssertEqual(panel.frame.origin, CGPoint(x: 130, y: 115))
+        XCTAssertTrue(completions.isEmpty)
+        panel.sendEvent(try mouse(.leftMouseUp, 20, 20))
+        XCTAssertEqual(completions, [true])
+        panel.sendEvent(try mouse(.leftMouseDown, 20, 20))
+        panel.sendEvent(try mouse(.leftMouseDragged, 40, 30))
+        panel.orderOut(nil)
+        XCTAssertEqual(completions, [true, false])
+        XCTAssertEqual(clicks, 0)
+        panel.sendEvent(try mouse(.leftMouseUp, 20, 20))
+        XCTAssertEqual(completions, [true, false])
+    }
+    func testCompanionDragPersistsOffsetSuspendsTimersAndFollowsWithoutSnapback() throws {
+        let suite = "DragOffset-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let scheduler = ManualBubbleScheduler()
+        let locator = StubBubbleLocator(selection: mascotSelection())
+        let controller = PetTravelBubbleController(locator: locator.locate, scheduler: scheduler,
+            collapseAnimator: nil, offsetStore: PetCompanionOffsetStore(defaults: defaults),
+            screenFrames: { [CGRect(x: -1200, y: 0, width: 2400, height: 900)] })
+        defer { controller.close() }
+        var taps = 0
+        XCTAssertTrue(controller.show(delivery: .prompt(postcardPrompt()), onTap: { taps += 1 }, onAvailableForReplacement: {}))
+        let panel = try XCTUnwrap(controller.window as? PetTravelBubblePanel)
+        let oldTokens = scheduler.activeTokens
+        let end = try XCTUnwrap(panel.onDragStarted?())
+        panel.setFrameOrigin(CGPoint(x: -500, y: 200))
+        scheduler.advance(by: 10)
+        controller.performTap()
+        XCTAssertEqual(taps, 0)
+        XCTAssertEqual(controller.presentation, .slip)
+        end(true)
+        for token in oldTokens { scheduler.fireEvenIfCancelled(token) }
+        XCTAssertEqual(controller.presentation, .slip)
+        XCTAssertEqual(scheduler.activeCount, 2)
+        let offset = try XCTUnwrap(PetCompanionOffsetStore(defaults: defaults).load())
+        let dragged = panel.frame
+        scheduler.advance(by: 0.25)
+        XCTAssertEqual(panel.frame, dragged)
+        locator.selection = mascotSelection(anchor: CGRect(x: 740, y: 400, width: 120, height: 120))
+        scheduler.advance(by: 0.25)
+        XCTAssertEqual(panel.frame, dragged.offsetBy(dx: 40, dy: -20))
+        scheduler.advance(by: 8)
+        XCTAssertEqual(controller.presentation, .paw)
+        XCTAssertEqual(panel.frame.midX, dragged.midX + 40)
+        XCTAssertEqual(panel.frame.midY, dragged.midY - 20)
+        XCTAssertEqual(PetCompanionOffsetStore(defaults: defaults).load(), offset)
+        let staleEnd = try XCTUnwrap(panel.onDragStarted?())
+        controller.dismissPresentation()
+        staleEnd(true)
+        XCTAssertEqual(controller.presentation, .hidden)
+        XCTAssertEqual(scheduler.activeCount, 0)
+        XCTAssertEqual(PetCompanionOffsetStore(defaults: defaults).load(), offset)
+    }
     func testJourneySlipAllowsReplacementAfterTwoSecondsWithoutChangingProductionDelay() {
         for isTest in [true, false] {
             let scheduler = ManualBubbleScheduler()
@@ -55,9 +201,8 @@ final class PetTravelBubbleControllerTests: XCTestCase {
             visibleFrame: screen)).frame)
         scheduler.advance(by: 8)
         XCTAssertEqual(controller.presentation, .paw)
-        XCTAssertEqual(panel.frame, try XCTUnwrap(PetCompanionLayout.place(
-            anchor: petWindow.frame, companionSize: PetTravelBubbleController.pawSize,
-            visibleFrame: screen)).frame)
+        XCTAssertEqual(panel.frame.midX, initialFrame.midX - 100)
+        XCTAssertEqual(panel.frame.midY, initialFrame.midY + 40)
         pet.hide()
         scheduler.advance(by: 0.25)
         XCTAssertFalse(panel.isVisible)
@@ -394,7 +539,7 @@ final class PetTravelBubbleControllerTests: XCTestCase {
         )
         XCTAssertEqual(controller.presentation, .paw)
         XCTAssertTrue(controller.window === panel)
-        XCTAssertEqual(panel.frame, pawPlacement.frame)
+        XCTAssertEqual(panel.frame, pawPlacement.frame.offsetBy(dx: -110, dy: 0))
         XCTAssertEqual(replacements, 1)
         XCTAssertEqual(scheduler.activeDelays, [0.25])
     }
@@ -528,7 +673,7 @@ final class PetTravelBubbleControllerTests: XCTestCase {
         )
         XCTAssertTrue(controller.window === panel)
         XCTAssertEqual(controller.presentation, .paw)
-        XCTAssertEqual(panel.frame, pawPlacement.frame)
+        XCTAssertEqual(panel.frame, pawPlacement.frame.offsetBy(dx: -110, dy: 0))
         XCTAssertEqual(panel.frame.size, NSSize(width: 66, height: 64))
         XCTAssertEqual(panel.contentView?.frame.size, NSSize(width: 66, height: 64))
         XCTAssertTrue(selection.screenFrame.contains(panel.frame))
@@ -798,7 +943,7 @@ final class PetTravelBubbleControllerTests: XCTestCase {
         XCTAssertEqual(scheduler.activeCount, 0)
     }
 
-    func testSlipFollowEdgeChangeRefreshesContentInTheSamePanel() throws {
+    func testSlipFollowRetainsInitialSideInTheSamePanel() throws {
         let scheduler = ManualBubbleScheduler()
         let locator = StubBubbleLocator(selection: mascotSelection())
         let controller = PetTravelBubbleController(locator: locator.locate, scheduler: scheduler)
@@ -821,11 +966,11 @@ final class PetTravelBubbleControllerTests: XCTestCase {
 
         XCTAssertTrue(controller.window === panel)
         XCTAssertEqual(controller.presentation, .slip)
-        XCTAssertEqual(controller.renderedEdge, .leading)
-        XCTAssertEqual(controller.rootViewInstallCount, initialInstallCount + 1)
+        XCTAssertEqual(controller.renderedEdge, .trailing)
+        XCTAssertEqual(controller.rootViewInstallCount, initialInstallCount)
     }
 
-    func testPawFollowEdgeChangeRefreshesContentInTheSamePanelWithoutAddingSlipPointer() throws {
+    func testPawFollowRecoversAtDisplayEdgeWithoutChangingRememberedSide() throws {
         let scheduler = ManualBubbleScheduler()
         let locator = StubBubbleLocator(selection: mascotSelection())
         let controller = PetTravelBubbleController(locator: locator.locate, scheduler: scheduler)
@@ -849,20 +994,12 @@ final class PetTravelBubbleControllerTests: XCTestCase {
         locator.selection = movedSelection
         scheduler.advance(by: 0.25)
 
-        let expectedPlacement = try XCTUnwrap(
-            PetCompanionLayout.place(
-                anchor: movedSelection.appKitBounds,
-                companionSize: PetTravelBubbleController.pawSize,
-                visibleFrame: movedSelection.screenFrame
-            )
-        )
         XCTAssertTrue(controller.window === panel)
         XCTAssertEqual(controller.presentation, .paw)
-        XCTAssertEqual(controller.renderedEdge, .leading)
-        XCTAssertEqual(controller.rootViewInstallCount, collapsedInstallCount + 1)
-        XCTAssertEqual(panel.frame, expectedPlacement.frame)
+        XCTAssertEqual(controller.renderedEdge, .trailing)
+        XCTAssertEqual(controller.rootViewInstallCount, collapsedInstallCount)
+        XCTAssertEqual(panel.frame, CGRect(x: 0, y: 448, width: 66, height: 64))
         XCTAssertTrue(movedSelection.screenFrame.contains(panel.frame))
-        XCTAssertFalse(panel.frame.intersects(movedSelection.appKitBounds))
     }
 
     func testFollowContinuesForPawAndFailsClosedWhenMascotBecomesUnavailable() {

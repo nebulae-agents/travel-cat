@@ -132,14 +132,63 @@ final class TimerBubbleScheduler: BubbleScheduling {
 }
 
 final class PetTravelBubblePanel: NSPanel {
+    var onDragStarted: (() -> ((Bool) -> Void)?)?
+    var onClick: (() -> Void)?
+    private var pendingMouseDown: NSEvent?
+    private var dragOrigin: CGPoint?
+    private var dragScreenStart: CGPoint?
+    private var finishDrag: ((Bool) -> Void)?
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            guard contentView?.hitTest(event.locationInWindow) != nil else { return }
+            pendingMouseDown = event
+            dragOrigin = frame.origin
+            dragScreenStart = convertPoint(toScreen: event.locationInWindow)
+            return
+        case .leftMouseDragged:
+            guard pendingMouseDown != nil, let origin = dragOrigin, let start = dragScreenStart else { return }
+            let point = convertPoint(toScreen: event.locationInWindow)
+            let delta = CGPoint(x: point.x - start.x, y: point.y - start.y)
+            if finishDrag == nil {
+                guard hypot(delta.x, delta.y) >= 4 else { return }
+                guard let finish = onDragStarted?() else { clearDrag(completed: false); return }
+                finishDrag = finish
+            }
+            setFrameOrigin(CGPoint(x: origin.x + delta.x, y: origin.y + delta.y))
+            return
+        case .leftMouseUp:
+            if finishDrag != nil { clearDrag(completed: true); return }
+            guard pendingMouseDown != nil else { return }
+            clearDrag(completed: false)
+            if contentView?.hitTest(event.locationInWindow) != nil { onClick?() }
+            return
+        case .keyDown where event.keyCode == 53:
+            clearDrag(completed: false)
+            return
+        default: break
+        }
         if event.type == .mouseMoved {
             updateMousePassthrough(atScreenPoint: NSEvent.mouseLocation)
         }
         super.sendEvent(event)
+    }
+
+    override func orderOut(_ sender: Any?) {
+        clearDrag(completed: false)
+        super.orderOut(sender)
+    }
+
+    func clearDrag(completed: Bool) {
+        let finish = finishDrag
+        finishDrag = nil
+        pendingMouseDown = nil
+        dragOrigin = nil
+        dragScreenStart = nil
+        finish?(completed)
     }
 
     func updateMousePassthrough(atScreenPoint point: NSPoint) {
@@ -256,13 +305,23 @@ final class PetTravelBubbleController: NSWindowController {
     private let scheduler: BubbleScheduling
     private let collapseAnimator: BubbleCollapseAnimating?
     private let tapMenuEnabled: Bool
+    private let offsetStore: PetCompanionOffsetStore?
+    private let screenFrames: (() -> [CGRect])?
+    private var rememberedOffset: CGPoint?
+    private var dragID: UUID?
+    private var dragWatchToken: BubbleCancellation?
+    private let primaryButtonPressed: () -> Bool
+    private var timerGeneration = UUID()
 
     convenience init(locator: @escaping () -> PetCompanionAnchor?, tapMenuEnabled: Bool = false) {
         self.init(
             locator: locator,
             scheduler: TimerBubbleScheduler(),
             collapseAnimator: AppKitBubbleCollapseAnimator(),
-            tapMenuEnabled: tapMenuEnabled
+            tapMenuEnabled: tapMenuEnabled,
+            offsetStore: PetCompanionOffsetStore(defaults: .standard),
+            screenFrames: { NSScreen.screens.map(\.visibleFrame) },
+            primaryButtonPressed: { NSEvent.pressedMouseButtons & 1 != 0 }
         )
     }
 
@@ -278,12 +337,19 @@ final class PetTravelBubbleController: NSWindowController {
         locator: @escaping () -> PetCompanionAnchor?,
         scheduler: BubbleScheduling,
         collapseAnimator: BubbleCollapseAnimating?,
-        tapMenuEnabled: Bool = false
+        tapMenuEnabled: Bool = false,
+        offsetStore: PetCompanionOffsetStore? = nil,
+        screenFrames: (() -> [CGRect])? = nil,
+        primaryButtonPressed: @escaping () -> Bool = { true }
     ) {
         locate = locator
         self.scheduler = scheduler
         self.collapseAnimator = collapseAnimator
         self.tapMenuEnabled = tapMenuEnabled
+        self.offsetStore = offsetStore
+        self.screenFrames = screenFrames
+        self.primaryButtonPressed = primaryButtonPressed
+        rememberedOffset = offsetStore?.load()
         super.init(window: nil)
     }
 
@@ -302,12 +368,14 @@ final class PetTravelBubbleController: NSWindowController {
         onAvailableForReplacement: @escaping () -> Void
     ) -> Bool {
         guard let selection = locate(),
-              let placement = Self.placement(for: selection, companionSize: Self.slipSize)
+              let placement = placement(for: selection, companionSize: Self.slipSize)
         else {
             return false
         }
 
         cancelTimers()
+        dragID = nil
+        (window as? PetTravelBubblePanel)?.clearDrag(completed: false)
         session = nil
 
         let newSession = Session(
@@ -330,15 +398,20 @@ final class PetTravelBubbleController: NSWindowController {
             window = panel
             startMousePassthroughMonitoring(panel)
         }
+        panel.onDragStarted = { [weak self, weak newSession] in
+            guard let self, let newSession else { return nil }
+            return self.beginDrag(newSession)
+        }
+        panel.onClick = { [weak self, weak newSession] in
+            guard let self, let newSession else { return }
+            self.handleTap(newSession)
+        }
         installRootView(for: newSession, placement: placement)
         updateFrame(to: placement.frame, force: true)
         panel.ignoresMouseEvents = false
         panel.orderFrontRegardless()
 
-        collapseToken = scheduler.after(isTestJourney ? 2 : Self.collapseDelay) { [weak self, weak newSession] in
-            guard let self, let newSession else { return }
-            self.collapseToPaw(newSession)
-        }
+        scheduleCollapse(newSession)
         startFollowing(newSession)
         return true
     }
@@ -380,15 +453,73 @@ final class PetTravelBubbleController: NSWindowController {
         hide(session)
     }
 
-    private static func placement(
+    private func placement(
         for selection: PetCompanionAnchor,
         companionSize: NSSize
     ) -> PetCompanionPlacement? {
-        PetCompanionLayout.place(
+        if let rememberedOffset {
+            return PetCompanionLayout.place(anchor: selection.appKitBounds,
+                companionSize: companionSize, offset: rememberedOffset, visibleFrames: screenFrames?() ?? [selection.screenFrame])
+        }
+        let initial = PetCompanionLayout.place(
             anchor: selection.appKitBounds,
             companionSize: companionSize,
             visibleFrame: selection.screenFrame
         )
+        if let initial {
+            rememberedOffset = PetCompanionLayout.offset(anchor: selection.appKitBounds, companion: initial.frame)
+        }
+        return initial
+    }
+
+    private func beginDrag(_ expectedSession: Session) -> ((Bool) -> Void)? {
+        guard session === expectedSession, dragID == nil,
+              presentation == .slip || presentation == .paw else { return nil }
+        let id = UUID()
+        dragID = id
+        cancelTimers()
+        let finish: (Bool) -> Void = { [weak self, weak expectedSession] completed in
+            guard let self, let expectedSession,
+                  self.session === expectedSession, self.dragID == id else { return }
+            self.dragID = nil
+            self.dragWatchToken?.cancel()
+            self.dragWatchToken = nil
+            if completed, let anchor = self.locate(), let frame = self.window?.frame,
+               let offset = PetCompanionLayout.offset(anchor: anchor.appKitBounds, companion: frame) {
+                self.rememberedOffset = offset
+                self.offsetStore?.save(offset)
+            }
+            if self.presentation == .slip {
+                self.scheduleCollapse(expectedSession)
+            }
+            self.startFollowing(expectedSession)
+        }
+        watchDrag(expectedSession, id: id, finish: finish)
+        return finish
+    }
+
+    private func watchDrag(_ expectedSession: Session, id: UUID, finish: @escaping (Bool) -> Void) {
+        dragWatchToken = scheduler.after(Self.followDelay) { [weak self, weak expectedSession] in
+            guard let self, let expectedSession,
+                  self.session === expectedSession, self.dragID == id else { return }
+            self.dragWatchToken = nil
+            if self.primaryButtonPressed() {
+                self.watchDrag(expectedSession, id: id, finish: finish)
+            } else {
+                // A non-key panel may never receive Escape or the matching mouse-up.
+                // Cancel instead of persisting an interrupted gesture as user intent.
+                (self.window as? PetTravelBubblePanel)?.clearDrag(completed: false)
+                finish(false)
+            }
+        }
+    }
+
+    private func scheduleCollapse(_ expectedSession: Session) {
+        let generation = timerGeneration
+        collapseToken = scheduler.after(expectedSession.isTestJourney ? 2 : Self.collapseDelay) { [weak self, weak expectedSession] in
+            guard let self, let expectedSession, self.timerGeneration == generation else { return }
+            self.collapseToPaw(expectedSession)
+        }
     }
 
     private static func makePanel() -> PetTravelBubblePanel {
@@ -441,10 +572,10 @@ final class PetTravelBubbleController: NSWindowController {
     }
 
     private func collapseToPaw(_ expectedSession: Session) {
-        guard session === expectedSession, presentation == .slip else { return }
+        guard session === expectedSession, dragID == nil, presentation == .slip else { return }
         collapseToken = nil
         guard let selection = locate(),
-              let pawPlacement = Self.placement(for: selection, companionSize: Self.pawSize)
+              let pawPlacement = placement(for: selection, companionSize: Self.pawSize)
         else {
             failClosed(expectedSession)
             return
@@ -491,7 +622,7 @@ final class PetTravelBubbleController: NSWindowController {
     }
 
     private func handleTap(_ expectedSession: Session) {
-        guard session === expectedSession, !expectedSession.didTap else { return }
+        guard session === expectedSession, dragID == nil, !expectedSession.didTap else { return }
         expectedSession.didTap = true
         let shouldSignalReplacement = !expectedSession.replacementSignaled
         expectedSession.replacementSignaled = true
@@ -618,22 +749,25 @@ final class PetTravelBubbleController: NSWindowController {
     }
 
     private func startFollowing(_ expectedSession: Session) {
+        guard session === expectedSession, dragID == nil else { return }
         followToken?.cancel()
+        let generation = timerGeneration
         followToken = scheduler.after(Self.followDelay) { [weak self, weak expectedSession] in
-            guard let self, let expectedSession else { return }
+            guard let self, let expectedSession, self.timerGeneration == generation else { return }
             self.follow(expectedSession)
         }
     }
 
     private func follow(_ expectedSession: Session) {
         guard session === expectedSession,
+              dragID == nil,
               presentation == .slip || presentation == .paw
         else {
             return
         }
         followToken = nil
         guard let selection = locate(),
-              let newPlacement = Self.placement(
+              let newPlacement = placement(
                 for: selection,
                 companionSize: currentCompanionSize
               )
@@ -666,6 +800,9 @@ final class PetTravelBubbleController: NSWindowController {
     private func hide(_ expectedSession: Session) {
         guard session === expectedSession else { return }
         cancelTimers()
+        dragID = nil
+        (window as? PetTravelBubblePanel)?.onDragStarted = nil
+        (window as? PetTravelBubblePanel)?.onClick = nil
         session = nil
         placement = nil
         presentation = .hidden
@@ -673,6 +810,9 @@ final class PetTravelBubbleController: NSWindowController {
     }
 
     private func cancelTimers() {
+        dragWatchToken?.cancel()
+        dragWatchToken = nil
+        timerGeneration = UUID()
         collapseToken?.cancel()
         collapseToken = nil
         collapseAnimationToken?.cancel()

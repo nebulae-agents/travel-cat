@@ -3,6 +3,33 @@ import XCTest
 @testable import TravelCatApp
 
 final class PetCompanionLayoutTests: XCTestCase {
+    func testRecoveryDoesNotLeaveOnlyTransparentPaddingOnScreen() throws {
+        let screen = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let result = try XCTUnwrap(PetCompanionLayout.place(anchor: CGRect(x: 100, y: 100, width: 100, height: 100), companionSize: CGSize(width: 66, height: 64), offset: CGPoint(x: -178, y: 0), visibleFrames: [screen]))
+        XCTAssertTrue(screen.contains(CGPoint(x: result.frame.midX, y: result.frame.midY)))
+    }
+    func testRememberedOffsetFollowsAnchorAndPreservesCenterDuringResize() throws {
+        let anchor = CGRect(x: 100, y: 100, width: 100, height: 100)
+        let paw = CGRect(x: 300, y: 200, width: 66, height: 64)
+        let offset = try XCTUnwrap(PetCompanionLayout.offset(anchor: anchor, companion: paw))
+        XCTAssertEqual(offset, CGPoint(x: 183, y: 82))
+        let moved = try XCTUnwrap(PetCompanionLayout.place(anchor: anchor.offsetBy(dx: 40, dy: -20), companionSize: paw.size, offset: offset, visibleFrames: [CGRect(x: 0, y: 0, width: 1000, height: 800)]))
+        XCTAssertEqual(moved.frame, paw.offsetBy(dx: 40, dy: -20))
+        let resized = try XCTUnwrap(PetCompanionLayout.place(anchor: anchor, companionSize: CGSize(width: 286, height: 138), offset: offset, visibleFrames: [CGRect(x: 0, y: 0, width: 1000, height: 800)]))
+        XCTAssertEqual(resized.frame.midX, paw.midX)
+        XCTAssertEqual(resized.frame.midY, paw.midY)
+    }
+
+    func testOffsetCanCrossDisplaysAndRecoversAfterDisplayRemoval() throws {
+        let anchor = CGRect(x: 100, y: 100, width: 100, height: 100)
+        let primary = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let secondary = CGRect(x: -800, y: 0, width: 800, height: 600)
+        let offset = CGPoint(x: -600, y: 0)
+        let placed = try XCTUnwrap(PetCompanionLayout.place(anchor: anchor, companionSize: CGSize(width: 66, height: 64), offset: offset, visibleFrames: [primary, secondary]))
+        XCTAssertEqual(placed.frame.midX, -450)
+        let recovered = try XCTUnwrap(PetCompanionLayout.place(anchor: anchor, companionSize: placed.frame.size, offset: offset, visibleFrames: [primary]))
+        XCTAssertTrue(primary.contains(recovered.frame))
+    }
     func testPlacementSwitchesSidesWithPetAndStaysCenteredOnItsEdge() throws {
         let visibleFrame = CGRect(x: 0, y: 0, width: 1_000, height: 700)
         let companionSize = CGSize(width: 200, height: 100)
