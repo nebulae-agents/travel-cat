@@ -163,10 +163,15 @@ final class PostcardGeneratedPresentationAcceptanceTests: XCTestCase {
             "rasterSize": [raster.width, raster.height], "inspectionBackground": background,
             "placementScale": scale, "compactScale": compactScale,
             "lines": lines.map { line -> [String: Any] in
-                let height = line.bounds.height * Double(raster.height) * scale * compactScale
+                let visibleBounds = viewportRect.intersection(line.bounds)
+                let height = visibleBounds.isNull ? 0 : visibleBounds.height * Double(raster.height) * scale * compactScale
+                let majorityOverlap = !visibleBounds.isNull && !visibleBounds.isEmpty
+                    && visibleBounds.width > line.bounds.size.width * 0.5
+                    && visibleBounds.height > line.bounds.size.height * 0.5
                 return ["text": line.text, "confidence": line.confidence,
                     "bounds": [line.bounds.minX, line.bounds.minY, line.bounds.width, line.bounds.height],
                     "viewportContains": viewportRect.contains(line.bounds), "projectedLogicalHeight": height,
+                    "majorityOverlapOnEachAxis": majorityOverlap,
                     "meets12PointMinimum": height >= 12]
             }
         ]

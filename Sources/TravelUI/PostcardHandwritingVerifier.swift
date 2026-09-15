@@ -72,8 +72,15 @@ public enum PostcardHandwritingVerifier {
         let compactScale = Double(TripAlbumLayout.readableCompactArtworkWidth) / Double(base.width)
         let viewportRect = CGRect(x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height)
         for line in lines {
-            guard viewportRect.contains(line.bounds),
-                  line.bounds.height * Double(raster.height) * scale * compactScale >= 12 else { throw Rejection.unreadableText }
+            let visibleBounds = viewportRect.intersection(line.bounds)
+            // The alpha viewport already includes every ink pixel. OCR rectangles are
+            // estimates; majority overlap on each axis is a geometric sanity policy,
+            // not a claim about OCR accuracy. Only visible height counts as readable.
+            let minimumAxisOverlapFraction = 0.5
+            guard !visibleBounds.isNull, !visibleBounds.isEmpty,
+                  visibleBounds.width > line.bounds.size.width * minimumAxisOverlapFraction,
+                  visibleBounds.height > line.bounds.size.height * minimumAxisOverlapFraction,
+                  visibleBounds.height * Double(raster.height) * scale * compactScale >= 12 else { throw Rejection.unreadableText }
         }
         try checkContrast(base: base, raster: raster, frame: frame)
         return Verified(pngData: inkData, viewport: viewport, placement: normalized(frame))
@@ -84,6 +91,9 @@ public enum PostcardHandwritingVerifier {
         guard !observations.isEmpty, observations.count <= 128, !textBytes(quote).isEmpty else { throw Rejection.invalidText }
         for line in observations {
             guard line.confidence.isFinite, line.confidence >= 0.9, line.confidence <= 1,
+                  line.bounds.origin.x.isFinite, line.bounds.origin.y.isFinite,
+                  line.bounds.size.width.isFinite, line.bounds.size.height.isFinite,
+                  line.bounds.size.width > 0, line.bounds.size.height > 0,
                   normalized(line.bounds).isValid, !textBytes(line.text).isEmpty else { throw Rejection.invalidText }
             for alternative in line.alternatives {
                 guard alternative.confidence.isFinite, alternative.confidence >= 0, alternative.confidence <= 1 else { throw Rejection.invalidText }

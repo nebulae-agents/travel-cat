@@ -6,6 +6,82 @@ import TravelStorage
 @testable import TravelUI
 
 final class PostcardHandwritingVerifierTests: XCTestCase {
+    func testEstimatedHorizontalOverhangKeepsBytesViewportAndContrastGate() throws {
+        let base = try image(width: 1152, height: 768, gray: 1)
+        let ink = try png(width: 120, height: 70, rect: CGRect(x: 10, y: 8, width: 100, height: 50), gray: 0, alpha: 1)
+        let raster = try PostcardPresentationStore.inspectHandwriting(ink)
+        let line = PostcardHandwritingVerifier.Observation(text: "中文！", confidence: 1,
+            bounds: CGRect(x: 0.05, y: 0.15, width: 0.9, height: 0.6))
+        let verified = try PostcardHandwritingVerifier.verify(event: event, base: base, inkData: ink, analysis: analysis(), observations: [line])
+        XCTAssertEqual(verified.pngData, ink)
+        XCTAssertEqual(verified.viewport, raster.paddedViewport)
+        let pale = try png(width: 120, height: 70, rect: CGRect(x: 10, y: 8, width: 100, height: 50), gray: 0.8, alpha: 1)
+        XCTAssertThrowsError(try PostcardHandwritingVerifier.verify(event: event, base: base, inkData: pale, analysis: analysis(), observations: [line])) {
+            XCTAssertEqual($0 as? PostcardHandwritingVerifier.Rejection, .insufficientContrast)
+        }
+    }
+
+    func testEstimatedBoundsNeedMajorityOverlapOnEachAxis() throws {
+        let base = try image(width: 1152, height: 768, gray: 1)
+        let ink = try png(width: 120, height: 70, rect: CGRect(x: 30, y: 20, width: 60, height: 30), gray: 0, alpha: 1)
+        let viewport = try PostcardPresentationStore.inspectHandwriting(ink).paddedViewport
+        let bounds = [
+            CGRect(x: 0, y: 0, width: 0.1, height: 0.1), // disjoint
+            CGRect(x: 0, y: viewport.y, width: viewport.x, height: 0.4), // touch only
+            CGRect(x: 0, y: viewport.y, width: viewport.x * 2, height: 0.4), // exactly half width
+            CGRect(x: 0, y: viewport.y, width: viewport.x * 1.9, height: 0.4), // minority width
+            CGRect(x: viewport.x, y: 0, width: 0.4, height: viewport.y * 2), // exactly half height
+            CGRect(x: viewport.x, y: 0, width: 0.4, height: viewport.y * 1.9), // minority height
+            CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.000001)
+        ]
+        for box in bounds {
+            let line = PostcardHandwritingVerifier.Observation(text: "中文！", confidence: 1, bounds: box)
+            XCTAssertThrowsError(try PostcardHandwritingVerifier.verify(event: event, base: base, inkData: ink, analysis: analysis(), observations: [line]), "\(box)") {
+                XCTAssertEqual($0 as? PostcardHandwritingVerifier.Rejection, .unreadableText)
+            }
+        }
+    }
+
+    func testVerticalOverhangCannotCountInvisibleHeightTowardReadability() throws {
+        let base = try image(width: 1152, height: 768, gray: 1)
+        let ink = try png(width: 120, height: 70, rect: CGRect(x: 10, y: 8, width: 100, height: 50), gray: 0, alpha: 1)
+        let viewport = try PostcardPresentationStore.inspectHandwriting(ink).paddedViewport
+        let safe = try PostcardHandwritingVerifier.select(event: event, base: base, analysis: analysis()).safeArea
+        let scale = min(safe.width * 1152 / (viewport.width * 120), safe.height * 768 / (viewport.height * 70))
+        let pointsPerNormalizedHeight = 70 * scale * Double(TripAlbumLayout.readableCompactArtworkWidth) / 1152
+        let visibleHeight = 11.0 / pointsPerNormalizedHeight
+        let box = CGRect(x: 0.1, y: viewport.y - visibleHeight / 2, width: 0.8, height: visibleHeight * 1.5)
+        XCTAssertGreaterThanOrEqual(box.height * pointsPerNormalizedHeight, 12)
+        XCTAssertGreaterThanOrEqual(box.minY, 0)
+        let line = PostcardHandwritingVerifier.Observation(text: "中文！", confidence: 1, bounds: box)
+        XCTAssertThrowsError(try PostcardHandwritingVerifier.verify(event: event, base: base, inkData: ink, analysis: analysis(), observations: [line])) {
+            XCTAssertEqual($0 as? PostcardHandwritingVerifier.Rejection, .unreadableText)
+        }
+    }
+
+    func testRawOCRBoundsRejectNonpositiveNonfiniteAndOutsideImage() throws {
+        let invalid = [
+            CGRect(x: 0.1, y: 0.2, width: 0, height: 0.4),
+            CGRect(x: 0.1, y: 0.2, width: 0.4, height: 0),
+            CGRect(x: 0.8, y: 0.2, width: -0.4, height: 0.4),
+            CGRect(x: 0.1, y: 0.8, width: 0.4, height: -0.4),
+            CGRect(x: CGFloat.nan, y: 0.2, width: 0.4, height: 0.4),
+            CGRect(x: 0.1, y: CGFloat.infinity, width: 0.4, height: 0.4),
+            CGRect(x: 0.1, y: 0.2, width: CGFloat.nan, height: 0.4),
+            CGRect(x: 0.1, y: 0.2, width: 0.4, height: CGFloat.infinity),
+            CGRect(x: -0.1, y: 0.2, width: 0.4, height: 0.4),
+            CGRect(x: 0.8, y: 0.2, width: 0.4, height: 0.4)
+        ]
+        for box in invalid {
+            XCTAssertThrowsError(try PostcardHandwritingVerifier.validateText("中文！", observations: [.init(text: "中文！", confidence: 1, bounds: box)]), "\(box)") {
+                XCTAssertEqual($0 as? PostcardHandwritingVerifier.Rejection, .invalidText)
+            }
+        }
+        XCTAssertThrowsError(try PostcardHandwritingVerifier.validateText("中文！", observations: [.init(text: "中文！", confidence: 0.5, bounds: CGRect(x: 0.1, y: 0.2, width: 0.4, height: 0.4))])) {
+            XCTAssertEqual($0 as? PostcardHandwritingVerifier.Rejection, .invalidText)
+        }
+    }
+
     func testLineOrderAndReadabilityRejectWrongOrTinyLines() throws {
         let top = PostcardHandwritingVerifier.Observation(text: "中", confidence: 1, bounds: CGRect(x: 0.1, y: 0.1, width: 0.6, height: 0.2))
         let bottom = PostcardHandwritingVerifier.Observation(text: "文！", confidence: 1, bounds: CGRect(x: 0.1, y: 0.5, width: 0.6, height: 0.2))
