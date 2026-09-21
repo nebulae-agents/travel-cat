@@ -117,11 +117,19 @@ class PublishGitHubTests(unittest.TestCase):
         self.repo = Path(self.temporary.name) / "source project with spaces"
         self.repo.mkdir()
         self.git("init", "-q", "-b", "publish-test")
+        # These tiny test repositories are copied as snapshots. Background Git
+        # maintenance can remove its lock while copytree is reading .git.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
         self.git("config", "user.name", "Publish Boundary Test")
         self.git("config", "user.email", "publish@example.invalid")
         self.write("README.md", "public fixture\n")
         self.commit("initial")
         self.runtime = RecordingRuntime(self.repo)
+
+    def test_fixture_disables_background_git_maintenance_before_snapshots(self):
+        self.assertEqual(self.git("config", "--bool", "maintenance.auto").stdout.strip(), "false")
+        self.assertEqual(self.git("config", "gc.auto").stdout.strip(), "0")
 
     def git(self, *arguments):
         return subprocess.run(
