@@ -7,7 +7,8 @@ import TravelCore
 
 @MainActor
 final class PetTravelPromptServiceTests: XCTestCase {
-    private let noon = Date(timeIntervalSince1970: 1_787_122_800)
+    // Fixed UTC noon, independent of the runner's time zone and wall clock.
+    private let noon = Date(timeIntervalSince1970: 1_787_140_800)
 
     func testBubbleSuccessCommitsDeliveryAndRoutesExactPostcard() throws {
         let harness = try makeHarness()
@@ -23,7 +24,9 @@ final class PetTravelPromptServiceTests: XCTestCase {
                 return true
             },
             postNotification: { _ in XCTFail("must not fall back"); return false },
-            route: { routes.append($0) }
+            route: { routes.append($0) },
+            calendar: utcCalendar(),
+            clock: { self.noon }
         )
 
         service.ingestCurrent(settings: .init(), now: noon)
@@ -42,7 +45,9 @@ final class PetTravelPromptServiceTests: XCTestCase {
             coordinator: harness.coordinator,
             showBubble: { _, _, _ in false },
             postNotification: { _ in firstAttempt.fulfill(); return false },
-            route: { _ in }
+            route: { _ in },
+            calendar: utcCalendar(),
+            clock: { self.noon }
         )
         firstService.ingestCurrent(settings: .init(), now: noon)
         await fulfillment(of: [firstAttempt], timeout: 2)
@@ -59,7 +64,9 @@ final class PetTravelPromptServiceTests: XCTestCase {
                 secondAttempt.fulfill()
                 return true
             },
-            route: { _ in }
+            route: { _ in },
+            calendar: utcCalendar(),
+            clock: { self.noon }
         )
         relaunched.retry(settings: .init(), now: noon)
         await fulfillment(of: [secondAttempt], timeout: 2)
@@ -84,7 +91,9 @@ final class PetTravelPromptServiceTests: XCTestCase {
                 return true
             },
             postNotification: { _ in XCTFail("must not fall back"); return false },
-            route: { _ in }
+            route: { _ in },
+            calendar: utcCalendar(),
+            clock: { self.noon }
         )
 
         try harness.repository.withExclusiveLock {
@@ -137,6 +146,7 @@ final class PetTravelPromptServiceTests: XCTestCase {
             },
             postNotification: { _ in XCTFail("must not fall back"); return false },
             route: { _ in },
+            calendar: utcCalendar(),
             clock: { self.noon }
         )
 
@@ -174,7 +184,9 @@ final class PetTravelPromptServiceTests: XCTestCase {
             coordinator: harness.coordinator,
             showBubble: { _, _, _ in deliveryAttempts += 1; return true },
             postNotification: { _ in deliveryAttempts += 1; return true },
-            route: { _ in }
+            route: { _ in },
+            calendar: utcCalendar(),
+            clock: { self.noon }
         )
 
         service.ingestCurrent(settings: .init(), now: noon)
@@ -202,6 +214,7 @@ final class PetTravelPromptServiceTests: XCTestCase {
             },
             postNotification: { _ in XCTFail("must not fall back"); return false },
             route: { _ in },
+            calendar: utcCalendar(),
             clock: { self.noon }
         )
 
@@ -215,7 +228,8 @@ final class PetTravelPromptServiceTests: XCTestCase {
         ))])
         XCTAssertEqual(try harness.coordinator.pendingCount, 1)
 
-        replacements[0]()
+        let replaceFirst = try XCTUnwrap(replacements.first)
+        replaceFirst()
         XCTAssertEqual(shown, [
             .prompt(.departed(
                 eventID: departed.id,
@@ -339,7 +353,9 @@ final class PetTravelPromptServiceTests: XCTestCase {
                 attempted.fulfill()
                 return payload != nil
             },
-            route: { _ in }
+            route: { _ in },
+            calendar: utcCalendar(),
+            clock: { self.noon }
         )
 
         service.ingestCurrent(settings: .init(), now: noon)
@@ -470,7 +486,9 @@ final class PetTravelPromptServiceTests: XCTestCase {
                 coordinator: harness.coordinator,
                 showBubble: { _, _, _ in false },
                 postNotification: { _ in attempted.fulfill(); return result },
-                route: { _ in }
+                route: { _ in },
+                calendar: utcCalendar(),
+                clock: { self.noon }
             )
             service.ingestCurrent(settings: .init(), now: noon)
             await fulfillment(of: [attempted], timeout: 2)
@@ -496,6 +514,7 @@ final class PetTravelPromptServiceTests: XCTestCase {
                 return false
             },
             route: { _ in },
+            calendar: utcCalendar(),
             scheduler: scheduler,
             clock: { self.noon }
         )
@@ -529,6 +548,7 @@ final class PetTravelPromptServiceTests: XCTestCase {
             showBubble: { _, _, _ in false },
             postNotification: { _ in notificationCount += 1; return false },
             route: { _ in },
+            calendar: utcCalendar(),
             scheduler: scheduler,
             clock: { self.noon }
         )
@@ -560,6 +580,7 @@ final class PetTravelPromptServiceTests: XCTestCase {
             showBubble: { _, _, _ in false },
             postNotification: { _ in notificationCount += 1; return false },
             route: { _ in },
+            calendar: utcCalendar(),
             scheduler: scheduler,
             clock: { self.noon },
             preferBubble: { $0.followCodexPet }
@@ -601,6 +622,7 @@ final class PetTravelPromptServiceTests: XCTestCase {
             },
             postNotification: deferredNotification.post,
             route: { _ in },
+            calendar: utcCalendar(),
             clock: { self.noon },
             preferBubble: { $0.followCodexPet },
             applyBubblePreference: { preferences.append($0) }
@@ -642,6 +664,7 @@ final class PetTravelPromptServiceTests: XCTestCase {
             },
             postNotification: deferredNotification.post,
             route: { _ in },
+            calendar: utcCalendar(),
             clock: { self.noon },
             preferBubble: { $0.followCodexPet },
             applyBubblePreference: { _ in }
@@ -671,7 +694,9 @@ final class PetTravelPromptServiceTests: XCTestCase {
                 return true
             },
             postNotification: { _ in XCTFail("must not fall back"); return false },
-            route: { _ in }
+            route: { _ in },
+            calendar: utcCalendar(),
+            clock: { self.noon }
         )
 
         service.ingestCurrent(settings: .init(), now: noon)

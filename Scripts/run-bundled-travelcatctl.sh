@@ -80,7 +80,7 @@ if [ "$COMMAND" = "install-default-pet" ]; then
         "$PINNED_BINARY" "$COMMAND"
 fi
 
-if /usr/bin/plutil -extract TravelCatDataRoot xml1 -o /dev/null "$PLIST" 2>/dev/null; then
+if /usr/bin/plutil -extract TravelCatDataRoot xml1 -o /dev/null "$PLIST" >/dev/null 2>&1; then
     DATA_ROOT=$(/usr/bin/plutil -extract TravelCatDataRoot raw -expect string -o - "$PLIST" 2>/dev/null) ||
         fail "TravelCatDataRoot is not a string"
     TRIMMED_ROOT=$(printf '%s' "$DATA_ROOT" | /usr/bin/sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')

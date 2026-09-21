@@ -15,14 +15,15 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       PYTHONDONTWRITEBYTECODE: "1"
+      TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE: ""
+      TRAVEL_CAT_LIVE_RENDER_SESSION: ""
+      TRAVEL_CAT_LIVE_PRODUCTION_ROOT: ""
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify toolchain and offline source contracts
-        env:
-          TRAVEL_CAT_SCRATCH_ROOT: ${{ runner.temp }}/travel-cat-swift
+      - name: Verify toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -31,10 +32,24 @@ jobs:
           swift --version
           python3 --version
           node --version
-          python3 -m unittest discover -s Scripts/tests -p '*_tests.py'
-          Scripts/tests/project-upload-tools-tests.sh
-          Scripts/verify-travel-cat-plugin.sh
-          Scripts/verify-travel-cat-skill.sh
-          Scripts/verify-agent-contract.sh
-          Scripts/travel-cat-swift.sh test
-          Scripts/audit-project-upload.sh
+          echo "TRAVEL_CAT_SCRATCH_ROOT=$RUNNER_TEMP/travel-cat-swift" >> "$GITHUB_ENV"
+      - name: Python source contracts
+        run: python3 -m unittest discover -s Scripts/tests -p '*_tests.py'
+      - name: Upload tooling contracts
+        run: Scripts/tests/project-upload-tools-tests.sh
+      - name: Plugin contracts
+        run: Scripts/verify-travel-cat-plugin.sh
+      - name: Skill contracts
+        run: Scripts/verify-travel-cat-skill.sh
+      - name: Agent contracts
+        run: Scripts/verify-agent-contract.sh
+      - name: Swift tests (UTC)
+        env:
+          TZ: UTC
+        run: Scripts/travel-cat-swift.sh test
+      - name: Prompt tests (Asia/Shanghai)
+        env:
+          TZ: Asia/Shanghai
+        run: Scripts/travel-cat-swift.sh test --filter PetTravelPromptServiceTests
+      - name: Public upload audit
+        run: Scripts/audit-project-upload.sh

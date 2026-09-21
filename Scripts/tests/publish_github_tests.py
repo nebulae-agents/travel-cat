@@ -457,7 +457,11 @@ class PublishArtifactsTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         job_environment, steps = workflow.split("    steps:", 1)
         self.assertNotIn("${{ runner.temp }}", job_environment)
-        self.assertIn("        env:\n          TRAVEL_CAT_SCRATCH_ROOT: ${{ runner.temp }}/travel-cat-swift", steps)
+        self.assertIn('echo "TRAVEL_CAT_SCRATCH_ROOT=$RUNNER_TEMP/travel-cat-swift" >> "$GITHUB_ENV"', steps)
+        for name in ("Python source contracts", "Upload tooling contracts", "Plugin contracts",
+                     "Skill contracts", "Agent contracts", "Swift tests (UTC)",
+                     "Prompt tests (Asia/Shanghai)", "Public upload audit"):
+            self.assertIn("- name: " + name, steps)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("runs-on: macos-15", workflow)
         self.assertIn("actions/checkout@v7", workflow)
