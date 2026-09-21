@@ -15,9 +15,6 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       PYTHONDONTWRITEBYTECODE: "1"
-      TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE: ""
-      TRAVEL_CAT_LIVE_RENDER_SESSION: ""
-      TRAVEL_CAT_LIVE_PRODUCTION_ROOT: ""
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,10 +43,14 @@ jobs:
       - name: Swift tests (UTC)
         env:
           TZ: UTC
-        run: Scripts/travel-cat-swift.sh test
+        run: |
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT
+          Scripts/travel-cat-swift.sh test
       - name: Prompt tests (Asia/Shanghai)
         env:
           TZ: Asia/Shanghai
-        run: Scripts/travel-cat-swift.sh test --filter PetTravelPromptServiceTests
+        run: |
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT
+          Scripts/travel-cat-swift.sh test --filter PetTravelPromptServiceTests
       - name: Public upload audit
         run: Scripts/audit-project-upload.sh

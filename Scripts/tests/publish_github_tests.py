@@ -476,6 +476,11 @@ class PublishArtifactsTests(unittest.TestCase):
         self.assertIn("/Applications/Xcode_26.2.app/Contents/Developer", workflow)
         self.assertIn("Scripts/travel-cat-swift.sh test", workflow)
         self.assertNotIn("TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE: 1", workflow)
+        # Presence-based opt-ins must be absent, not defined with empty values.
+        for variable in ("TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE", "TRAVEL_CAT_LIVE_RENDER_SESSION",
+                         "TRAVEL_CAT_LIVE_PRODUCTION_ROOT"):
+            self.assertNotIn(variable + ":", job_environment)
+        self.assertGreaterEqual(steps.count("unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE"), 3)
 
         readme = (ROOT / "README.md").read_text()
         for expected in ("Deploy Local.command", "Publish to GitHub.command", "gh auth login",
