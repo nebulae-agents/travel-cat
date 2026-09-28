@@ -1,0 +1,35 @@
+{
+  "collarColor" : "violet",
+  "coordinates" : {
+    "front" : {
+      "column" : 0,
+      "row" : 0
+    },
+    "side" : {
+      "column" : 0,
+      "row" : 2
+    },
+    "sitting" : {
+      "column" : 2,
+      "row" : 8
+    }
+  },
+  "displayName" : "Cute Black Cat",
+  "eyeColor" : "gold",
+  "frameSize" : {
+    "height" : 208,
+    "width" : 192
+  },
+  "furColor" : "near-black with subtle violet highlights",
+  "identityMarker" : "small gold bell",
+  "mustPreserve" : [
+    "round face",
+    "large gold eyes",
+    "violet collar",
+    "gold bell",
+    "short black fur"
+  ],
+  "sourceSpriteSHA256" : "cf1bc43ebaff9555c2f715a58c147c32d2de78a4d36b11c83643cd5067a62eaf",
+  "species" : "small round-faced black cat",
+  "spriteVersionNumber" : 2
+}

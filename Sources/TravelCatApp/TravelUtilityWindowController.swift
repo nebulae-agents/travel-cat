@@ -62,6 +62,14 @@ final class TravelUtilityWindowController: NSWindowController, NSWindowDelegate 
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
+    func resize(to size: NSSize) {
+        guard let window else { return }
+        window.setContentSize(size)
+        window.contentMinSize = NSSize(width: size == Self.albumSize ? Self.albumSize.width : Self.statusSize.width,
+                                      height: min(size.height, 520))
+        clampToVisibleScreen(window)
+    }
+
     func bringToFront() {
         guard let window else { return }
         if window.isVisible {

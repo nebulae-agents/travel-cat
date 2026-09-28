@@ -293,7 +293,6 @@ final class TravelViewsTests: XCTestCase {
         XCTAssertEqual(undersized.artworkWidth, 280)
         XCTAssertFalse(undersized.isReadable)
         XCTAssertEqual(TripAlbumLayout.minimumWindowContentWidth, 760)
-        XCTAssertEqual(TripAlbumLayout.artworkHeight, 120)
     }
 
     func testAlbumLayoutMinimumContentHeightIncludesDateSectionsAndClampsNegativeCounts() {
@@ -356,6 +355,9 @@ final class TravelViewsTests: XCTestCase {
             open: { _ in }
         ))
         wideView.frame = CGRect(x: 0, y: 0, width: 760, height: 480)
+        let wideWindow = NSWindow(contentRect: wideView.frame, styleMask: [], backing: .buffered, defer: false)
+        wideWindow.contentView = wideView
+        defer { withExtendedLifetime(wideWindow) {} }
         wideView.layoutSubtreeIfNeeded()
 
         let narrowView = NSHostingView(rootView: TripAlbumView(
@@ -365,6 +367,9 @@ final class TravelViewsTests: XCTestCase {
             open: { _ in }
         ))
         narrowView.frame = CGRect(x: 0, y: 0, width: 500, height: 480)
+        let narrowWindow = NSWindow(contentRect: narrowView.frame, styleMask: [], backing: .buffered, defer: false)
+        narrowWindow.contentView = narrowView
+        defer { withExtendedLifetime(narrowWindow) {} }
         narrowView.layoutSubtreeIfNeeded()
 
         XCTAssertNotNil(wideView.hitTest(CGPoint(x: 380, y: 240)))
@@ -375,6 +380,13 @@ final class TravelViewsTests: XCTestCase {
         let event = event(id: UUID(), tripID: UUID(), at: 0)
 
         XCTAssertEqual(TripAlbumView.postcardDestination(for: event), .postcard(event.id))
+    }
+
+    func testAlbumArtworkKeepsThreeToTwoProportionsAtBothGridWidths() {
+        for availableWidth: CGFloat in [760, 500] {
+            let layout = TripAlbumLayout.geometry(availableWidth: availableWidth, messages: ["湖边的明信片"])
+            XCTAssertEqual(layout.artworkWidth / layout.artworkHeight, 1.5, accuracy: 0.001)
+        }
     }
 
     @MainActor
@@ -426,6 +438,11 @@ final class TravelViewsTests: XCTestCase {
         ))
         detail.frame = CGRect(x: 0, y: 0, width: 360, height: 230)
         compact.frame = CGRect(x: 0, y: 0, width: 170, height: 100)
+        let detailWindow = NSWindow(contentRect: detail.frame, styleMask: [], backing: .buffered, defer: false)
+        let compactWindow = NSWindow(contentRect: compact.frame, styleMask: [], backing: .buffered, defer: false)
+        detailWindow.contentView = detail
+        compactWindow.contentView = compact
+        defer { withExtendedLifetime((detailWindow, compactWindow)) {} }
 
         detail.layoutSubtreeIfNeeded()
         compact.layoutSubtreeIfNeeded()
@@ -650,6 +667,9 @@ final class TravelViewsTests: XCTestCase {
         .frame(width: 320, height: 360)
         let hostingView = NSHostingView(rootView: view)
         hostingView.frame = CGRect(x: 0, y: 0, width: 320, height: 360)
+        let window = NSWindow(contentRect: hostingView.frame, styleMask: [], backing: .buffered, defer: false)
+        window.contentView = hostingView
+        defer { withExtendedLifetime(window) {} }
 
         hostingView.layoutSubtreeIfNeeded()
 
@@ -667,6 +687,15 @@ final class TravelViewsTests: XCTestCase {
             Supply(id: "raincoat", name: "小雨衣", influence: "雨天的积极事件"),
         ])
         XCTAssertEqual(Set(supplies.map(\.id)).count, supplies.count)
+    }
+
+    func testHistoryAlbumKeepsEarlierTripsAlongsideNewTrip() {
+        let old = event(id: UUID(), tripID: UUID(), at: 10)
+        let recent = event(id: UUID(), tripID: UUID(), at: 20)
+        let future = event(id: UUID(), tripID: recent.tripID, at: 40)
+        XCTAssertEqual(TripAlbumView.orderedEvents(tripID: nil,
+            events: [recent, future, old], now: Date(timeIntervalSince1970: 30)).map(\.id),
+            [old.id, recent.id])
     }
 
     func testAlbumShowsOnlyArrivedPostcardsFromRequestedTrip() {
@@ -759,7 +788,7 @@ final class TravelViewsTests: XCTestCase {
             usedItemIDs: [], visitedPlaces: [], mood: mood
         ))
         let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
-        let expected = try pngData(width: 768, height: 768)
+        let expected = try pngData(width: 1152, height: 768)
         let relativePath = "postcards/\(tripID.uuidString.lowercased())/card.png"
         try FileManager.default.createDirectory(at: root.appendingPathComponent(relativePath).deletingLastPathComponent(), withIntermediateDirectories: true)
         try expected.write(to: root.appendingPathComponent(relativePath))

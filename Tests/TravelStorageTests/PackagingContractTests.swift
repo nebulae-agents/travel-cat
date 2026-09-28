@@ -127,7 +127,7 @@ final class PackagingContractTests: XCTestCase {
             "com.nebulae.travelcat",
             "binarySHA256=", "binaryArtifactID=",
             "TRAVEL_CAT_DATA",
-            "Library/Application Support/TravelCat/TravelPetData",
+            "data-location.json",
         ] {
             XCTAssertTrue(launcher.contains(token), "Bundled launcher is missing: \(token)")
         }
@@ -188,6 +188,19 @@ final class PackagingContractTests: XCTestCase {
             result.stdout,
             "status\n\(home.path)/Library/Application Support/TravelCat/TravelPetData\n\(fixture.app.path)/Contents/Resources/TravelCat_TravelUI.bundle\n"
         )
+    }
+
+    func testBundledLauncherReadsSavedInstallationLocationWithoutAmbientOverride() throws {
+        let fixture = try makeBundledLauncherFixture(dataRoot: nil)
+        defer { try? FileManager.default.removeItem(at: fixture.app.deletingLastPathComponent()) }
+        let home = fixture.app.deletingLastPathComponent().appendingPathComponent("saved-home")
+        let support = home.appendingPathComponent("Library/Application Support/TravelCat")
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        try Data(#"{"schemaVersion":1,"path":"/tmp/preserved-travel"}"#.utf8)
+            .write(to: support.appendingPathComponent("data-location.json"))
+        let result = try run(fixture.launcher, ["status"], environment: ["HOME": home.path, "TRAVEL_CAT_DATA": "/tmp/ambient"])
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertTrue(result.stdout.hasPrefix("status\n/tmp/preserved-travel\n"))
     }
 
     func testBundledLauncherUsesAbsolutePlistOverride() throws {
@@ -291,7 +304,7 @@ final class PackagingContractTests: XCTestCase {
         XCTAssertTrue(installerSource.contains("com.nebulae.travelcat"))
         XCTAssertTrue(installerSource.contains("codesign --verify --deep --strict"))
         XCTAssertTrue(installerSource.contains(".staging."))
-        XCTAssertFalse(installerSource.contains("Application Support"))
+        XCTAssertTrue(installerSource.contains("data-location.json"))
 
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("travel-cat-installer-tests-\(UUID().uuidString)", isDirectory: true)
@@ -300,7 +313,7 @@ final class PackagingContractTests: XCTestCase {
         let source = root.appendingPathComponent("source/Travel Cat.app", isDirectory: true)
         try makeSignedFixtureApp(at: source, bundleID: "com.nebulae.travelcat")
 
-        let dataRoot = home.appendingPathComponent("Library/Application Support/TravelCat/TravelPetData", isDirectory: true)
+        let dataRoot = home.appendingPathComponent("data-location.json", isDirectory: true)
         try FileManager.default.createDirectory(at: dataRoot, withIntermediateDirectories: true)
         let marker = dataRoot.appendingPathComponent("preserve-me.txt")
         let markerBytes = Data("travel-history-must-survive\n".utf8)
@@ -498,19 +511,100 @@ final class PackagingContractTests: XCTestCase {
         XCTAssertFalse(docs.localizedCaseInsensitiveContains("default sandbox"))
     }
 
-    private func makeSignedFixtureApp(at app: URL, bundleID: String) throws {
+    func testBundledLauncherResolvesPortableDataWithoutChangingHistory() throws {
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let app = root.appendingPathComponent("Travel Cat.app")
+        try makeSignedFixtureApp(at: app, bundleID: "com.nebulae.travelcat")
+        let resources = app.appendingPathComponent("Contents/Resources")
+        let helpers = app.appendingPathComponent("Contents/Helpers")
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: helpers, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let helper = helpers.appendingPathComponent("travelcatctl")
+        try Data("#!/bin/sh\nprintf '%s' \"$TRAVEL_CAT_DATA\"\n".utf8).write(to: helper)
+        let helperSign = try run(URL(fileURLWithPath: "/usr/bin/codesign"), ["--force", "--sign", "-", helper.path])
+        XCTAssertEqual(helperSign.status, 0, helperSign.stderr)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: helper.path)
+        let digest = try sha256(helper)
+        let provenance = "format=travel-cat-cli-provenance-v3\nproduct=travelcatctl\nconfiguration=release\nsourceTreeSHA256=\(String(repeating: "0", count: 64))\nbinarySHA256=\(digest)\nbinaryArtifactID=\(digest)/travelcatctl\n"
+        try Data(provenance.utf8).write(to: resources.appendingPathComponent("travelcatctl-release.provenance"))
+        let launcher = resources.appendingPathComponent("run-travelcatctl")
+        try FileManager.default.copyItem(at: projectRoot.appendingPathComponent("Scripts/run-bundled-travelcatctl.sh"), to: launcher)
+        let sign = try run(URL(fileURLWithPath: "/usr/bin/codesign"), ["--force", "--sign", "-", app.path])
+        XCTAssertEqual(sign.status, 0, sign.stderr)
+        let fresh = try run(URL(fileURLWithPath: "/bin/sh"), [launcher.path, "status"], environment: ["HOME": home.path, "TRAVEL_CAT_DATA": ""])
+        XCTAssertEqual(fresh.status, 0, fresh.stderr)
+        XCTAssertEqual(fresh.stdout, home.appendingPathComponent("Library/Application Support/TravelCat/TravelPetData").path)
+        let preference = home.appendingPathComponent("Library/Application Support/TravelCat/data-location.json")
+        try FileManager.default.createDirectory(at: preference.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let history = root.appendingPathComponent("old history")
+        try FileManager.default.createDirectory(at: history, withIntermediateDirectories: true)
+        let marker = history.appendingPathComponent("marker")
+        try Data("preserved".utf8).write(to: marker)
+        try JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "path": history.path]).write(to: preference)
+        let migrated = try run(URL(fileURLWithPath: "/bin/sh"), [launcher.path, "status"], environment: ["HOME": home.path, "TRAVEL_CAT_DATA": ""])
+        XCTAssertEqual(migrated.status, 0, migrated.stderr)
+        XCTAssertEqual(migrated.stdout, history.path)
+        try Data("broken".utf8).write(to: preference)
+        let rejected = try run(URL(fileURLWithPath: "/bin/sh"), [launcher.path, "status"], environment: ["HOME": home.path, "TRAVEL_CAT_DATA": ""])
+        XCTAssertNotEqual(rejected.status, 0)
+        let override = try run(URL(fileURLWithPath: "/bin/sh"), [launcher.path, "status"], environment: ["HOME": home.path, "TRAVEL_CAT_DATA": "/explicit"])
+        XCTAssertNotEqual(override.status, 0, "Ambient data-root must not bypass a malformed installation preference")
+        XCTAssertTrue(override.stdout.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: marker), Data("preserved".utf8))
+    }
+
+    func testUpgradePreservesLegacyLocationAndRejectsMalformedPreference() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let installed = home.appendingPathComponent("Applications/Travel Cat.app")
+        let source = root.appendingPathComponent("source/Travel Cat.app")
+        let history = root.appendingPathComponent("old history")
+        try FileManager.default.createDirectory(at: history, withIntermediateDirectories: true)
+        let marker = history.appendingPathComponent("history.json")
+        try Data("original".utf8).write(to: marker)
+        try makeSignedFixtureApp(at: installed, bundleID: "com.nebulae.travelcat", dataRoot: history.path)
+        try makeSignedFixtureApp(at: source, bundleID: "com.nebulae.travelcat")
+        let installer = projectRoot.appendingPathComponent("Scripts/install-travel-cat-app.sh")
+        let result = try run(installer, [source.path, "--replace-existing"], environment: ["HOME": home.path])
+        XCTAssertEqual(result.status, 0, result.stderr)
+        let preference = home.appendingPathComponent("Library/Application Support/TravelCat/data-location.json")
+        let bytes = try Data(contentsOf: preference)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(json["path"] as? String, history.path)
+        XCTAssertEqual(try Data(contentsOf: marker), Data("original".utf8))
+        let permissions = try FileManager.default.attributesOfItem(atPath: preference.path)[.posixPermissions] as? Int
+        XCTAssertEqual(permissions, 0o600)
+        // A different signed app exercises replacement validation rather than the no-op path.
+        try FileManager.default.removeItem(at: source)
+        try makeSignedFixtureApp(at: source, bundleID: "com.nebulae.travelcat", dataRoot: "/another")
+        try Data("broken".utf8).write(to: preference)
+        let rejected = try run(installer, [source.path, "--replace-existing"], environment: ["HOME": home.path])
+        XCTAssertNotEqual(rejected.status, 0)
+        XCTAssertEqual(try Data(contentsOf: marker), Data("original".utf8))
+        try bytes.write(to: preference)
+        let preserved = try run(installer, [source.path, "--replace-existing"], environment: ["HOME": home.path])
+        XCTAssertEqual(preserved.status, 0, preserved.stderr)
+        XCTAssertEqual(try Data(contentsOf: preference), bytes)
+    }
+
+    private func makeSignedFixtureApp(at app: URL, bundleID: String, dataRoot: String? = nil) throws {
         let contents = app.appendingPathComponent("Contents", isDirectory: true)
         let macOS = contents.appendingPathComponent("MacOS", isDirectory: true)
         try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
         let executable = macOS.appendingPathComponent("TravelCatApp")
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let plist: [String: Any] = [
+        var plist: [String: Any] = [
             "CFBundleIdentifier": bundleID,
             "CFBundleExecutable": "TravelCatApp",
             "CFBundlePackageType": "APPL",
             "CFBundleVersion": "1",
         ]
+        if let dataRoot { plist["TravelCatDataRoot"] = dataRoot }
         let plistData = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
         try plistData.write(to: contents.appendingPathComponent("Info.plist"))
         let signing = try run(URL(fileURLWithPath: "/usr/bin/codesign"), ["--force", "--sign", "-", app.path])

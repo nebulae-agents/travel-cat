@@ -33,6 +33,30 @@ public struct TripScheduler: Sendable {
         shouldCheck(now: now) && snapshot.nextActionAt <= now
     }
 
+    /// Schedules the action following entry into `phase`.
+    public func nextAction(after date: Date, phase: TravelPhase, seed: UInt64, calendar: Calendar) -> Date {
+        guard mode == .daily else { return date.addingTimeInterval(120) }
+
+        let interval: ClosedRange<UInt64>
+        switch phase {
+        case .resting:
+            // Rest is elapsed time; the departure window follows local civil days.
+            // Waiting until a new local day prevents a second departure after returning.
+            let rested = date.addingTimeInterval(12 * 3600)
+            let nextDay = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))!
+            return nextDeparture(after: max(rested, nextDay), seed: seed, calendar: calendar)
+        case .preparing:
+            interval = 900...2700
+        case .transit, .returning:
+            interval = 3600...10800
+        case .exploring, .postcardReady:
+            interval = 14400...21600
+        }
+        var generator = SeededGenerator(seed: seed)
+        let seconds = interval.lowerBound + generator.next() % (interval.upperBound - interval.lowerBound + 1)
+        return date.addingTimeInterval(TimeInterval(seconds))
+    }
+
     public func nextDeparture(after date: Date, seed: UInt64, calendar: Calendar) -> Date {
         guard mode == .daily else {
             return date.addingTimeInterval(120)

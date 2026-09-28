@@ -70,6 +70,13 @@ case "$BIN_DIR/" in
 esac
 EXECUTABLE="$BIN_DIR/TravelCatApp"
 RESOURCE_BUNDLE="$BIN_DIR/TravelCat_TravelUI.bundle"
+GENERATION_BUNDLE="$BIN_DIR/TravelCat_TravelCatApp.bundle"
+for generation_asset in narrative.schema.json image.schema.json front.png side.png sitting.png identity.json; do
+    test -f "$GENERATION_BUNDLE/Generation/$generation_asset" || {
+        echo "package-app: missing generation resource: $generation_asset" >&2
+        exit 1
+    }
+done
 if [ ! -x "$EXECUTABLE" ] || [ ! -d "$RESOURCE_BUNDLE" ] || [ ! -f "$RESOURCE_BUNDLE/cute-black-cat-spritesheet.webp" ] ||
     [ ! -x "$PINNED_CLI" ] || [ -L "$PINNED_CLI" ] || [ ! -x "$BUNDLED_LAUNCHER" ] || [ -L "$BUNDLED_LAUNCHER" ]; then
     echo "package-app: release executable or TravelUI resources are missing" >&2
@@ -112,6 +119,7 @@ if [ -n "$DATA_ROOT" ]; then
     /usr/bin/plutil -insert TravelCatDataRoot -string "$DATA_ROOT" "$STAGING/Contents/Info.plist"
 fi
 cp -R "$RESOURCE_BUNDLE" "$STAGING/Contents/Resources/TravelCat_TravelUI.bundle"
+cp -R "$GENERATION_BUNDLE" "$STAGING/Contents/Resources/TravelCat_TravelCatApp.bundle"
 
 test -x "$STAGING/Contents/MacOS/TravelCatApp"
 test -x "$STAGING/Contents/Resources/run-travelcatctl"

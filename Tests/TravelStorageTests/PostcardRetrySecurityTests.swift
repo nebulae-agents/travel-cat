@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import ImageIO
@@ -237,6 +238,76 @@ final class PostcardRetrySecurityTests: XCTestCase {
         XCTAssertEqual(try repository.imageRetry(for: eventID)?.retryAt, clock.now.addingTimeInterval(60))
     }
 
+    func testNewReadyRejectsNonPostcardAspectRatiosWithoutChangingState() throws {
+        for (width, height) in [(1254, 1254), (1024, 1536), (1536, 864)] {
+            let clock = MutableTravelClock(now: eventTime.addingTimeInterval(10))
+            let root = try temporaryDirectory()
+            let repository = try TravelRepository(root: root, clock: clock)
+            try publishPending(in: repository)
+            let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
+            let path = "postcards/\(tripID.uuidString.lowercased())/card.png"
+            try writeImage(root.appendingPathComponent(path), width: width, height: height)
+            let journal = try Data(contentsOf: root.appendingPathComponent("journal/events.jsonl"))
+            let retries = try Data(contentsOf: root.appendingPathComponent("state/image-retries.json"))
+
+            XCTAssertThrowsError(try repository.markImage(
+                result(for: work, status: .ready, attemptedAt: clock.now, path: path), mode: .fast
+            )) { error in
+                guard case RepositoryError.invalidImageResult = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("journal/events.jsonl")), journal)
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("state/image-retries.json")), retries)
+        }
+    }
+
+    func testNewReadyAcceptsLandscapePostcardAndReopens() throws {
+        let clock = MutableTravelClock(now: eventTime.addingTimeInterval(10))
+        let root = try temporaryDirectory()
+        let repository = try TravelRepository(root: root, clock: clock)
+        try publishPending(in: repository)
+        let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
+        let path = "postcards/\(tripID.uuidString.lowercased())/card.png"
+        try writeImage(root.appendingPathComponent(path), width: 1536, height: 1024)
+        let ready = result(for: work, status: .ready, attemptedAt: clock.now, path: path)
+        XCTAssertEqual(try repository.markImage(ready, mode: .fast).status, .ready)
+        let reopened = try TravelRepository(root: root, clock: clock)
+        XCTAssertEqual(try reopened.events().first?.postcardRelativePath, path)
+        XCTAssertEqual(try reopened.markImage(ready, mode: .fast).status, .ready)
+    }
+
+    func testHistoricalSquareReadyImageStillReplaysAndRecovers() throws {
+        let clock = MutableTravelClock(now: eventTime.addingTimeInterval(10))
+        let root = try temporaryDirectory()
+        let repository = try TravelRepository(root: root, clock: clock)
+        try publishPending(in: repository)
+        let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
+        let path = "postcards/\(tripID.uuidString.lowercased())/old-square.png"
+        let url = root.appendingPathComponent(path)
+        try writeImage(url, width: 1152, height: 768)
+        let ready = result(for: work, status: .ready, attemptedAt: clock.now, path: path)
+        _ = try repository.markImage(ready, mode: .fast)
+
+        // Materialize a coherent historical ready record from before the ratio rule.
+        try writeImage(url, width: 768, height: 768)
+        let sidecar = root.appendingPathComponent("state/image-retries.json")
+        var store = try JSONDecoder.travelCat.decode(ImageRetryStore.self, from: Data(contentsOf: sidecar))
+        store.entries[eventID.uuidString.lowercased()]?.imageContentHash =
+            SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()
+        try JSONEncoder.travelCat.encode(store).write(to: sidecar, options: .atomic)
+
+        let reopened = try TravelRepository(root: root, clock: clock)
+        XCTAssertEqual(try reopened.markImage(ready, mode: .fast).status, .ready)
+        var event = try XCTUnwrap(reopened.events().first)
+        event.postcardStatus = .pendingImage
+        event.postcardRelativePath = nil
+        try writeJournal([event], root: root)
+        let recovered = try TravelRepository(root: root, clock: clock)
+        XCTAssertEqual(try recovered.events().first?.postcardRelativePath, path)
+        XCTAssertEqual(try recovered.markImage(ready, mode: .fast).status, .ready)
+    }
+
     func testTerminalReadyOnlyAcceptsExactEnvelopeAndUnchangedContent() throws {
         let clock = MutableTravelClock(now: eventTime.addingTimeInterval(10))
         let root = try temporaryDirectory()
@@ -244,7 +315,7 @@ final class PostcardRetrySecurityTests: XCTestCase {
         try publishPending(in: repository)
         let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
         let path = "postcards/\(tripID.uuidString.lowercased())/card.png"
-        try writeImage(root.appendingPathComponent(path), width: 768, height: 768)
+        try writeImage(root.appendingPathComponent(path), width: 1152, height: 768)
         let ready = result(for: work, status: .ready, attemptedAt: clock.now, path: path)
         XCTAssertEqual(try repository.markImage(ready, mode: .fast).status, .ready)
         XCTAssertEqual(try repository.markImage(ready, mode: .fast).status, .ready)
@@ -256,7 +327,7 @@ final class PostcardRetrySecurityTests: XCTestCase {
             attemptCount: changed.attemptCount, publishedNarrativeHash: changed.publishedNarrativeHash
         )
         XCTAssertThrowsError(try repository.markImage(changed, mode: .fast))
-        try writeImage(root.appendingPathComponent(path), width: 769, height: 768)
+        try writeImage(root.appendingPathComponent(path), width: 1153, height: 768)
         XCTAssertThrowsError(try repository.markImage(ready, mode: .fast))
     }
 
@@ -271,14 +342,14 @@ final class PostcardRetrySecurityTests: XCTestCase {
             let url = root.appendingPathComponent(path)
             switch kind {
             case "hardlink":
-                try writeImage(url, width: 768, height: 768)
+                try writeImage(url, width: 1152, height: 768)
                 XCTAssertEqual(link(url.path, root.appendingPathComponent("alias.png").path), 0)
             case "oversize":
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try Data(count: 15 * 1_024 * 1_024 + 1).write(to: url)
             default:
                 let outside = root.appendingPathComponent("outside", isDirectory: true)
-                try writeImage(outside.appendingPathComponent("\(tripID.uuidString.lowercased())/card.png"), width: 768, height: 768)
+                try writeImage(outside.appendingPathComponent("\(tripID.uuidString.lowercased())/card.png"), width: 1152, height: 768)
                 try FileManager.default.removeItem(at: root.appendingPathComponent("postcards"))
                 try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("postcards"), withDestinationURL: outside)
             }
@@ -293,9 +364,9 @@ final class PostcardRetrySecurityTests: XCTestCase {
         try publishPending(in: repository)
         let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
         let path = "postcards/\(tripID.uuidString.lowercased())/swap.png"
-        try writeImage(root.appendingPathComponent(path), width: 768, height: 768)
+        try writeImage(root.appendingPathComponent(path), width: 1152, height: 768)
         let replacement = root.appendingPathComponent("replacement-postcards")
-        try writeImage(replacement.appendingPathComponent("\(tripID.uuidString.lowercased())/swap.png"), width: 768, height: 768)
+        try writeImage(replacement.appendingPathComponent("\(tripID.uuidString.lowercased())/swap.png"), width: 1152, height: 768)
         repository.imageValidationHook = {
             try! FileManager.default.moveItem(at: root.appendingPathComponent("postcards"), to: root.appendingPathComponent("old-postcards"))
             try! FileManager.default.moveItem(at: replacement, to: root.appendingPathComponent("postcards"))
@@ -312,7 +383,7 @@ final class PostcardRetrySecurityTests: XCTestCase {
         try publishPending(in: repository)
         let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
         let path = "postcards/\(tripID.uuidString.lowercased())/intent.png"
-        try writeImage(root.appendingPathComponent(path), width: 768, height: 768)
+        try writeImage(root.appendingPathComponent(path), width: 1152, height: 768)
         let ready = result(for: work, status: .ready, attemptedAt: clock.now, path: path)
         _ = try repository.markImage(ready, mode: .fast)
         var event = try XCTUnwrap(repository.events().first)
@@ -333,7 +404,7 @@ final class PostcardRetrySecurityTests: XCTestCase {
         try publishPending(in: repository)
         let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
         let path = "postcards/\(tripID.uuidString.lowercased())/journal.png"
-        try writeImage(root.appendingPathComponent(path), width: 768, height: 768)
+        try writeImage(root.appendingPathComponent(path), width: 1152, height: 768)
         let ready = result(for: work, status: .ready, attemptedAt: clock.now, path: path)
         _ = try repository.markImage(ready, mode: .fast)
         try FileManager.default.removeItem(at: root.appendingPathComponent("state/image-retries.json"))
@@ -351,7 +422,7 @@ final class PostcardRetrySecurityTests: XCTestCase {
         try publishPending(in: repository)
         let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
         let path = "postcards/\(tripID.uuidString.lowercased())/legacy.png"
-        try writeImage(root.appendingPathComponent(path), width: 768, height: 768)
+        try writeImage(root.appendingPathComponent(path), width: 1152, height: 768)
         let ready = result(for: work, status: .ready, attemptedAt: clock.now, path: path)
         _ = try repository.markImage(ready, mode: .fast)
 

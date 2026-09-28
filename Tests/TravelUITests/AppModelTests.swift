@@ -56,6 +56,33 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.characterProfile, custom)
     }
 
+    func testHomeCareReactsOnlyAfterPersistenceAndDoesNotMutateTrip() {
+        let initial = makeSnapshot(phase: .resting)
+        let now = Date(timeIntervalSince1970: 1000)
+        let model = AppModel(snapshot: initial, defaults: isolatedDefaults(), clock: { now })
+        model.performHomeCare(.play)
+        XCTAssertEqual(model.homeCareReaction?.action, .play)
+        XCTAssertEqual(model.homeCare.history.count, 1)
+        XCTAssertEqual(model.snapshot, initial)
+        model.performHomeCare(.brush)
+        XCTAssertEqual(model.homeCare.history.count, 1)
+        XCTAssertNotNil(model.homeCareErrorMessage)
+        let failed = AppModel(snapshot: initial, defaults: isolatedDefaults(), persistHomeCare: { _, _ in
+            throw CocoaError(.fileWriteNoPermission)
+        })
+        failed.performHomeCare(.snack)
+        XCTAssertNil(failed.homeCareReaction)
+        XCTAssertTrue(failed.homeCare.history.isEmpty)
+        XCTAssertNotNil(failed.homeCareErrorMessage)
+        let away = AppModel(snapshot: makeSnapshot(phase: .transit), defaults: isolatedDefaults())
+        away.performHomeCare(.blanket)
+        XCTAssertTrue(away.homeCare.history.isEmpty)
+        XCTAssertNotNil(away.homeCareErrorMessage)
+        let restored = AppModel(snapshot: initial, defaults: isolatedDefaults(), homeCare: model.homeCare)
+        XCTAssertEqual(restored.homeCare.latest?.action, .play)
+        XCTAssertNil(restored.homeCareReaction)
+    }
+
     func testRestingInteractionFollowsStatusPostcardAlbumHierarchy() throws {
         let event = makeEvent(id: firstID, seconds: 10, status: .ready)
         let model = AppModel(snapshot: makeSnapshot(phase: .resting), events: [event], defaults: isolatedDefaults(), supplies: [])

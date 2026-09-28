@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["status","reason"],"properties":{"status":{"type":"string","enum":["ready","failed"]},"reason":{"type":"string","enum":["none","tool_unavailable","network_error","invalid_image","file_unavailable"]}}}

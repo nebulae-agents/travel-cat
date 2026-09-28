@@ -95,7 +95,23 @@ else
         /*) ;;
         *) fail "HOME must be a non-empty absolute path when TravelCatDataRoot is absent" ;;
     esac
-    DATA_ROOT="$PORTABLE_HOME/Library/Application Support/TravelCat/TravelPetData"
+    for DIRECTORY in "$PORTABLE_HOME" "$PORTABLE_HOME/Library" "$PORTABLE_HOME/Library/Application Support" "$PORTABLE_HOME/Library/Application Support/TravelCat"; do
+        [ ! -L "$DIRECTORY" ] || fail "data-location directory is a symbolic link"
+        if [ -e "$DIRECTORY" ]; then
+            [ -d "$DIRECTORY" ] || fail "data-location directory is unsafe"
+        fi
+    done
+    PREFERENCE="$PORTABLE_HOME/Library/Application Support/TravelCat/data-location.json"
+    [ ! -L "$PREFERENCE" ] || fail "data-location preference is a symbolic link"
+    if [ -e "$PREFERENCE" ]; then
+        [ -f "$PREFERENCE" ] || fail "data-location preference is unsafe"
+        VERSION=$(/usr/bin/plutil -extract schemaVersion raw -expect integer -o - "$PREFERENCE" 2>/dev/null) || fail "invalid data-location preference"
+        DATA_ROOT=$(/usr/bin/plutil -extract path raw -expect string -o - "$PREFERENCE" 2>/dev/null) || fail "invalid data-location preference"
+        [ "$VERSION" = "1" ] || fail "unsupported data-location schema"
+        case "$DATA_ROOT" in /?*) ;; *) fail "data-location path must be absolute" ;; esac
+    else
+        DATA_ROOT="$PORTABLE_HOME/Library/Application Support/TravelCat/TravelPetData"
+    fi
 fi
 
 exec /usr/bin/env -i \

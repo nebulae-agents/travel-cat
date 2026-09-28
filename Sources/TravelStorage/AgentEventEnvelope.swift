@@ -10,6 +10,12 @@ public struct PostcardRequest: Codable, Equatable, Sendable {
         self.scenePrompt = scenePrompt
     }
 
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(required, forKey: .required)
+        try values.encode(scenePrompt, forKey: .scenePrompt)
+    }
+
     private enum CodingKeys: String, CodingKey, CaseIterable { case required, scenePrompt }
 
     public init(from decoder: Decoder) throws {
@@ -139,6 +145,23 @@ public struct AgentEventEnvelope: Codable, Sendable {
                 debugDescription: "Agent event candidate violates structural constraints"
             ))
         }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(eventId, forKey: .eventId)
+        try values.encode(tripId, forKey: .tripId)
+        try values.encode(previousEventId, forKey: .previousEventId)
+        try values.encode(occurredAt, forKey: .occurredAt)
+        try values.encode(phase, forKey: .phase)
+        try values.encodeIfPresent(location, forKey: .location)
+        try values.encodeIfPresent(transport, forKey: .transport)
+        try values.encode(summary, forKey: .summary)
+        try values.encode(mood, forKey: .mood)
+        try values.encode(continuityReferences, forKey: .continuityReferences)
+        try values.encodeIfPresent(openHook, forKey: .openHook)
+        try values.encodeIfPresent(consumedItemId, forKey: .consumedItemId)
+        try values.encode(postcard, forKey: .postcard)
     }
 
     public static func decode(_ data: Data) throws -> AgentEventEnvelope {
@@ -290,8 +313,9 @@ public struct AgentEventEnvelope: Codable, Sendable {
             tripID: tripId,
             lastEventID: eventId,
             phase: phase,
-            nextActionAt: TripScheduler(mode: mode).nextDeparture(
+            nextActionAt: TripScheduler(mode: mode).nextAction(
                 after: occurredAt,
+                phase: phase,
                 seed: Self.stableSeed(eventId),
                 calendar: calendar
             ),

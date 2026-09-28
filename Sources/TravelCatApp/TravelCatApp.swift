@@ -8,6 +8,9 @@ import TravelUI
 final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var model: AppModel?
     private lazy var utilityWindowController = TravelUtilityWindowController()
+    private lazy var generationWindowController = TravelUtilityWindowController()
+    private let serviceCredentials = KeychainTravelServiceCredentialStore()
+    private var generationServices: GenerationServiceController?
     private lazy var settingsWindowController = TravelUtilityWindowController()
     private lazy var albumPreviewWindowController = TravelUtilityWindowController()
     private lazy var journeyTestWindowController = TravelUtilityWindowController()
@@ -21,6 +24,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private var watcherTask: Task<Void, Never>?
     private var authorizationTask: Task<Void, Never>?
     private var terminationTask: Task<Void, Never>?
+    private let codexExecutor = CodexTravelExecutor()
+    private var automaticTravelController: AutomaticTravelController?
     private var albumPreviewSession: TravelAlbumPreviewSession?
     @Published private(set) var environment: TravelCatEnvironment?
     @Published private(set) var desktopPetController: DesktopPetController?
@@ -38,7 +43,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         ) && FileManager.default.fileExists(
             atPath: currentDirectory.appendingPathComponent("Sources/TravelCatApp", isDirectory: true).path
         )
-        let developmentRoot = isDevelopmentRoot ? currentDirectory : nil
+        let developmentRoot = isDevelopmentRoot && Bundle.main.bundleURL.pathExtension != "app" ? currentDirectory : nil
         let bundledDataRoot = (Bundle.main.object(forInfoDictionaryKey: "TravelCatDataRoot") as? String)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .flatMap { path in
@@ -53,23 +58,30 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             showStartupError("Application Support directory is unavailable.")
             return
         }
-        let rootURL = AppDataRootResolver().resolve(
-            environment: ProcessInfo.processInfo.environment,
-            bundledDataRoot: bundledDataRoot,
-            developmentProjectRoot: developmentRoot,
-            applicationSupportDirectory: applicationSupport
-        )
         do {
+            let hasOverride = !(ProcessInfo.processInfo.environment["TRAVEL_CAT_DATA"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            let installedRoot = hasOverride || bundledDataRoot != nil || developmentRoot != nil ? nil
+                : try InstalledDataRootPreference.load(applicationSupportDirectory: applicationSupport)
+            let rootURL = AppDataRootResolver().resolve(
+                environment: ProcessInfo.processInfo.environment,
+                bundledDataRoot: bundledDataRoot ?? installedRoot,
+                developmentProjectRoot: developmentRoot,
+                applicationSupportDirectory: applicationSupport
+            )
             let repository = try TravelRepository(root: rootURL)
             let loaded = try repository.loadContents()
             let settings = try TravelSettingsStore(root: rootURL).load()
+            let homeCareResult = Result { try repository.loadHomeCare() }
             let model = AppModel(
                 snapshot: loaded.snapshot,
                 events: loaded.events,
                 presentationReferences: loaded.presentationReferences,
                 dataRoot: rootURL,
                 characterProfile: loaded.characterProfile,
-                persistSupply: repository.updateCarriedItem
+                persistSupply: repository.updateCarriedItem,
+                homeCare: (try? homeCareResult.get()) ?? HomeCareState(),
+                homeCareErrorMessage: { if case .failure = homeCareResult { return "陪伴记录暂时无法读取，请稍后重试。" }; return nil }(),
+                persistHomeCare: { try repository.performHomeCare($0, now: $1) }
             )
             let environment = try TravelCatEnvironment(
                 repository: repository,
@@ -84,6 +96,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                     guard !enabled else { return }
                     self?.closeAlbumPreviewSession()
                 },
+                settingsChanged: { [weak self] in self?.automaticTravelController?.settingsDidChange() },
                 promptStateChanged: { [weak self] in self?.refreshPromptState() }
             )
             self.model = model
@@ -93,6 +106,30 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             }
             refreshMenuState()
             installDesktopPet(model: model)
+            let services = try GenerationServiceController(
+                store: TravelGenerationConfigurationStore(root: rootURL), credentials: serviceCredentials,
+                hasExistingHistory: !loaded.events.isEmpty,
+                didSave: { [weak self] in self?.automaticTravelController?.settingsDidChange() })
+            generationServices = services
+            environment.generationServices = services
+            environment.openGenerationSetup = { [weak self] in self?.showGenerationSetup() }
+            let generator = ConfiguredTravelContentGenerator(configuration: { services.configuration },
+                credentials: serviceCredentials, codex: CodexTravelContentGenerator(executor: codexExecutor))
+            let worker = AutomaticTravelWorker(repository: repository, generator: generator)
+            let automaticTravel = AutomaticTravelController(
+                isEnabled: { [weak environment, weak services] in
+                    (environment?.effectiveSettings.automaticTravelEnabled ?? false) && (services?.isReady ?? false)
+                        && environment?.selectedCharacterProfile == .defaultBlackCat
+                        && environment?.effectiveCharacterProfile == .defaultBlackCat
+                },
+                run: { [weak environment] in
+                    guard let environment else { throw CancellationError() }
+                    return try await worker.step(settings: environment.effectiveSettings)
+                })
+            automaticTravelController = automaticTravel
+            environment.automaticTravel = automaticTravel
+            automaticTravel.start()
+            if !services.isReady { showGenerationSetup() }
             environment.petPromptService.retry(settings: environment.effectiveSettings, now: Date())
             refreshPromptState()
             startWatching(repository: repository, initial: loaded, environment: environment)
@@ -119,12 +156,13 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
 
     func installDesktopPet(model: AppModel, defaults: UserDefaults = .standard) {
         desktopPetController?.windowController.close()
-        let scene = DesktopPetSceneView(
+        let scene = OwnedPetSceneView(
             model: model,
             showStatus: { [weak self] in self?.showCurrentJourney() },
             showPostcard: { [weak self] in self?.showLatestPostcard() },
             showAlbum: { [weak self] in self?.showLatestAlbum() },
             showSettings: { [weak self] in self?.showSettings() },
+            showSupplies: { [weak self] in self?.showSupplies() },
             hide: { [weak self] in self?.desktopPetController?.hide() }
         )
         let controller = DesktopPetController(content: AnyView(scene), defaults: defaults)
@@ -154,6 +192,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         environment?.statusToastController.dismiss()
         watcherTask?.cancel()
         authorizationTask?.cancel()
+        automaticTravelController?.stop()
+        codexExecutor.cancelAll()
         closeAlbumPreviewSession()
         environment?.journeyTestController?.stop()
         journeyTestPresentation?.dismiss()
@@ -231,6 +271,18 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         guard let model, hasLatestAlbum else { return }
         model.openLatestAlbumFromMenu()
         show(model: model, size: TravelUtilityWindowController.albumSize)
+    }
+
+    func showGenerationSetup() {
+        guard let services = generationServices else { return }
+        generationWindowController.show(
+            content: AnyView(GenerationSetupView(controller: services, credentials: serviceCredentials,
+                executor: codexExecutor, completed: { [weak self] in
+                    self?.generationWindowController.window?.close()
+                })), size: NSSize(width: 640, height: 760))
+        generationWindowController.window?.title = "Travel Cat · 模型与连接"
+        generationWindowController.window?.contentMinSize = NSSize(width: 600, height: 630)
+        generationWindowController.bringToFront()
     }
 
     func showSettings() {
@@ -450,7 +502,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 closeWindow: { [weak self] in self?.utilityWindowController.window?.close() },
                 presentationChanged: { [weak self] presentation in
                     self?.resizeUtilityWindow(for: presentation)
-                }
+                },
+                automaticTravel: automaticTravelController
             )),
             size: size
         )
@@ -521,7 +574,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         case .pet, .awayTag, .status, .supplies:
             size = TravelUtilityWindowController.statusSize
         }
-        utilityWindowController.window?.setContentSize(size)
+        utilityWindowController.resize(to: size)
     }
 
     private func refreshMenuState() {
@@ -536,6 +589,14 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
 
     private func refreshPromptState() {
         petPromptPending = environment?.petPromptService.hasPendingOrStorageError ?? false
+    }
+
+    func showPet() { desktopPetController?.show() }
+
+    func showSupplies() {
+        guard let model else { return }
+        utilityWindowController.show(content: AnyView(StandaloneSuppliesView(model: model, close: { [weak self] in self?.utilityWindowController.window?.close() })),
+            size: TravelUtilityWindowController.statusSize)
     }
 
     private func showStartupError(_ message: String) {
@@ -599,6 +660,7 @@ struct MenuServiceRootView: View {
     @ObservedObject var model: AppModel
     let closeWindow: () -> Void
     let presentationChanged: (PetPresentation) -> Void
+    var automaticTravel: AutomaticTravelController? = nil
 
     var body: some View {
         content
@@ -634,6 +696,8 @@ struct MenuServiceRootView: View {
     }
 
     private var statusView: some View {
+        VStack(spacing: 4) {
+            if let automaticTravel { AutomaticTravelStatusView(controller: automaticTravel) }
         CurrentPetStatusView(
             model: model,
             close: { perform(.closeWindow) },
@@ -642,6 +706,7 @@ struct MenuServiceRootView: View {
             },
             openAlbum: { model.openLatestAlbumFromStatus() }
         )
+        }
     }
 
     private func handlePostcardRoute(_ destination: PetPresentation) {
@@ -699,6 +764,8 @@ private struct TravelCatMenuContentView: View {
         Button("旅行册") { appDelegate.showLatestAlbum() }
             .disabled(!appDelegate.hasLatestAlbum)
         Divider()
+        Button("模型与连接…") { appDelegate.showGenerationSetup() }
+        Button("用品与陪伴…") { appDelegate.showSupplies() }
         Button("设置…") { appDelegate.showSettings() }
         if let controller = appDelegate.desktopPetController {
             DesktopPetVisibilityButton(controller: controller, toggle: appDelegate.toggleDesktopPet)
@@ -748,5 +815,53 @@ private struct TravelCatSettingsSceneView: View {
             }
         }
         .frame(minWidth: TravelUtilityWindowController.settingsSize.width, minHeight: TravelUtilityWindowController.settingsSize.height)
+    }
+}
+
+@MainActor
+private struct OwnedPetSceneView: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.petPlaybackEnabled) private var playbackEnabled
+    let showStatus: () -> Void
+    let showPostcard: () -> Void
+    let showAlbum: () -> Void
+    let showSettings: () -> Void
+    let showSupplies: () -> Void
+    let hide: () -> Void
+
+    var body: some View {
+        Group {
+            if model.characterProfile == .defaultBlackCat {
+                PetHouseView(phase: model.snapshot.phase, hasUnreadPostcard: !model.unreadPostcardIDs.isEmpty,
+                             isActive: playbackEnabled, reaction: model.homeCareReaction)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: showStatus)
+                    .contextMenu {
+                        Button("当前状态", action: showStatus)
+                        Button("最新明信片", action: showPostcard).disabled(model.latestAvailableTripID() == nil)
+                        Button("旅行册", action: showAlbum).disabled(model.latestAvailableTripID() == nil)
+                        Button("用品与陪伴…", action: showSupplies)
+                        Button("设置…", action: showSettings)
+                        Divider()
+                        Button("隐藏桌面小猫", action: hide)
+                    }
+            } else {
+                DesktopPetSceneView(model: model, showStatus: showStatus, showPostcard: showPostcard,
+                                    showAlbum: showAlbum, showSettings: showSettings, hide: hide)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct StandaloneSuppliesView: View {
+    @ObservedObject var model: AppModel
+    var close: () -> Void
+    var body: some View {
+        SupplyDrawerView(supplies: model.supplies, selectedID: model.snapshot.carriedItemID,
+            isCatAway: !(model.snapshot.phase == .resting || model.snapshot.phase == .preparing),
+            errorText: model.supplyErrorMessage,
+            homeCare: model.homeCare, homeCareErrorText: model.homeCareErrorMessage,
+            care: model.performHomeCare, select: { try? model.selectSupply($0) }, close: close)
     }
 }

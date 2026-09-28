@@ -111,6 +111,78 @@ final class TripSchedulerTests: XCTestCase {
         XCTAssertEqual(one.next(), 1 &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407)
     }
 
+    func testDailyPhaseIntervalsAreDeterministicAndBounded() {
+        let input = Date(timeIntervalSince1970: 1_786_339_200)
+        let scheduler = TripScheduler(mode: .daily)
+        let ranges: [(TravelPhase, ClosedRange<TimeInterval>)] = [
+            (.preparing, 900...2700), (.transit, 3600...10800),
+            (.returning, 3600...10800), (.exploring, 14400...21600),
+            (.postcardReady, 14400...21600)
+        ]
+        for (phase, range) in ranges {
+            for seed in [UInt64(0), 1, 42, 43, UInt64.max] {
+                let first = scheduler.nextAction(after: input, phase: phase, seed: seed, calendar: tokyoCalendar())
+                XCTAssertTrue(range.contains(first.timeIntervalSince(input)), "\(phase), seed \(seed)")
+                XCTAssertEqual(first, scheduler.nextAction(after: input, phase: phase, seed: seed, calendar: tokyoCalendar()))
+            }
+            XCTAssertNotEqual(
+                scheduler.nextAction(after: input, phase: phase, seed: 42, calendar: tokyoCalendar()),
+                scheduler.nextAction(after: input, phase: phase, seed: 43, calendar: tokyoCalendar())
+            )
+        }
+    }
+
+    func testDailyPhaseIntervalsHaveStableSeedFortyTwoValues() {
+        let input = Date(timeIntervalSince1970: 1_786_339_200)
+        for (phase, seconds) in [(TravelPhase.preparing, 1950), (.transit, 6406), (.returning, 6406), (.exploring, 17206), (.postcardReady, 17206)] {
+            XCTAssertEqual(
+                TripScheduler(mode: .daily).nextAction(after: input, phase: phase, seed: 42, calendar: tokyoCalendar()),
+                input.addingTimeInterval(TimeInterval(seconds))
+            )
+        }
+    }
+
+    func testFastEveryPhaseIsExactlyTwoMinutesLater() {
+        let input = Date(timeIntervalSince1970: 1_786_339_200)
+        for phase in TravelPhase.allCases {
+            XCTAssertEqual(
+                TripScheduler(mode: .fast).nextAction(after: input, phase: phase, seed: 42, calendar: tokyoCalendar()),
+                input.addingTimeInterval(120)
+            )
+        }
+    }
+
+    func testDailyRestRequiresTwelveHoursAndANewLocalDay() throws {
+        let calendar = tokyoCalendar()
+        for hour in [0, 7, 12, 19, 23] {
+            let returned = try localDate(year: 2026, month: 8, day: 10, hour: hour, calendar: calendar)
+            for seed in [UInt64(0), 1, 42, 43, UInt64.max] {
+                let next = TripScheduler(mode: .daily).nextAction(after: returned, phase: .resting, seed: seed, calendar: calendar)
+                XCTAssertGreaterThanOrEqual(next.timeIntervalSince(returned), 12 * 3600)
+                XCTAssertFalse(calendar.isDate(next, inSameDayAs: returned))
+                XCTAssertTrue((8..<20).contains(calendar.component(.hour, from: next)))
+            }
+        }
+    }
+
+    func testDailyRestPreservesElapsedRestAndLocalWindowAcrossBothDSTChanges() throws {
+        let calendar = losAngelesCalendar()
+        for (month, day) in [(3, 7), (10, 31)] {
+            let returned = try localDate(year: 2026, month: month, day: day, hour: 23, calendar: calendar)
+            for seed in [UInt64(0), 42, 43] {
+                let next = TripScheduler(mode: .daily).nextAction(after: returned, phase: .resting, seed: seed, calendar: calendar)
+                XCTAssertGreaterThanOrEqual(next.timeIntervalSince(returned), 12 * 3600)
+                XCTAssertTrue((8..<20).contains(calendar.component(.hour, from: next)))
+                XCTAssertEqual(next, TripScheduler(mode: .daily).nextAction(after: returned, phase: .resting, seed: seed, calendar: calendar))
+            }
+            for phase in [TravelPhase.preparing, .transit, .exploring, .postcardReady, .returning] {
+                let next = TripScheduler(mode: .daily).nextAction(after: returned, phase: phase, seed: 42, calendar: calendar)
+                let utc = Calendar(identifier: .gregorian)
+                XCTAssertEqual(next, TripScheduler(mode: .daily).nextAction(after: returned, phase: phase, seed: 42, calendar: utc))
+            }
+        }
+    }
+
     private func tokyoCalendar() -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!

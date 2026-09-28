@@ -313,7 +313,7 @@ final class CLIContractTests: XCTestCase {
         try repository.publish(event: ready, next: readyNext)
         let pending = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
         let path = "postcards/\(first.tripID.uuidString.lowercased())/latest.png"
-        try writeImage(root.appendingPathComponent(path), width: 768, height: 768)
+        try writeImage(root.appendingPathComponent(path), width: 1152, height: 768)
         _ = try repository.markImage(
             .init(
                 eventId: pending.event.id,

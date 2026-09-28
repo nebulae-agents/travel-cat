@@ -6,7 +6,7 @@ private struct PetPlaybackEnabledKey: EnvironmentKey {
     static let defaultValue = true
 }
 
-extension EnvironmentValues {
+public extension EnvironmentValues {
     var petPlaybackEnabled: Bool {
         get { self[PetPlaybackEnabledKey.self] }
         set { self[PetPlaybackEnabledKey.self] = newValue }
@@ -20,6 +20,8 @@ struct PetPlaybackIdentity: Equatable {
     let visible: Bool
     let available: Bool
     let dataRoot: URL?
+    var explicitAnimation: PetAnimation? = nil
+    var frameDuration: Double = 0.18
     var enabled: Bool { !reduceMotion && visible && available }
 }
 
@@ -71,11 +73,18 @@ public struct PetSpriteLayout: Equatable, Sendable {
 
 public struct PetAnimation: Equatable, Sendable {
     public let row: Int
-    public let frameCount: Int
+    public let frames: [Int]
+    public var frameCount: Int { frames.count }
 
     public init(row: Int, frameCount: Int) {
         self.row = row
-        self.frameCount = frameCount
+        self.frames = Array(0..<frameCount)
+    }
+
+    public init(row: Int, frames: [Int]) {
+        precondition(!frames.isEmpty && frames.allSatisfy { (0..<8).contains($0) })
+        self.row = row
+        self.frames = frames
     }
 
     public static func animation(for phase: TravelPhase) -> PetAnimation {
@@ -109,9 +118,13 @@ public struct PetSpriteView: View {
 
     public let state: TravelPhase
     public let profile: CharacterProfile
+    private var explicitAnimation: PetAnimation?
+    private let isAnimating: Bool
+    private var frameDuration: Double
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.petPlaybackEnabled) private var playbackEnabled
+    @State private var explicitFrameIndex = 0
     @State private var playback = PetPlaybackState()
     @State private var playbackIdentity: PetPlaybackIdentity?
 
@@ -126,7 +139,7 @@ public struct PetSpriteView: View {
         self.requiresReducedMotion = requiresReducedMotion
     }
 
-    public init(state: TravelPhase, profile: CharacterProfile = .defaultBlackCat, dataRoot: URL? = nil) {
+    public init(state: TravelPhase, profile: CharacterProfile = .defaultBlackCat, dataRoot: URL? = nil, isAnimating: Bool = true) {
         self.state = state
         self.profile = profile
         self.dataRoot = dataRoot
@@ -138,13 +151,25 @@ public struct PetSpriteView: View {
             spriteSheet = nil
             unavailable = true
         }
+        self.explicitAnimation = nil
+        self.isAnimating = isAnimating
+        self.frameDuration = 0.18
     }
+
+    public init(animation: PetAnimation, isAnimating: Bool = true, frameDuration: Double = 0.18) {
+        self.init(state: .resting, isAnimating: isAnimating)
+        self.explicitAnimation = animation
+        self.frameDuration = max(0.1, frameDuration)
+    }
+
+    private var selectedAnimation: PetAnimation { explicitAnimation ?? PetAnimation.animation(for: state) }
 
     public var body: some View {
         let identity = animationTaskID
         let active = playbackIdentity == identity && identity.enabled
-        let animation = active ? playback.animation : PetAnimation.animation(for: state)
-        let selectedFrame = active ? playback.frameIndex : 0
+        let animation = explicitAnimation ?? (active ? playback.animation : selectedAnimation)
+        let index = active ? (explicitAnimation == nil ? playback.frameIndex : explicitFrameIndex) : 0
+        let selectedFrame = animation.frames[min(index, animation.frameCount - 1)]
         let origin = layout.frameOrigin(row: animation.row, frame: selectedFrame) ?? .zero
         let scale = Self.displayScale
         let displaySize = CGSize(
@@ -162,6 +187,7 @@ public struct PetSpriteView: View {
                         height: layout.sheetSize.height * scale
                     )
                     .offset(x: -origin.x * scale, y: -origin.y * scale)
+                    .transaction { $0.animation = nil }
             } else if unavailable {
                 VStack(spacing: 6) {
                     Image(systemName: "questionmark.diamond")
@@ -177,15 +203,20 @@ public struct PetSpriteView: View {
         .clipped()
         .accessibilityLabel(profile.displayName)
         .task(id: animationTaskID) {
+            explicitFrameIndex = 0
             playback.reset(phase: state, profile: profile, enabled: identity.enabled)
             playbackIdentity = identity
             guard identity.enabled else { return }
 
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .milliseconds(180)) }
+                do { try await Task.sleep(for: .seconds(frameDuration)) }
                 catch { return }
                 guard !Task.isCancelled else { return }
-                playback.advance(choice: Int.random(in: Int.min...Int.max))
+                if let explicitAnimation {
+                    explicitFrameIndex = (explicitFrameIndex + 1) % explicitAnimation.frameCount
+                } else {
+                    playback.advance(choice: Int.random(in: Int.min...Int.max))
+                }
             }
         }
         .onDisappear {
@@ -196,6 +227,7 @@ public struct PetSpriteView: View {
 
     private var animationTaskID: PetPlaybackIdentity {
         PetPlaybackIdentity(phase: state, profile: profile, reduceMotion: reduceMotion || requiresReducedMotion,
-                            visible: playbackEnabled, available: !unavailable, dataRoot: dataRoot)
+                            visible: playbackEnabled && isAnimating, available: !unavailable, dataRoot: dataRoot,
+                            explicitAnimation: explicitAnimation, frameDuration: frameDuration)
     }
 }

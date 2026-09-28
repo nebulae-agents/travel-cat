@@ -209,6 +209,27 @@ public final class TravelRepository: @unchecked Sendable {
         }
     }
 
+    public func loadHomeCare() throws -> HomeCareState {
+        try withExclusiveLock { try loadHomeCareUnlocked() }
+    }
+
+    private func loadHomeCareUnlocked() throws -> HomeCareState {
+        let url = root.appendingPathComponent("state/home-care.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return HomeCareState() }
+        return try JSONDecoder.travelCat.decode(HomeCareState.self, from: Data(contentsOf: url))
+    }
+
+    @discardableResult
+    public func performHomeCare(_ action: HomeCareAction, now: Date = Date()) throws -> HomeCareState {
+        try withExclusiveLock {
+            let snapshot = try loadSnapshotUnlocked()
+            var state = try loadHomeCareUnlocked()
+            try state.perform(action, phase: snapshot.phase, now: now)
+            try writer.write(JSONEncoder.travelCat.encode(state), to: root.appendingPathComponent("state/home-care.json"))
+            return state
+        }
+    }
+
     public func loadSnapshot() throws -> TripSnapshot {
         try loadSnapshotUnlocked()
     }
@@ -320,6 +341,7 @@ public final class TravelRepository: @unchecked Sendable {
             for relative in [
                 "state/current-trip.json",
                 "state/settings.json",
+                "state/home-care.json",
                 "state/image-retries.json",
                 "state/active-character.json",
                 "state/frozen-character.json",
@@ -460,6 +482,11 @@ public final class TravelRepository: @unchecked Sendable {
 
     @discardableResult
     public func publish(event: TripEvent, next: TripSnapshot) throws -> Int {
+        try publish(event: event, next: next, expectedSnapshot: nil)
+    }
+
+    @discardableResult
+    public func publish(event: TripEvent, next: TripSnapshot, expectedSnapshot: TripSnapshot?, expectedCharacterProfile: CharacterProfile? = nil) throws -> Int {
         try withExclusiveLock {
             let current = try loadSnapshotUnlocked()
             let journalEvents = try readEventsUnlocked()
@@ -471,6 +498,16 @@ public final class TravelRepository: @unchecked Sendable {
                 }
                 try validateJournalChain(journalEvents)
                 return current.stateVersion
+            }
+            if let expectedSnapshot, current != expectedSnapshot {
+                throw RepositoryError.versionConflict
+            }
+            if let expectedCharacterProfile {
+                let selected = try CharacterProfileStore(dataRoot: root).selectedProfile()
+                let effective = try frozenEffectiveProfileUnlocked(snapshot: current, events: journalEvents) ?? selected
+                guard selected == expectedCharacterProfile, effective == expectedCharacterProfile else {
+                    throw RepositoryError.continuityConflict
+                }
             }
             let trustedNow = clock.now
             guard event.occurredAt <= trustedNow,
@@ -556,8 +593,8 @@ public final class TravelRepository: @unchecked Sendable {
         }
     }
 
-    public func pendingImages(mode: TravelMode) throws -> [PendingImageWork] {
-        try pendingImages(mode: mode, trustedNow: clock.now)
+    public func pendingImages(mode: TravelMode, matchingCharacterProfile: CharacterProfile? = nil) throws -> [PendingImageWork] {
+        try pendingImages(mode: mode, trustedNow: clock.now, matchingCharacterProfile: matchingCharacterProfile)
     }
 
     // Test-only compatibility hook. Production scheduling always uses the injected clock above.
@@ -565,7 +602,7 @@ public final class TravelRepository: @unchecked Sendable {
         try pendingImages(mode: .fast, trustedNow: now)
     }
 
-    private func pendingImages(mode: TravelMode, trustedNow now: Date) throws -> [PendingImageWork] {
+    private func pendingImages(mode: TravelMode, trustedNow now: Date, matchingCharacterProfile: CharacterProfile? = nil) throws -> [PendingImageWork] {
         try withExclusiveLock {
             var events = try readEventsUnlocked()
             var store = try loadRetryStoreUnlocked()
@@ -573,6 +610,10 @@ public final class TravelRepository: @unchecked Sendable {
             let due = try events
                 .filter { $0.postcardStatus == .pendingImage }
                 .compactMap { event -> (TripEvent, ImageRetry)? in
+                    if let matchingCharacterProfile,
+                       try profileForTripUnlocked(event.tripID, events: events) != matchingCharacterProfile {
+                        return nil
+                    }
                     let retry = try retryForPendingEventUnlocked(event, store: &store)
                     guard retry.retryAt.map({ $0 <= now }) ?? true,
                           retry.leaseExpiresAt.map({ $0 <= now }) ?? true else { return nil }
@@ -716,6 +757,10 @@ public final class TravelRepository: @unchecked Sendable {
                 guard retry.imageContentHash == validated.contentHash else { throw RepositoryError.invalidImageResult }
                 return MarkImageAcknowledgement(eventID: result.eventId, status: .ready)
             }
+
+            // Apply the 3:2 format only to new images; historical ready images and
+            // persisted terminal intents must remain readable and replayable.
+            guard validated.hasPostcardAspectRatio else { throw RepositoryError.invalidImageResult }
 
             retry.retryAt = nil
             retry.lastAttemptedAt = result.attemptedAt
@@ -1037,6 +1082,7 @@ public final class TravelRepository: @unchecked Sendable {
         let relativePath: String
         let fileInfo: stat
         let contentHash: String
+        let hasPostcardAspectRatio: Bool
 
         func closeAll() {
             _ = close(descriptor)
@@ -1149,7 +1195,9 @@ public final class TravelRepository: @unchecked Sendable {
             return ValidatedImage(
                 descriptor: descriptor, tripDescriptor: tripDescriptor, parentDescriptors: parents,
                 postcardsInfo: postcardsInfo, tripInfo: tripInfo, tripComponent: directoryComponent,
-                filename: filename, relativePath: path, fileInfo: info, contentHash: hash
+                filename: filename, relativePath: path, fileInfo: info, contentHash: hash,
+                // Permit at most one pixel of rounding when sizing a 3:2 canvas.
+                hasPostcardAspectRatio: abs(width.intValue * 2 - height.intValue * 3) <= 3
             )
         } catch {
             _ = close(descriptor)

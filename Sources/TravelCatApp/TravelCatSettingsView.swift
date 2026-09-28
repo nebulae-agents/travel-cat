@@ -135,6 +135,9 @@ final class TravelCatEnvironment: ObservableObject {
     @Published var journeyTestController: JourneyTestController?
     @Published private(set) var selectedCharacterProfile: CharacterProfile
     var effectiveCharacterProfile: CharacterProfile { model.characterProfile }
+    @Published var automaticTravel: AutomaticTravelController?
+    @Published var generationServices: GenerationServiceController?
+    var openGenerationSetup: () -> Void = {}
 
     var effectiveSettings: TravelSettings { settingsLifecycle.effectiveSettings }
     var lastPersistedSettings: TravelSettings { settingsLifecycle.lastPersistedSettings }
@@ -148,6 +151,7 @@ final class TravelCatEnvironment: ObservableObject {
         route: @escaping (PetTravelRoute) -> Void,
         testRequest: @escaping () -> Void = {},
         testModeChanged: @escaping (Bool) -> Void = { _ in },
+        settingsChanged: @escaping () -> Void = {},
         promptStateChanged: @escaping () -> Void
     ) throws {
         self.repository = repository
@@ -210,6 +214,7 @@ final class TravelCatEnvironment: ObservableObject {
                     followCodexPet: settings.followCodexPet
                 )
                 testModeChanged(settings.isFastTestEnabled)
+                settingsChanged()
             }
         )
         launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -277,6 +282,8 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func applyRepositoryContents(_ contents: RepositoryContents, replacingHistory: Bool = false) {
+        let previousProfile = model.characterProfile
+        let previousSelection = selectedCharacterProfile
         let configuration = CharacterConfigurationResponse(
             selectedProfile: contents.selectedCharacterProfile,
             effectiveProfile: contents.characterProfile,
@@ -297,6 +304,9 @@ final class TravelCatEnvironment: ObservableObject {
                 presentationReferences: contents.presentationReferences,
                 characterProfile: contents.characterProfile
             )
+        }
+        if previousProfile != model.characterProfile || previousSelection != selectedCharacterProfile {
+            automaticTravel?.settingsDidChange()
         }
     }
 
@@ -342,8 +352,10 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     private func applyCharacterConfiguration(_ response: CharacterConfigurationResponse) {
+        let changed = selectedCharacterProfile != response.selectedProfile || model.characterProfile != response.effectiveProfile
         selectedCharacterProfile = response.selectedProfile
         model.apply(next: model.snapshot, events: model.events, characterProfile: response.effectiveProfile)
+        if changed { automaticTravel?.settingsDidChange() }
     }
 }
 
@@ -358,6 +370,24 @@ struct TravelCatSettingsView: View {
     var body: some View {
         Form {
             CharacterSettingsSection(environment: environment, model: environment.model)
+            Section("模型与连接") {
+                Button("配置文字与图片服务…") { environment.openGenerationSetup() }
+                if let services = environment.generationServices {
+                    GenerationReadinessView(controller: services)
+                }
+            }
+            Section("旅行") {
+                Toggle("自动旅行", isOn: $environment.settings.automaticTravelEnabled)
+                if environment.selectedCharacterProfile != .defaultBlackCat || environment.effectiveCharacterProfile != .defaultBlackCat {
+                    Text("当前自动旅行仅支持内置黑猫；自定义角色的自动生成已暂停，可使用真实生成测试旅程。")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                Text("每天在 08:00–20:00 随机准备出发；回家后充分休息。应用运行时自动续写旅程。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let controller = environment.automaticTravel {
+                    AutomaticTravelStatusView(controller: controller)
+                }
+            }
             Toggle("快速测试", isOn: Binding(
                 get: { environment.settings.isFastTestEnabled },
                 set: { environment.settings.mode = $0 ? .fast : .daily }
@@ -396,9 +426,10 @@ struct TravelCatSettingsView: View {
                     Button("立即显示测试纸条") { environment.showTestPaper() }
                 }
             }
-            HStack {
-                Button("导出数据…") { environment.exportData() }
-                Button("清除旅行历史…", role: .destructive) { confirmsClear = true }
+            Section("历史相册") {
+                Text("所有旅程和明信片持续保留，新旅行不会清空旧相册。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("导出备份…") { environment.exportData() }
             }
             if let message = environment.errorMessage {
                 Text(message).foregroundStyle(.red).textSelection(.enabled)
@@ -468,6 +499,29 @@ private struct JourneyTestSettingsControls: View {
         }
         if let error = controller.errorMessage {
             Text(error).font(.caption).foregroundStyle(.red)
+        }
+    }
+}
+
+@MainActor
+private struct GenerationReadinessView: View {
+    @ObservedObject var controller: GenerationServiceController
+    var body: some View {
+        Text(controller.isReady ? "配置已保存，可在模型与连接中测试服务。" : "完成服务配置后，才会开始自动旅行。")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+@MainActor
+struct AutomaticTravelStatusView: View {
+    @ObservedObject var controller: AutomaticTravelController
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(controller.message).font(.caption).foregroundStyle(.secondary)
+            if let date = controller.nextCheckAt, !controller.isRunning {
+                Text("下次查看：\(date.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
     }
 }

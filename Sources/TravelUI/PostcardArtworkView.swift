@@ -198,7 +198,7 @@ private actor PostcardAnalysisCache {
 
 @MainActor
 struct PostcardArtworkFrame<Artwork: View>: View {
-    let height: CGFloat
+    let height: CGFloat?
     let profile: PostcardOverlayProfile
     let caption: String?
     var imageSize: CGSize? = nil
@@ -210,9 +210,9 @@ struct PostcardArtworkFrame<Artwork: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             PostcardCanvasLayout(
-                imageSize: hasPresentation ? CGSize(width: 3, height: 2) : imageSize,
+                imageSize: hasPresentation ? CGSize(width: 3, height: 2) : (imageSize ?? CGSize(width: 3, height: 2)),
                 maximumHeight: hasPresentation && profile == .compact
-                    ? max(height, TripAlbumLayout.readableCompactArtworkWidth / 1.5) : height
+                    ? max(height ?? 10_000, TripAlbumLayout.readableCompactArtworkWidth / 1.5) : (height ?? 10_000)
             ) {
                 artwork().clipped()
             }
@@ -237,7 +237,7 @@ struct PostcardArtworkFrame<Artwork: View>: View {
 public struct PostcardArtworkView: View {
     public let event: TripEvent
     public let rootURL: URL?
-    public let height: CGFloat
+    public let height: CGFloat?
     public let profile: PostcardOverlayProfile
     public let presentationReference: PostcardPresentationReference?
 
@@ -251,7 +251,7 @@ public struct PostcardArtworkView: View {
     @State private var showsFallbackIndicator = false
     @State private var canvasWidth: CGFloat = 0
 
-    public init(event: TripEvent, rootURL: URL?, height: CGFloat, profile: PostcardOverlayProfile, presentationReference: PostcardPresentationReference? = nil) {
+    public init(event: TripEvent, rootURL: URL?, height: CGFloat? = nil, profile: PostcardOverlayProfile, presentationReference: PostcardPresentationReference? = nil) {
         self.event = event
         self.rootURL = rootURL
         self.height = height

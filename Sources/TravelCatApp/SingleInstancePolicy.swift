@@ -54,7 +54,7 @@ enum SingleInstanceDecision: Equatable, Sendable {
 }
 
 enum SingleInstancePolicy {
-    @MainActor private static var applicationLock: SingleInstanceLock?
+    @MainActor private static var applicationLocks: [SingleInstanceLock] = []
 
     static func decision(
         currentPID: Int32,
@@ -68,7 +68,7 @@ enum SingleInstancePolicy {
         let existingPID = running
             .lazy
             .filter { $0.processIdentifier != currentPID }
-            .filter { $0.bundleIdentifier == expectedBundleID }
+            .filter { $0.bundleIdentifier.map(ownershipIdentifier) == ownershipIdentifier(expectedBundleID) }
             .map(\.processIdentifier)
             .min()
 
@@ -78,32 +78,40 @@ enum SingleInstancePolicy {
         return .secondary(existingPID: existingPID)
     }
 
+    static func ownershipIdentifier(_ bundleIdentifier: String) -> String {
+        let family = "com.nebulae.travelcat"
+        return bundleIdentifier == family || bundleIdentifier.hasPrefix(family + ".") ? family : bundleIdentifier
+    }
+
     @MainActor
     static func claimApplicationOwnership() -> Bool {
-        if applicationLock != nil {
-            return true
-        }
-
-        guard let bundleIdentifier = Bundle.main.bundleIdentifier,
-              let lockURL = lockFileURL(bundleIdentifier: bundleIdentifier),
-              let lock = SingleInstanceLock.acquire(at: lockURL)
-        else {
+        if !applicationLocks.isEmpty { return true }
+        guard let identifier = Bundle.main.bundleIdentifier,
+              let paths = lockFileURLs(bundleIdentifier: identifier) else {
             rejectSecondaryInstance(expectedBundleID: Bundle.main.bundleIdentifier)
             return false
         }
-        applicationLock = lock
+        var acquired: [SingleInstanceLock] = []
+        for path in paths {
+            guard let lock = SingleInstanceLock.acquire(at: path) else {
+                rejectSecondaryInstance(expectedBundleID: identifier)
+                return false
+            }
+            acquired.append(lock)
+        }
+        applicationLocks = acquired
         return true
     }
 
-    private static func lockFileURL(bundleIdentifier: String) -> URL? {
+    static func lockFileURLs(bundleIdentifier: String) -> [URL]? {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-"))
-        guard !bundleIdentifier.isEmpty,
-              bundleIdentifier.unicodeScalars.allSatisfy(allowed.contains)
-        else {
-            return nil
-        }
-        return FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(bundleIdentifier).instance.lock", isDirectory: false)
+        guard !bundleIdentifier.isEmpty, bundleIdentifier.unicodeScalars.allSatisfy(allowed.contains) else { return nil }
+        let identity = ownershipIdentifier(bundleIdentifier)
+        // Stable across bundle copies and launchers with different TMPDIR values.
+        let shared = URL(fileURLWithPath: "/private/tmp/\(identity).user-\(geteuid()).desktop.lock")
+        // Retain the previous lock during upgrades so an older installed app also blocks a duplicate.
+        let legacy = FileManager.default.temporaryDirectory.appendingPathComponent("\(identity).instance.lock")
+        return [shared, legacy]
     }
 
     @MainActor

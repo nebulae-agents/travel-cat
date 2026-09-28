@@ -1,6 +1,6 @@
 {
   "name": "travel-cat",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Travel journal, postcards, and scheduled journeys for the default black cat or a compatible custom pet.",
   "author": {
     "name": "nebulae-agents"

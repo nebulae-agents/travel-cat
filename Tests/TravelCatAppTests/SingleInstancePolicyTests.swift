@@ -3,6 +3,23 @@ import Darwin
 @testable import TravelCatApp
 
 final class SingleInstancePolicyTests: XCTestCase {
+    func testProductionAndPreviewShareDesktopOwnership() {
+        XCTAssertEqual(SingleInstancePolicy.lockFileURLs(bundleIdentifier: "com.nebulae.travelcat"),
+                       SingleInstancePolicy.lockFileURLs(bundleIdentifier: "com.nebulae.travelcat.setup-test"))
+        XCTAssertNil(SingleInstancePolicy.lockFileURLs(bundleIdentifier: "../../invalid"))
+        XCTAssertEqual(SingleInstancePolicy.decision(currentPID: 12,
+            expectedBundleID: "com.nebulae.travelcat.setup-test",
+            running: [.init(processIdentifier: 11, bundleIdentifier: "com.nebulae.travelcat")]),
+            .secondary(existingPID: 11))
+        XCTAssertEqual(SingleInstancePolicy.decision(currentPID: 12,
+            expectedBundleID: "com.nebulae.travelcat",
+            running: [.init(processIdentifier: 11, bundleIdentifier: "com.nebulae.travelcat.preview")]),
+            .secondary(existingPID: 11))
+        XCTAssertEqual(SingleInstancePolicy.decision(currentPID: 12,
+            expectedBundleID: "com.nebulae.travelcat",
+            running: [.init(processIdentifier: 11, bundleIdentifier: "com.nebulae.travelcat-other")]), .primary)
+    }
+
     func testNoRunningApplicationsMakesCurrentProcessPrimary() {
         XCTAssertEqual(
             SingleInstancePolicy.decision(

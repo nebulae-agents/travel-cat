@@ -62,6 +62,23 @@ STAGED_ID=$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$STAGING/Conte
 if [ -L "$DESTINATION" ]; then
     fail "destination must not be a symbolic link"
 fi
+PREFERENCE_DIRECTORY="$HOME_ROOT/Library/Application Support/TravelCat"
+PREFERENCE="$PREFERENCE_DIRECTORY/data-location.json"
+for DIRECTORY in "$HOME_ROOT/Library" "$HOME_ROOT/Library/Application Support" "$PREFERENCE_DIRECTORY"; do
+    [ ! -L "$DIRECTORY" ] || fail "data-location directory is a symbolic link"
+    if [ -e "$DIRECTORY" ]; then
+        [ -d "$DIRECTORY" ] || fail "data-location directory is unsafe"
+    fi
+done
+[ ! -L "$PREFERENCE" ] || fail "data-location preference is a symbolic link"
+if [ -e "$PREFERENCE" ]; then
+    [ -f "$PREFERENCE" ] || fail "data-location preference is unsafe"
+    VERSION=$(/usr/bin/plutil -extract schemaVersion raw -expect integer -o - "$PREFERENCE" 2>/dev/null) || fail "invalid data-location preference"
+    SAVED_PATH=$(/usr/bin/plutil -extract path raw -expect string -o - "$PREFERENCE" 2>/dev/null) || fail "invalid data-location preference"
+    [ "$VERSION" = "1" ] || fail "unsupported data-location schema"
+    case "$SAVED_PATH" in /?*) ;; *) fail "data-location path must be absolute" ;; esac
+fi
+
 if [ ! -e "$DESTINATION" ]; then
     /bin/mv "$STAGING" "$DESTINATION"
     trap - EXIT HUP INT TERM
@@ -83,6 +100,26 @@ if /usr/bin/diff -qr "$DESTINATION" "$STAGING" >/dev/null 2>&1; then
     exit 0
 fi
 [ "$REPLACE_EXISTING" -eq 1 ] || fail "a different Travel Cat app is already installed"
+
+# Preserve an older bundle's explicit location separately before replacing the app.
+# This metadata contains a path only; travel history is never copied or changed.
+if [ ! -e "$PREFERENCE" ]; then
+    if /usr/bin/plutil -type TravelCatDataRoot "$DESTINATION/Contents/Info.plist" >/dev/null 2>&1; then
+        LEGACY_PATH=$(/usr/bin/plutil -extract TravelCatDataRoot raw -expect string -o - "$DESTINATION/Contents/Info.plist" 2>/dev/null) || fail "legacy data-location must be a string"
+        case "$LEGACY_PATH" in /?*) ;; *) fail "legacy data-location path must be absolute" ;; esac
+        umask 077
+        /bin/mkdir -p "$PREFERENCE_DIRECTORY"
+        PREFERENCE_TEMP=$(/usr/bin/mktemp "$PREFERENCE_DIRECTORY/.data-location.XXXXXXXX")
+        /usr/bin/plutil -create xml1 "$PREFERENCE_TEMP"
+        /usr/bin/plutil -insert schemaVersion -integer 1 "$PREFERENCE_TEMP"
+        /usr/bin/plutil -insert path -string "$LEGACY_PATH" "$PREFERENCE_TEMP"
+        /usr/bin/plutil -convert json "$PREFERENCE_TEMP"
+        # A hard link publishes atomically without replacing an existing preference.
+        /bin/ln "$PREFERENCE_TEMP" "$PREFERENCE" || fail "data-location preference appeared during installation"
+        /bin/rm "$PREFERENCE_TEMP"
+        /bin/sync
+    fi
+fi
 
 BACKUP="$APPLICATIONS/.Travel Cat.app.backup.$(/bin/date -u +%Y%m%dT%H%M%SZ).$$"
 [ ! -e "$BACKUP" ] && [ ! -L "$BACKUP" ] || fail "backup path already exists"
