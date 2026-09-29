@@ -25,7 +25,8 @@ let package = Package(
         ),
         .executableTarget(
             name: "TravelCatApp",
-            dependencies: ["TravelCore", "TravelStorage", "TravelUI"]
+            dependencies: ["TravelCore", "TravelStorage", "TravelUI"],
+            resources: [.copy("Resources/Generation")]
         ),
         .executableTarget(
             name: "TravelCatCLI",

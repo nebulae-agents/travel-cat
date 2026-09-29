@@ -131,21 +131,22 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertLessThan(ownership.lowerBound, repository.lowerBound)
     }
 
-    func testAppContainsApprovedMenuActionsInOrder() throws {
+    func testMenuObservesDelegateAndContainsIndependentAppActionsInOrder() throws {
         let source = try appSource()
         let menuStart = try XCTUnwrap(source.range(of: "private struct TravelCatMenuContentView: View"))
         let menuEnd = try XCTUnwrap(source.range(of: "private struct TravelCatMenuLabelView: View", range: menuStart.upperBound..<source.endIndex))
         let menuSource = source[menuStart.lowerBound..<menuEnd.lowerBound]
         let labels = ["当前状态", "最新明信片", "旅行册", "设置…", "退出 Travel Cat"]
         var cursor = menuSource.startIndex
-
         for label in labels {
             let range = try XCTUnwrap(menuSource.range(of: "\"\(label)\"", range: cursor..<menuSource.endIndex))
             cursor = range.upperBound
         }
-
-        XCTAssertTrue(source.contains("disabled(!appDelegate.hasLatestPostcard)"))
-        XCTAssertTrue(source.contains("disabled(!appDelegate.hasLatestAlbum)"))
+        XCTAssertTrue(menuSource.contains("disabled(!appDelegate.hasLatestPostcard)"))
+        XCTAssertTrue(menuSource.contains("disabled(!appDelegate.hasLatestAlbum)"))
+        XCTAssertTrue(menuSource.contains("appDelegate.toggleDesktopPet"), "A hidden desktop pet must be recoverable from the menu")
+        XCTAssertTrue(source.contains("@Published private(set) var hasLatestPostcard"))
+        XCTAssertTrue(source.contains("@Published private(set) var hasLatestAlbum"))
     }
 
     func testSettingsMenuUsesDedicatedFixedSizeWindow() throws {
@@ -181,9 +182,13 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertEqual(app.components(separatedBy: "requestAlbumPreview:").count - 1, 2)
         XCTAssertTrue(app.contains("guard let environment,"))
         XCTAssertTrue(app.contains("environment.effectiveSettings.isFastTestEnabled else"))
-        let promptStart = try XCTUnwrap(app.range(of: "private func triggerTestPrompt()"))
-        let promptBody = app[promptStart.lowerBound...]
-        XCTAssertTrue(promptBody.contains("environment.effectiveSettings.isFastTestEnabled else { return }"))
+        for entry in ["func showAlbumPreview()", "private func triggerTestPrompt()"] {
+            let start = try XCTUnwrap(app.range(of: entry))
+            let body = app[start.upperBound...]
+            let guardEnd = try XCTUnwrap(body.range(of: "else"))
+            XCTAssertTrue(body[..<guardEnd.lowerBound].contains("environment.effectiveSettings.isFastTestEnabled"),
+                          "\(entry) must independently guard fast-test-only actions")
+        }
         XCTAssertTrue(settings.contains("bubbleController?.setTestActionsEnabled(settings.isFastTestEnabled)"))
         XCTAssertTrue(settings.contains("testModeChanged(settings.isFastTestEnabled)"))
         XCTAssertTrue(app.contains("self?.closeAlbumPreviewSession()"))
@@ -210,17 +215,17 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertFalse(launch.contains("refreshContextMenuPermissionState"))
     }
 
-    func testPackagedAppModuleHasNoPetUIRuntimePath() throws {
-        let source = try appModuleSource()
-
+    func testPackagedAppOwnsCompactPetButUsesSeparateJourneyWindow() throws {
+        let source = try appSource()
+        XCTAssertTrue(source.contains("var desktopPetController: DesktopPetController?"))
+        XCTAssertTrue(source.contains("let scene = OwnedPetSceneView("))
+        XCTAssertTrue(source.contains("controller.restoreVisibility()"))
+        XCTAssertTrue(source.contains("desktopPetController?.hide()"))
+        for route in ["showCurrentJourney", "showLatestPostcard", "showLatestAlbum", "showSupplies"] {
+            XCTAssertTrue(source.contains("in self?.\(route)()"))
+        }
         XCTAssertFalse(source.contains("PetWindowController("))
-        XCTAssertFalse(source.contains("showPet("))
-        XCTAssertFalse(source.contains("setStartupErrorContent("))
         XCTAssertFalse(source.contains("PetRootView("))
-        XCTAssertFalse(source.contains("PetHomeView("))
-        XCTAssertFalse(source.contains("AwayTagView("))
-        XCTAssertFalse(source.contains("PetSpriteView("))
-        XCTAssertFalse(source.contains("返回小猫"))
         XCTAssertTrue(source.contains("MenuServiceRootView("))
         XCTAssertTrue(source.contains("CurrentPetStatusView("))
         XCTAssertTrue(source.contains("close: { perform(.closeWindow) }"))
@@ -274,7 +279,7 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertFalse(source.contains("switch (country"))
     }
 
-    func testTravelCatAppDelegateStillNeverConstructsLegacyPetUI() throws {
+    func testDelegateKeepsLegacyExpandingPetUIOutOfStandaloneRuntime() throws {
         let source = try appSource()
         let delegateStart = try XCTUnwrap(source.range(of: "final class TravelCatAppDelegate"))
         let delegateSource = source[delegateStart.lowerBound..<source.endIndex]
@@ -286,9 +291,10 @@ final class TravelCatAppSourceContractTests: XCTestCase {
     func testMenuActionsUseDedicatedJourneySettingsAndAlbumPreviewWindows() throws {
         let source = try appSource()
 
-        XCTAssertEqual(source.components(separatedBy: "TravelUtilityWindowController()").count - 1, 4)
+        XCTAssertEqual(source.components(separatedBy: "TravelUtilityWindowController()").count - 1, 5)
         XCTAssertTrue(source.contains("private lazy var utilityWindowController"))
         XCTAssertTrue(source.contains("private lazy var settingsWindowController"))
+        XCTAssertTrue(source.contains("private lazy var generationWindowController"))
         XCTAssertTrue(source.contains("private lazy var albumPreviewWindowController"))
         XCTAssertTrue(source.contains("private lazy var journeyTestWindowController"))
         XCTAssertTrue(source.contains("model.openStatusFromMenu()"))
@@ -314,7 +320,16 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertFalse(watcherSource.contains("notificationService.process("))
         XCTAssertTrue(watcherSource.contains("notificationService.processUnavailable("))
         XCTAssertTrue(watcherSource.contains("petPromptService.ingestCurrent"))
-        assertOrder(watcherSource, "environment.applyRepositoryContents", before: "petPromptService.ingestCurrent")
+        assertOrder(watcherSource, "postcardRecoveryController.refresh()", before: "petPromptService.ingestCurrent")
+        XCTAssertTrue(source.contains("environment.applyRepositoryContents(RepositoryContents("))
+        XCTAssertTrue(source.contains("events: contents.events + supplemental"))
+        XCTAssertTrue(source.contains("selectedCharacterProfile: contents.selectedCharacterProfile"))
+        XCTAssertTrue(source.contains("presentationReferences: contents.presentationReferences.merging(references)"))
+        XCTAssertTrue(source.contains("didRefresh: { [weak self] in self?.refreshMenuState() }"))
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let recovery = try String(contentsOf: root.appendingPathComponent("Sources/TravelCatApp/PostcardRecoveryController.swift"), encoding: .utf8)
+        XCTAssertTrue(recovery.contains("defer { didRefresh() }"))
+        XCTAssertTrue(recovery.contains("applyContents(contents, supplemental, references)"))
         assertOrder(watcherSource, "petPromptService.ingestCurrent", before: "previous = contents")
     }
 
@@ -326,7 +341,7 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertTrue(app.contains("petPromptService.retry(settings: environment.effectiveSettings"))
         XCTAssertEqual(
             app.components(separatedBy: "settings: environment.effectiveSettings").count - 1,
-            7,
+            8,
             "startup, authorization, watcher and status toast must use effective settings"
         )
         XCTAssertTrue(settings.contains("var effectiveSettings: TravelSettings"))
@@ -486,18 +501,6 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertEqual(controller.window?.contentMinSize.width, TripAlbumLayout.minimumWindowContentWidth)
     }
 
-    private func appSource() throws -> String {
-        let testsURL = URL(fileURLWithPath: #filePath)
-        let packageRoot = testsURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        return try String(
-            contentsOf: packageRoot.appendingPathComponent("Sources/TravelCatApp/TravelCatApp.swift"),
-            encoding: .utf8
-        )
-    }
-
     private func appModuleSource() throws -> String {
         let testsURL = URL(fileURLWithPath: #filePath)
         let packageRoot = testsURL
@@ -513,6 +516,18 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         .sorted { $0.lastPathComponent < $1.lastPathComponent }
         .map { try String(contentsOf: $0, encoding: .utf8) }
         .joined(separator: "\n")
+    }
+
+    private func appSource() throws -> String {
+        let testsURL = URL(fileURLWithPath: #filePath)
+        let packageRoot = testsURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(
+            contentsOf: packageRoot.appendingPathComponent("Sources/TravelCatApp/TravelCatApp.swift"),
+            encoding: .utf8
+        )
     }
 
     private func bubbleViewSource() throws -> String {

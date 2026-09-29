@@ -33,6 +33,47 @@ final class AgentEnvelopeTests: XCTestCase {
         XCTAssertEqual(try repository.events(), [])
     }
 
+    func testDailyPreparingProjectionSchedulesTransitWithinFortyFiveMinutes() throws {
+        let candidate = try AgentEventEnvelope.decode(candidateData())
+        let result = candidate.validationResult(
+            previous: .empty(now: occurredAt), mode: .daily, calendar: utcCalendar(), now: occurredAt
+        )
+        let next = try XCTUnwrap(result.publishEnvelope).next
+        let interval = next.nextActionAt.timeIntervalSince(occurredAt)
+        XCTAssertGreaterThanOrEqual(interval, 15 * 60)
+        XCTAssertLessThanOrEqual(interval, 45 * 60)
+    }
+
+    func testDailyProjectionUsesEnteredPhaseForEveryTravelStageAndRest() throws {
+        let stages: [(TravelPhase, TravelPhase, ClosedRange<TimeInterval>)] = [
+            (.preparing, .transit, 3600...10800),
+            (.transit, .exploring, 14400...21600),
+            (.exploring, .postcardReady, 14400...21600),
+            (.postcardReady, .returning, 3600...10800),
+            (.returning, .resting, (12 * 3600)...(60 * 3600))
+        ]
+        for (previousPhase, phase, range) in stages {
+            var previous = TripSnapshot.empty(now: occurredAt)
+            previous.phase = previousPhase
+            previous.tripID = tripID
+            let postcard = phase == .postcardReady
+            let candidate = try AgentEventEnvelope.decode(candidateData(
+                phase: phase.rawValue,
+                location: phase == .exploring || postcard ? ("日本", "镰仓", "海岸") : nil,
+                postcardRequired: postcard,
+                scenePrompt: postcard ? "黑猫在海岸寄出明信片" : nil
+            ))
+            let result = candidate.validationResult(previous: previous, mode: .daily, calendar: utcCalendar(), now: occurredAt)
+            XCTAssertTrue(result.valid, "\(phase): \(result.violations)")
+            let next = try XCTUnwrap(result.publishEnvelope).next
+            XCTAssertTrue(range.contains(next.nextActionAt.timeIntervalSince(occurredAt)), "\(phase)")
+            if phase == .resting {
+                XCTAssertFalse(utcCalendar().isDate(next.nextActionAt, inSameDayAs: occurredAt))
+                XCTAssertTrue((8..<20).contains(utcCalendar().component(.hour, from: next.nextActionAt)))
+            }
+        }
+    }
+
     func testMoodJumpHasStableDomainViolation() throws {
         let candidate = try AgentEventEnvelope.decode(candidateData(moodLevel: 2))
         let previous = TripSnapshot.empty(now: occurredAt)

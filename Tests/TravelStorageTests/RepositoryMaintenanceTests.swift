@@ -14,6 +14,9 @@ final class RepositoryMaintenanceTests: XCTestCase {
         let root = try temporaryDirectory()
         let repository = try TravelRepository(root: root)
         try TravelSettingsStore(root: root).save(.init(mode: .fast))
+        // Exercise a sub-microsecond value that changes binary precision when converted
+        // from Foundation's reference epoch to the wire format's Unix epoch.
+        let care = try repository.performHomeCare(.snack, now: Date(timeIntervalSinceReferenceDate: 812_000_000.0000001))
         try Data("image".utf8).write(to: root.appendingPathComponent("postcards/card.webp"))
         try Data("partial".utf8).write(to: root.appendingPathComponent("postcards/.card.tmp"))
         try Data("temp".utf8).write(to: root.appendingPathComponent("state/.active.tmp"))
@@ -23,6 +26,17 @@ final class RepositoryMaintenanceTests: XCTestCase {
         XCTAssertEqual(exported.standardizedFileURL, destination.standardizedFileURL)
         XCTAssertTrue(FileManager.default.fileExists(atPath: exported.appendingPathComponent("state/current-trip.json").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: exported.appendingPathComponent("state/settings.json").path))
+        let storedCare = try Data(contentsOf: root.appendingPathComponent("state/home-care.json"))
+        let exportedCare = try Data(contentsOf: exported.appendingPathComponent("state/home-care.json"))
+        // Export must preserve the persisted source byte-for-byte, not reconstruct
+        // the pre-serialization Date whose floating-point precision is different.
+        XCTAssertEqual(exportedCare, storedCare)
+        let restoredCare = try JSONDecoder.travelCat.decode(HomeCareState.self, from: exportedCare)
+        XCTAssertEqual(restoredCare.history.map(\.id), care.history.map(\.id))
+        XCTAssertEqual(restoredCare.history.map(\.action), care.history.map(\.action))
+        XCTAssertEqual(try XCTUnwrap(restoredCare.latest).occurredAt.timeIntervalSinceReferenceDate,
+                       try XCTUnwrap(care.latest).occurredAt.timeIntervalSinceReferenceDate,
+                       accuracy: 0.000001)
         XCTAssertTrue(FileManager.default.fileExists(atPath: exported.appendingPathComponent("journal/events.jsonl").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: exported.appendingPathComponent("postcards/card.webp").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: exported.appendingPathComponent("postcards/.card.tmp").path))

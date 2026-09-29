@@ -4,6 +4,44 @@ import TravelCore
 @testable import TravelStorage
 
 final class CharacterJourneyTests: XCTestCase {
+    func testExpectedCharacterRejectsChangedSelectionBeforeFreezingOrPublishing() throws {
+        let fixture = JourneyCharacterFixture()
+        let repository = try TravelRepository(root: fixture.dataRoot, clock: FixedClock(now: fixture.now))
+        let expected = try repository.loadSnapshot()
+        _ = try fixture.importProfile(id: "changed-selection", name: "Changed")
+        let event = TripEvent.fixture(occurredAt: fixture.now)
+        let next = TripSnapshot.fixture(stateVersion: 1, tripID: event.tripID, lastEventID: event.id,
+                                        phase: .preparing, lastUpdatedAt: fixture.now)
+        XCTAssertThrowsError(try repository.publish(event: event, next: next, expectedSnapshot: expected,
+                                                    expectedCharacterProfile: .defaultBlackCat)) { error in
+            guard case RepositoryError.continuityConflict = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+        XCTAssertEqual(try repository.loadSnapshot(), expected)
+        XCTAssertTrue(try repository.events().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.dataRoot.appendingPathComponent("state/frozen-character.json").path))
+    }
+
+    func testExpectedCharacterRejectsDifferentFrozenProfileEvenWithDefaultSelection() throws {
+        let fixture = JourneyCharacterFixture()
+        let custom = try fixture.importProfile(id: "frozen-custom", name: "Custom")
+        let repository = try TravelRepository(root: fixture.dataRoot, clock: FixedClock(now: fixture.now))
+        XCTAssertEqual(try repository.claimDue(mode: .fast, now: fixture.now).characterProfile, custom)
+        _ = try repository.configureCharacter(.default)
+        let expected = try repository.loadSnapshot()
+        let anchorURL = fixture.dataRoot.appendingPathComponent("state/frozen-character.json")
+        let anchor = try Data(contentsOf: anchorURL)
+        let event = TripEvent.fixture(occurredAt: fixture.now)
+        let next = TripSnapshot.fixture(stateVersion: 1, tripID: event.tripID, lastEventID: event.id,
+                                        phase: .preparing, lastUpdatedAt: fixture.now)
+        XCTAssertThrowsError(try repository.publish(event: event, next: next, expectedSnapshot: expected,
+                                                    expectedCharacterProfile: .defaultBlackCat)) { error in
+            guard case RepositoryError.continuityConflict = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+        XCTAssertEqual(try repository.loadSnapshot(), expected)
+        XCTAssertTrue(try repository.events().isEmpty)
+        XCTAssertEqual(try Data(contentsOf: anchorURL), anchor)
+    }
+
     func testExportPreservesSelectedAndFrozenProfilesWithAllImmutableCharacterAssets() throws {
         let fixture = JourneyCharacterFixture()
         let a = try fixture.importProfile(id: "export-a", name: "A")
@@ -157,6 +195,37 @@ final class CharacterJourneyTests: XCTestCase {
         XCTAssertEqual(try repository.claimDue(mode: .fast, now: fixture.now).characterProfile, b)
         repository = try TravelRepository(root: fixture.dataRoot, clock: FixedClock(now: fixture.now))
         XCTAssertEqual(try XCTUnwrap(repository.pendingImages(mode: .fast).first).characterProfile, a)
+    }
+
+    func testFilteredPendingImagesSkipsOldCustomTripWithoutLeasingIt() throws {
+        let fixture = JourneyCharacterFixture()
+        let custom = try fixture.importProfile(id: "old-custom", name: "Custom")
+        let clock = JourneyClock(now: fixture.now)
+        let repository = try TravelRepository(root: fixture.dataRoot, clock: clock)
+        let oldPostcard = try finishTripWithPendingPostcard(repository, now: clock.now)
+        _ = try repository.configureCharacter(.default)
+        let before = try repository.imageRetry(for: oldPostcard.id)
+        XCTAssertTrue(try repository.pendingImages(mode: .fast, matchingCharacterProfile: .defaultBlackCat).isEmpty)
+        XCTAssertEqual(try repository.imageRetry(for: oldPostcard.id), before)
+
+        clock.now = clock.now.addingTimeInterval(60)
+        let tripID = UUID()
+        var snapshot = try repository.loadSnapshot()
+        var newPostcard: TripEvent?
+        for phase in [TravelPhase.preparing, .transit, .exploring, .postcardReady] {
+            let event = TripEvent.fixture(tripID: tripID, previousEventID: snapshot.lastEventID,
+                occurredAt: clock.now, phase: phase, postcardStatus: phase == .postcardReady ? .pendingImage : .none)
+            let next = TripSnapshot.fixture(stateVersion: snapshot.stateVersion + 1, tripID: tripID,
+                lastEventID: event.id, phase: phase, lastUpdatedAt: clock.now)
+            try repository.publish(event: event, next: next)
+            snapshot = next
+            if phase == .postcardReady { newPostcard = event }
+        }
+        let work = try XCTUnwrap(repository.pendingImages(mode: .fast, matchingCharacterProfile: .defaultBlackCat).first)
+        XCTAssertEqual(work.event.id, try XCTUnwrap(newPostcard).id)
+        XCTAssertEqual(work.characterProfile, .defaultBlackCat)
+        XCTAssertEqual(try repository.imageRetry(for: oldPostcard.id), before)
+        XCTAssertEqual(try XCTUnwrap(repository.pendingImages(mode: .fast).first).characterProfile, custom)
     }
 
     func testCorruptAnchorFailsClosed() throws {

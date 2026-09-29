@@ -7,19 +7,22 @@ public struct TravelSettings: Codable, Equatable, Sendable {
     public var quietStart: Int
     public var quietEnd: Int
     public var followCodexPet: Bool
+    public var automaticTravelEnabled: Bool
 
     public init(
         schemaVersion: Int = 1,
         mode: TravelMode = .daily,
         quietStart: Int = 22,
         quietEnd: Int = 8,
-        followCodexPet: Bool = true
+        followCodexPet: Bool = true,
+        automaticTravelEnabled: Bool = true
     ) {
         self.schemaVersion = schemaVersion
         self.mode = mode
         self.quietStart = Self.canonicalHour(quietStart)
         self.quietEnd = Self.canonicalHour(quietEnd)
         self.followCodexPet = followCodexPet
+        self.automaticTravelEnabled = automaticTravelEnabled
     }
 
     public static func canonicalHour(_ hour: Int) -> Int {
@@ -27,7 +30,7 @@ public struct TravelSettings: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, mode, quietStart, quietEnd, followCodexPet
+        case schemaVersion, mode, quietStart, quietEnd, followCodexPet, automaticTravelEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -46,7 +49,8 @@ public struct TravelSettings: Codable, Equatable, Sendable {
             mode: try values.decode(TravelMode.self, forKey: .mode),
             quietStart: try values.decode(Int.self, forKey: .quietStart),
             quietEnd: try values.decode(Int.self, forKey: .quietEnd),
-            followCodexPet: followCodexPet
+            followCodexPet: followCodexPet,
+            automaticTravelEnabled: try values.decodeIfPresent(Bool.self, forKey: .automaticTravelEnabled) ?? true
         )
     }
 }

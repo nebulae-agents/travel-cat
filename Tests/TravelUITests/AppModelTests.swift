@@ -56,6 +56,33 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.characterProfile, custom)
     }
 
+    func testHomeCareReactsOnlyAfterPersistenceAndDoesNotMutateTrip() {
+        let initial = makeSnapshot(phase: .resting)
+        let now = Date(timeIntervalSince1970: 1000)
+        let model = AppModel(snapshot: initial, defaults: isolatedDefaults(), clock: { now })
+        model.performHomeCare(.play)
+        XCTAssertEqual(model.homeCareReaction?.action, .play)
+        XCTAssertEqual(model.homeCare.history.count, 1)
+        XCTAssertEqual(model.snapshot, initial)
+        model.performHomeCare(.brush)
+        XCTAssertEqual(model.homeCare.history.count, 1)
+        XCTAssertNotNil(model.homeCareErrorMessage)
+        let failed = AppModel(snapshot: initial, defaults: isolatedDefaults(), persistHomeCare: { _, _ in
+            throw CocoaError(.fileWriteNoPermission)
+        })
+        failed.performHomeCare(.snack)
+        XCTAssertNil(failed.homeCareReaction)
+        XCTAssertTrue(failed.homeCare.history.isEmpty)
+        XCTAssertNotNil(failed.homeCareErrorMessage)
+        let away = AppModel(snapshot: makeSnapshot(phase: .transit), defaults: isolatedDefaults())
+        away.performHomeCare(.blanket)
+        XCTAssertTrue(away.homeCare.history.isEmpty)
+        XCTAssertNotNil(away.homeCareErrorMessage)
+        let restored = AppModel(snapshot: initial, defaults: isolatedDefaults(), homeCare: model.homeCare)
+        XCTAssertEqual(restored.homeCare.latest?.action, .play)
+        XCTAssertNil(restored.homeCareReaction)
+    }
+
     func testRestingInteractionFollowsStatusPostcardAlbumHierarchy() throws {
         let event = makeEvent(id: firstID, seconds: 10, status: .ready)
         let model = AppModel(snapshot: makeSnapshot(phase: .resting), events: [event], defaults: isolatedDefaults(), supplies: [])
@@ -664,6 +691,64 @@ final class AppModelTests: XCTestCase {
         XCTAssertThrowsError(try model.selectSupply("camera")) { error in
             XCTAssertEqual(error as? AppModelError, .catIsAway)
         }
+    }
+
+    func testSupplementEventWithoutPresentationKeepsOrdinaryReferencesAndCharacter() {
+        let ordinary = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let supplement = makeEvent(id: secondID, seconds: 20, status: .pendingImage)
+        let reference = PostcardPresentationReference(relativePath: "ordinary.json", sha256: "ordinary")
+        let character = CharacterProfile(
+            id: "custom", displayName: "小橘", description: "", spriteVersionNumber: 2,
+            sprite: .dataRootRelative("characters/custom/revision/assets/pet.webp"),
+            referenceImages: [],
+            source: .importedManifest("characters/custom/revision/source-manifest.json")
+        )
+        let snapshot = makeSnapshot(phase: .resting)
+        let model = AppModel(snapshot: snapshot, events: [ordinary], presentationReferences: [ordinary.id: reference], defaults: isolatedDefaults(), characterProfile: character)
+        model.updatePostcardWork([PostcardWorkItem(id: UUID(), tripID: tripID, eventID: supplement.id, isSupplement: true, generatedAt: supplement.occurredAt, status: .pending)])
+
+        model.apply(next: snapshot, events: [ordinary, supplement], presentationReferences: [ordinary.id: reference])
+
+        XCTAssertEqual(model.events.map(\.id), [ordinary.id, supplement.id])
+        XCTAssertEqual(model.presentationReferences, [ordinary.id: reference])
+        XCTAssertEqual(model.characterProfile, character)
+        model.openLatestAlbumFromMenu()
+        model.handle(.postcard(supplement.id))
+        XCTAssertEqual(model.presentation, .postcard(supplement.id))
+    }
+
+    func testUnpublishedWorkOpensAlbumSurvivesRefreshAndNeverCreatesUnreadEvent() {
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), defaults: isolatedDefaults())
+        let slot = UUID()
+        let pending = PostcardWorkItem(id: slot, tripID: tripID, eventID: nil, isSupplement: false, generatedAt: nil, status: .pending)
+        model.updatePostcardWork([pending])
+        XCTAssertEqual(model.latestAvailableTripID(), tripID)
+        model.openLatestAlbumFromMenu()
+        XCTAssertEqual(model.presentation, .album(tripID))
+        model.apply(next: makeSnapshot(version: 2, phase: .resting), events: [])
+        XCTAssertEqual(model.presentation, .album(tripID))
+        XCTAssertTrue(model.events.isEmpty)
+        XCTAssertTrue(model.unreadPostcardIDs.isEmpty)
+        var requests: [UUID] = []
+        model.retryPostcardAction = { requests.append($0) }
+        model.retryPostcard(slot)
+        XCTAssertTrue(requests.isEmpty)
+        model.updatePostcardWork([PostcardWorkItem(id: slot, tripID: tripID, eventID: nil, isSupplement: false, generatedAt: nil, status: .manualRequired)])
+        model.retryPostcard(slot)
+        XCTAssertTrue(requests.isEmpty)
+        let legacyEventID = UUID()
+        model.updatePostcardWork([PostcardWorkItem(id: slot, tripID: tripID, eventID: legacyEventID, isSupplement: false, generatedAt: nil, status: .manualRequired)])
+        model.retryPostcard(slot)
+        XCTAssertEqual(requests, [legacyEventID])
+    }
+
+    func testBacklogErrorRetainsAlbumAccessWithoutInventingEvents() {
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), defaults: isolatedDefaults())
+        model.updatePostcardWork([], error: "无法读取明信片任务记录")
+        model.openLatestAlbumFromMenu()
+        XCTAssertEqual(model.presentation, .album(tripID))
+        XCTAssertNotNil(model.postcardWorkError)
+        XCTAssertTrue(model.events.isEmpty)
     }
 
     private func makeSnapshot(version: Int = 1, phase: TravelPhase) -> TripSnapshot {

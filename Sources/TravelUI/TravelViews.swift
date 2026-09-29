@@ -376,7 +376,11 @@ public struct PostcardView: View {
     private let event: TripEvent
     private let presentationReference: PostcardPresentationReference?
     private let rootURL: URL?
+    private let retry: ((UUID) -> Void)?
+    private let error: String?
+    private let notice: String?
     private let open: (PetPresentation) -> Void
+    private let workItem: PostcardWorkItem?
     private let back: PetPresentation
 
     public init(
@@ -384,12 +388,20 @@ public struct PostcardView: View {
         rootURL: URL? = nil,
         presentationReference: PostcardPresentationReference? = nil,
         back: PetPresentation = .status,
+        workItem: PostcardWorkItem? = nil,
+        retry: ((UUID) -> Void)? = nil,
+        error: String? = nil,
+        notice: String? = nil,
         open: @escaping (PetPresentation) -> Void
     ) {
         self.event = event
         self.presentationReference = presentationReference
         self.rootURL = rootURL
+        self.workItem = workItem
         self.back = back
+        self.retry = retry
+        self.error = error
+        self.notice = notice
         self.open = open
     }
 
@@ -407,13 +419,16 @@ public struct PostcardView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    PostcardArtworkView(event: event, rootURL: rootURL, height: 230, profile: .detail, presentationReference: presentationReference)
+                    PostcardArtworkView(event: event, rootURL: rootURL, profile: .detail, presentationReference: presentationReference)
                     .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     Text(PostcardDisplayLocation().resolveCompact(event.location))
                         .font(.title2.bold())
                         .accessibilityLabel(PostcardDisplayLocation().resolveSpoken(event.location))
                     Text(event.summary)
+                    if let workItem { PostcardWorkStatusView(item: workItem, retry: retry) }
+                    if let error { Text(error).font(.caption).foregroundStyle(.red) }
+                    if let notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
                     HStack {
                         Label(event.mood.label, systemImage: "sparkles")
                         Spacer()
@@ -437,21 +452,29 @@ public struct PostcardView: View {
 
 @MainActor
 public struct TripAlbumView: View {
-    private let tripID: UUID
+    private let tripID: UUID?
     private let events: [TripEvent]
     private let presentationReferences: [UUID: PostcardPresentationReference]
     private let rootURL: URL?
+    private let workItems: [PostcardWorkItem]
     private let calendar: Calendar
     private let now: Date
+    private let retry: ((UUID) -> Void)?
+    private let error: String?
+    private let notice: String?
     private let open: (PetPresentation) -> Void
 
     public init(
-        tripID: UUID,
+        tripID: UUID?,
         events: [TripEvent],
         rootURL: URL? = nil,
         presentationReferences: [UUID: PostcardPresentationReference] = [:],
         calendar: Calendar = .autoupdatingCurrent,
         now: Date = Date(),
+        workItems: [PostcardWorkItem] = [],
+        retry: ((UUID) -> Void)? = nil,
+        error: String? = nil,
+        notice: String? = nil,
         open: @escaping (PetPresentation) -> Void
     ) {
         self.tripID = tripID
@@ -460,18 +483,22 @@ public struct TripAlbumView: View {
         self.rootURL = rootURL
         self.calendar = calendar
         self.now = now
+        self.workItems = workItems
+        self.retry = retry
+        self.error = error
+        self.notice = notice
         self.open = open
     }
 
     nonisolated public static func orderedEvents(
-        tripID: UUID,
+        tripID: UUID?,
         events: [TripEvent],
         now: Date = Date()
     ) -> [TripEvent] {
         events.enumerated()
             .filter {
                 let event = $0.element
-                guard event.tripID == tripID, event.occurredAt <= now else { return false }
+                guard (tripID == nil || event.tripID == tripID), event.occurredAt <= now else { return false }
                 switch event.postcardStatus {
                 case .pendingImage, .ready, .imageUnavailable:
                     return true
@@ -495,12 +522,15 @@ public struct TripAlbumView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("旅行册").font(.title2.bold())
+                Text(tripID == nil ? "历史旅行册" : "旅行册").font(.title2.bold())
                 Spacer()
                 Button("关闭") { open(.status) }.buttonStyle(.plain)
             }
             let ordered = Self.orderedEvents(tripID: tripID, events: events, now: now)
-            if ordered.isEmpty {
+            let unpublished = workItems.filter { $0.eventID == nil && (tripID == nil || $0.tripID == tripID) }
+            if let error { Text(error).font(.callout).foregroundStyle(.red) }
+            if let notice { Text(notice).font(.callout).foregroundStyle(.secondary) }
+            if ordered.isEmpty && unpublished.isEmpty && error == nil {
                 ContentUnavailableView("还没有明信片", systemImage: "photo.stack")
             } else {
                 GeometryReader { proxy in
@@ -516,6 +546,15 @@ public struct TripAlbumView: View {
                             messages: messages
                         )
                         LazyVStack(alignment: .leading, spacing: TripAlbumLayout.dateGroupSpacing) {
+                            ForEach(unpublished) { item in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("计划中的明信片", systemImage: "photo")
+                                    PostcardWorkStatusView(item: item, retry: retry)
+                                }
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                            }
                             ForEach(groups) { group in
                                 VStack(alignment: .leading, spacing: TripAlbumLayout.spacing) {
                                     HStack(spacing: TripAlbumLayout.spacing) {
@@ -549,10 +588,15 @@ public struct TripAlbumView: View {
                                         spacing: TripAlbumLayout.spacing
                                     ) {
                                         ForEach(group.events) { event in
-                                            Button { open(Self.postcardDestination(for: event)) } label: {
-                                                AlbumCard(event: event, rootURL: rootURL, presentationReference: presentationReferences[event.id])
+                                            VStack(alignment: .leading, spacing: 6) {
+                                                Button { open(Self.postcardDestination(for: event)) } label: {
+                                                    AlbumCard(event: event, rootURL: rootURL, presentationReference: presentationReferences[event.id])
+                                                }
+                                                .buttonStyle(.plain)
+                                                if let item = workItems.first(where: { $0.eventID == event.id }) {
+                                                    PostcardWorkStatusView(item: item, retry: retry)
+                                                }
                                             }
-                                            .buttonStyle(.plain)
                                         }
                                     }
                                 }
@@ -576,6 +620,8 @@ public struct TripAlbumGeometry: Equatable, Sendable {
     public let columnCount: Int
     public let artworkWidth: CGFloat
     public let isReadable: Bool
+
+    public var artworkHeight: CGFloat { artworkWidth * 2.0 / 3.0 }
 }
 
 public enum TripAlbumLayout {
@@ -585,7 +631,6 @@ public enum TripAlbumLayout {
     public static let cardHorizontalPadding: CGFloat = 20
     public static let readableCompactArtworkWidth: CGFloat = 320
     public static let minimumWindowContentWidth: CGFloat = 760
-    public static let artworkHeight: CGFloat = 120
 
     public static func minimumContentHeight(eventCount: Int, dateGroupCount: Int) -> CGFloat {
         CGFloat(max(eventCount, 0)) * 165
@@ -603,7 +648,7 @@ public enum TripAlbumLayout {
                 message: $0,
                 region: .wideMiddleTrailing,
                 profile: .compact,
-                containerSize: CGSize(width: max(twoColumnArtwork, 1), height: artworkHeight)
+                containerSize: CGSize(width: max(twoColumnArtwork, 1), height: max(twoColumnArtwork, 1) * 2.0 / 3.0)
             ).fitsVertically
         }
         if twoColumnArtwork >= readableCompactArtworkWidth, fitsOrdinaryMessages {
@@ -626,7 +671,7 @@ private struct AlbumCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            PostcardArtworkView(event: event, rootURL: rootURL, height: TripAlbumLayout.artworkHeight, profile: .compact, presentationReference: presentationReference)
+            PostcardArtworkView(event: event, rootURL: rootURL, profile: .compact, presentationReference: presentationReference)
             Text(PostcardDisplayLocation().resolveCompact(event.location))
                 .font(.headline)
                 .lineLimit(1)
@@ -644,6 +689,9 @@ public struct SupplyDrawerView: View {
     private let selectedID: String?
     private let isCatAway: Bool
     private let errorText: String?
+    private let homeCare: HomeCareState
+    private let homeCareErrorText: String?
+    private let care: (HomeCareAction) -> Void
     private let select: (String?) -> Void
     private let close: () -> Void
 
@@ -652,9 +700,15 @@ public struct SupplyDrawerView: View {
         selectedID: String?,
         isCatAway: Bool = false,
         errorText: String? = nil,
+        homeCare: HomeCareState = HomeCareState(),
+        homeCareErrorText: String? = nil,
+        care: @escaping (HomeCareAction) -> Void = { _ in },
         select: @escaping (String?) -> Void,
         close: @escaping () -> Void
     ) {
+        self.homeCare = homeCare
+        self.homeCareErrorText = homeCareErrorText
+        self.care = care
         self.supplies = supplies
         self.selectedID = selectedID
         self.isCatAway = isCatAway
@@ -666,7 +720,7 @@ public struct SupplyDrawerView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("旅行用品").font(.title3.bold())
+                Text("用品与陪伴").font(.title3.bold())
                 Spacer()
                 Button("关闭", action: close).buttonStyle(.plain)
             }
@@ -679,7 +733,45 @@ public struct SupplyDrawerView: View {
                     .font(.caption).foregroundStyle(.red)
             }
             ScrollView {
-                VStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("在家陪伴").font(.headline)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        VStack(alignment: .leading, spacing: 8) {
+                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                                ForEach(HomeCareAction.allCases, id: \.self) { action in
+                                    Button { care(action) } label: {
+                                        Label(action.title, systemImage: action.symbol)
+                                            .frame(maxWidth: .infinity).padding(.vertical, 6)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(.orange)
+                                    .disabled(isCatAway || homeCare.isCoolingDown(at: context.date))
+                                }
+                            }
+                            Text(isCatAway ? "等小黑回家，再一起享受这些小日常。" : homeCare.isCoolingDown(at: context.date)
+                                 ? "小黑正在享受你的照顾，稍等几秒……" : "选一件用品，看看小黑的回应。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let homeCareErrorText {
+                        Text(homeCareErrorText).font(.caption).foregroundStyle(.red)
+                    }
+                    if let latest = homeCare.latest {
+                        Text(latest.action.response).font(.callout)
+                        DisclosureGroup("最近的陪伴") {
+                            ForEach(homeCare.history.reversed().prefix(5)) { visit in
+                                HStack {
+                                    Text(visit.action.title)
+                                    Spacer()
+                                    Text(visit.occurredAt, format: .dateTime.month().day().hour().minute())
+                                }.font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Divider()
+                    Text("旅行行囊 · 每次携带一件").font(.headline)
+                    Text("选择后自动保存，用品可能出现在旅途的故事里。")
+                        .font(.caption).foregroundStyle(.secondary)
                     supplyButton(id: nil, name: "不携带用品", influence: "清除当前选择")
                     ForEach(supplies) { supply in
                         supplyButton(id: supply.id, name: supply.name, influence: supply.influence)
@@ -702,6 +794,8 @@ public struct SupplyDrawerView: View {
                 }
                 Spacer()
             }
+            .padding(10)
+            .background(selectedID == id ? Color.orange.opacity(0.10) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -770,7 +864,10 @@ public struct PetRootView: View {
                 PostcardView(
                     event: event,
                     rootURL: model.dataRoot,
-                    presentationReference: model.presentationReferences[event.id]
+                    presentationReference: model.presentationReferences[event.id],
+                    workItem: model.postcardWorkItems.first(where: { $0.eventID == event.id }),
+                    retry: model.retryPostcard,
+                    error: model.postcardWorkError, notice: model.manualRetryMessage
                 ) { destination in
                     if destination == .status { model.close() }
                     else { model.handle(destination) }
@@ -778,8 +875,8 @@ public struct PetRootView: View {
             } else {
                 Button("返回") { model.close() }
             }
-        case let .album(tripID):
-            TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences) { destination in
+        case .album:
+            TripAlbumView(tripID: nil, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences, workItems: model.postcardWorkItems, retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
                 if destination == .status { model.close() }
                 else { model.handle(destination) }
             }
@@ -789,9 +886,39 @@ public struct PetRootView: View {
                 selectedID: model.snapshot.carriedItemID,
                 isCatAway: !(model.snapshot.phase == .resting || model.snapshot.phase == .preparing),
                 errorText: model.supplyErrorMessage,
+                homeCare: model.homeCare,
+                homeCareErrorText: model.homeCareErrorMessage,
+                care: model.performHomeCare,
                 select: { try? model.selectSupply($0) },
                 close: model.close
             )
         }
+    }
+}
+
+@MainActor
+private struct PostcardWorkStatusView: View {
+    let item: PostcardWorkItem
+    let retry: ((UUID) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if item.isSupplement, item.status == .ready, let date = item.generatedAt {
+                HStack {
+                    Text("补发 · 实际生成")
+                    Text(date, style: .date)
+                    Text(date, style: .time)
+                }
+            }
+            if item.status != .ready {
+                Text(item.statusLabel)
+                if let reason = item.failureReason, !reason.isEmpty { Text(reason) }
+            }
+            if item.status == .manualRequired, let retry {
+                Button("手动重试一次") { retry(item.id) }.buttonStyle(.bordered)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 }

@@ -14,7 +14,7 @@ final class TravelCatPluginContractTests: XCTestCase {
         let data = try Data(contentsOf: plugin.appendingPathComponent(".codex-plugin/plugin.json"))
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["name"] as? String, "travel-cat")
-        XCTAssertEqual(manifest["version"] as? String, "1.0.0")
+        XCTAssertEqual(manifest["version"] as? String, "1.0.1")
         XCTAssertEqual(manifest["skills"] as? String, "./skills/")
         XCTAssertTrue((manifest["description"] as? String)?.contains("custom") == true)
 

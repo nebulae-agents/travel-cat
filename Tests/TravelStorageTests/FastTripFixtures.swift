@@ -574,7 +574,7 @@ struct FastTripRunner {
     private func writeMinimalPNG(at url: URL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard let context = CGContext(
-            data: nil, width: 768, height: 768, bitsPerComponent: 8, bytesPerRow: 768 * 4,
+            data: nil, width: 1152, height: 768, bitsPerComponent: 8, bytesPerRow: 1152 * 4,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ), let image = context.makeImage(),
         let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {

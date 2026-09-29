@@ -19,6 +19,23 @@ public enum AppModelError: Error, Equatable, Sendable {
 @MainActor
 public final class AppModel: ObservableObject {
     public typealias SupplyPersistence = @MainActor (String?) throws -> TripSnapshot
+    @Published public private(set) var postcardWorkItems: [PostcardWorkItem] = []
+    @Published public private(set) var postcardWorkError: String?
+    @Published public private(set) var manualRetryMessage: String?
+    public var retryPostcardAction: (@MainActor (UUID) -> Void)?
+
+    public func updatePostcardWork(_ items: [PostcardWorkItem], error: String? = nil, manualRetryMessage: String? = nil) {
+        postcardWorkItems = items
+        postcardWorkError = error
+        self.manualRetryMessage = manualRetryMessage
+    }
+
+    public func retryPostcard(_ id: UUID) {
+        guard let item = postcardWorkItems.first(where: { $0.id == id && $0.status == .manualRequired }),
+              let eventID = item.eventID else { return }
+        retryPostcardAction?(eventID)
+    }
+
     @Published public private(set) var snapshot: TripSnapshot
     @Published public private(set) var events: [TripEvent]
     @Published public private(set) var presentationReferences: [UUID: PostcardPresentationReference]
@@ -27,6 +44,11 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var presentation: PetPresentation
     @Published public private(set) var supplyErrorMessage: String?
     @Published public private(set) var characterProfile: CharacterProfile
+
+    @Published public private(set) var homeCare: HomeCareState
+    @Published public private(set) var homeCareErrorMessage: String?
+    @Published public private(set) var homeCareReaction: HomeCareVisit?
+    private let persistHomeCare: (@MainActor (HomeCareAction, Date) throws -> HomeCareState)?
 
     public let supplies: [Supply]
     public let dataRoot: URL?
@@ -46,8 +68,14 @@ public final class AppModel: ObservableObject {
         supplies: [Supply] = SupplyCatalog.loadOrEmpty(),
         characterProfile: CharacterProfile = .defaultBlackCat,
         persistSupply: SupplyPersistence? = nil,
+        homeCare: HomeCareState = HomeCareState(),
+        homeCareErrorMessage: String? = nil,
+        persistHomeCare: (@MainActor (HomeCareAction, Date) throws -> HomeCareState)? = nil,
         clock: @escaping () -> Date = Date.init
     ) {
+        self.homeCare = homeCare
+        self.homeCareErrorMessage = homeCareErrorMessage
+        self.persistHomeCare = persistHomeCare
         self.snapshot = snapshot
         self.events = events
         self.presentationReferences = presentationReferences.filter { id, _ in events.contains { $0.id == id } }
@@ -111,7 +139,7 @@ public final class AppModel: ObservableObject {
                 postcardReturnPresentation = .status
             }
         case let .album(tripID):
-            if !arrived.contains(where: { $0.tripID == tripID && isAlbumEvent($0) }) {
+            if !arrived.contains(where: { $0.tripID == tripID && isAlbumEvent($0) }) && !postcardWorkItems.contains(where: { $0.tripID == tripID }) && postcardWorkError == nil {
                 presentation = .status
             }
         case .supplies:
@@ -179,7 +207,9 @@ public final class AppModel: ObservableObject {
     }
 
     public func latestAvailableTripID() -> UUID? {
-        latestAvailablePostcardID()?.tripID
+        if postcardWorkItems.contains(where: { $0.tripID == snapshot.tripID }) { return snapshot.tripID }
+        return latestAvailablePostcardID()?.tripID ?? postcardWorkItems.last?.tripID
+            ?? (postcardWorkError == nil ? nil : snapshot.tripID)
     }
 
     private func latestAvailablePostcardID() -> TripEvent? {
@@ -280,6 +310,24 @@ public final class AppModel: ObservableObject {
         } else {
             snapshot.carriedItemID = id
             supplyErrorMessage = nil
+        }
+    }
+
+    public func performHomeCare(_ action: HomeCareAction) {
+        do {
+            let now = clock()
+            var next = homeCare
+            try next.perform(action, phase: snapshot.phase, now: now)
+            if let persistHomeCare { next = try persistHomeCare(action, now) }
+            homeCare = next
+            homeCareReaction = next.latest
+            homeCareErrorMessage = nil
+        } catch HomeCareError.catIsAway {
+            homeCareErrorMessage = "小黑已经出发，等它回家再一起玩吧。"
+        } catch HomeCareError.coolingDown {
+            homeCareErrorMessage = "小黑还在享受刚才的照顾，稍等几秒吧。"
+        } catch {
+            homeCareErrorMessage = "这次照顾未能保存，请稍后重试。"
         }
     }
 

@@ -4,6 +4,54 @@ import TravelCore
 @testable import TravelStorage
 
 final class TravelRepositoryTests: XCTestCase {
+    func testExpectedSnapshotRejectsConcurrentSupplyChangeWithoutPublishing() throws {
+        let repository = try TravelRepository(root: temporaryDirectory())
+        let expected = try repository.loadSnapshot()
+        let current = try repository.updateCarriedItem("snack")
+        let event = TripEvent.fixture(phase: .preparing)
+        let next = TripSnapshot.fixture(stateVersion: 1, tripID: event.tripID, lastEventID: event.id, phase: .preparing)
+
+        XCTAssertThrowsError(try repository.publish(event: event, next: next, expectedSnapshot: expected)) { error in
+            guard case RepositoryError.versionConflict = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+        XCTAssertEqual(try repository.loadSnapshot(), current)
+        XCTAssertTrue(try repository.events().isEmpty)
+    }
+
+    func testHomeCarePersistsSeparatelyAndEnforcesCooldown() throws {
+        let root = try temporaryDirectory()
+        let repository = try TravelRepository(root: root)
+        let snapshot = try Data(contentsOf: repository.snapshotURL)
+        let journal = try Data(contentsOf: root.appendingPathComponent("journal/events.jsonl"))
+        let now = Date(timeIntervalSince1970: 1000)
+        let care = try repository.performHomeCare(.snack, now: now)
+        XCTAssertEqual(care.history.last?.action, .snack)
+        XCTAssertThrowsError(try repository.performHomeCare(.play, now: now.addingTimeInterval(1)))
+        XCTAssertEqual(try TravelRepository(root: root).loadHomeCare(), care)
+        XCTAssertEqual(try Data(contentsOf: repository.snapshotURL), snapshot)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("journal/events.jsonl")), journal)
+        XCTAssertEqual(try repository.performHomeCare(.blanket, now: now.addingTimeInterval(6)).history.count, 2)
+    }
+
+    func testHomeCareRejectsAwayAndPreservesCorruptRecord() throws {
+        let root = try temporaryDirectory()
+        let repository = try TravelRepository(root: root)
+        let event = TripEvent.fixture(phase: .preparing)
+        try repository.publish(event: event, next: .fixture(stateVersion: 1, tripID: event.tripID, lastEventID: event.id, phase: .preparing))
+        let transit = TripEvent.fixture(tripID: event.tripID, previousEventID: event.id, phase: .transit)
+        try repository.publish(event: transit, next: .fixture(stateVersion: 2, tripID: event.tripID, lastEventID: transit.id, phase: .transit))
+        XCTAssertThrowsError(try repository.performHomeCare(.snack)) { error in
+            XCTAssertEqual(error as? HomeCareError, .catIsAway)
+        }
+        XCTAssertTrue(try repository.loadHomeCare().history.isEmpty)
+        let url = root.appendingPathComponent("state/home-care.json")
+        let broken = Data("broken original".utf8)
+        try broken.write(to: url)
+        XCTAssertThrowsError(try repository.loadHomeCare())
+        XCTAssertThrowsError(try repository.performHomeCare(.brush))
+        XCTAssertEqual(try Data(contentsOf: url), broken)
+    }
+
     func testHistoricalJournalRetainsOriginal80ScalarMoodQuote() throws {
         let root = try temporaryDirectory()
         let repository = try TravelRepository(root: root)
