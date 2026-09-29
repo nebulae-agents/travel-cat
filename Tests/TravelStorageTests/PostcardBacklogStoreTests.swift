@@ -8,6 +8,51 @@ import TravelCore
 @testable import TravelStorage
 
 final class PostcardBacklogStoreTests: XCTestCase {
+    private func installLegacySlots(root: URL, trip: UUID) throws -> [PostcardBacklogPlan.Slot] {
+        let store = try PostcardBacklogStore(root: root)
+        _ = try store.reconcile(events: [.fixture(tripID: trip)])
+        let slots = (0..<3).map { PostcardBacklogPlan.Slot(id: PostcardBacklogPlan.slotID(tripID: trip, index: $0), event: nil, isSupplement: false) }
+        let url = root.appendingPathComponent("state/postcard-backlog.json")
+        var state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        state["plans"] = try JSONSerialization.jsonObject(with: JSONEncoder.travelCat.encode([PostcardBacklogPlan(tripID: trip, slots: slots)]))
+        try JSONSerialization.data(withJSONObject: state).write(to: url)
+        return slots
+    }
+
+    func testOnePostcardDefaultRetiresEmptyLegacySlotsAndPreservesPublishedCards() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let trip = UUID(uuidString: "02000000-0000-4000-8000-000000000000")!
+        let store = try PostcardBacklogStore(root: root)
+        XCTAssertEqual(PostcardBacklogPlan.target(for: trip), 1)
+        let slots = try installLegacySlots(root: root, trip: trip)
+        XCTAssertEqual(try store.reconcile(events: [.fixture(tripID: trip)]).first?.slots.map(\.id), [slots[0].id])
+        let cards = slots.map { TripEvent.fixture(id: $0.id, tripID: trip, phase: .postcardReady, postcardStatus: .pendingImage) }
+        XCTAssertEqual(try store.reconcile(events: cards).first?.slots.compactMap(\.eventID), cards.map(\.id))
+        XCTAssertEqual(try store.reconcile(events: [cards[0]]).first?.slots.compactMap(\.eventID), [cards[0].id])
+        XCTAssertEqual(try store.reconcile(events: [cards[0]]).first?.slots.count, 1)
+    }
+
+    func testSparseLegacySupplementKeepsIdentityRetryAndNoEmptyDebtAcrossRestart() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let trip = UUID(uuidString: "02000000-0000-4000-8000-000000000000")!
+        try seedTrip(root: root, trip: trip)
+        let store = try PostcardBacklogStore(root: root)
+        let slots = try installLegacySlots(root: root, trip: trip)
+        let card = TripEvent.fixture(id: slots[2].id, tripID: trip, phase: .postcardReady, postcardStatus: .pendingImage)
+        try store.publishSupplement(card, slotID: slots[2].id)
+        let before = try store.imageRetry(for: card.id)
+        let reopened = try PostcardBacklogStore(root: root)
+        let plan = try XCTUnwrap(reopened.reconcile(events: [.fixture(tripID: trip)]).first)
+        XCTAssertEqual(plan.slots.map(\.id), [slots[2].id])
+        XCTAssertEqual(plan.slots.compactMap(\.event), [card])
+        XCTAssertTrue(plan.slots.allSatisfy(\.isSupplement))
+        XCTAssertEqual(try reopened.imageRetry(for: card.id), before)
+        XCTAssertEqual(try reopened.pendingImages(mode: .fast).first?.event.id, card.id)
+    }
+
+
     func testExpiredFirstSupplementLeaseRecordsFailureWithoutInventingResultHash() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -96,7 +141,7 @@ final class PostcardBacklogStoreTests: XCTestCase {
         let store = try PostcardBacklogStore(root: root)
         let trip = UUID(uuidString: "02000000-0000-4000-8000-000000000000")!
         try seedTrip(root: root, trip: trip)
-        let slots = try XCTUnwrap(store.reconcile(events: [.fixture(tripID: trip)]).first).slots
+        let slots = try installLegacySlots(root: root, trip: trip)
         for slot in slots.prefix(2) {
             try store.publishSupplement(.fixture(id: slot.id, tripID: trip, phase: .postcardReady, postcardStatus: .pendingImage), slotID: slot.id)
         }
@@ -196,7 +241,7 @@ final class PostcardBacklogStoreTests: XCTestCase {
         let events = [card, TripEvent.fixture(tripID: trip, phase: .returning), TripEvent.fixture()]
         let first = try PostcardBacklogStore(root: root).reconcile(events: events)
         XCTAssertEqual(first.count, 2)
-        XCTAssertEqual(first.first?.slots.count, 3)
+        XCTAssertEqual(first.first?.slots.count, 1)
         XCTAssertEqual(first.first?.slots.first?.eventID, card.id)
         let backlogURL = root.appendingPathComponent("state/postcard-backlog.json")
         let before = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: backlogURL.path)[.systemFileNumber] as? NSNumber)

@@ -713,6 +713,7 @@ struct MenuServiceRootView: View {
             if let event = model.events.first(where: { $0.id == id }) {
                 PostcardView(event: event, rootURL: model.dataRoot, presentationReference: model.presentationReferences[event.id],
                     workItem: model.postcardWorkItems.first { $0.eventID == event.id },
+                    travelDate: TripAlbumChronology.dates(events: model.events, workItems: model.postcardWorkItems)[event.id],
                     retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
                     handlePostcardRoute(destination)
                 }

@@ -208,7 +208,14 @@ public final class AppModel: ObservableObject {
 
     public func latestAvailableTripID() -> UUID? {
         if postcardWorkItems.contains(where: { $0.tripID == snapshot.tripID }) { return snapshot.tripID }
-        return latestAvailablePostcardID()?.tripID ?? postcardWorkItems.last?.tripID
+        let dates = TripAlbumChronology.dates(events: events, workItems: postcardWorkItems)
+        let latest = arrivedEvents().enumerated().filter { isAlbumEvent($0.element) && dates[$0.element.id] != TripAlbumChronology.unknownDate }
+            .max {
+                let left = dates[$0.element.id] ?? $0.element.occurredAt
+                let right = dates[$1.element.id] ?? $1.element.occurredAt
+                return left == right ? $0.offset < $1.offset : left < right
+            }?.element
+        return latest?.tripID ?? postcardWorkItems.last?.tripID
             ?? (postcardWorkError == nil ? nil : snapshot.tripID)
     }
 

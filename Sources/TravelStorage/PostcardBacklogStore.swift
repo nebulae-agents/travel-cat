@@ -14,7 +14,7 @@ public struct PostcardBacklogPlan: Codable, Equatable, Sendable {
     public let tripID: UUID
     public var slots: [Slot]
 
-    public static func target(for tripID: UUID) -> Int { 1 + Int(tripID.uuid.0 % 3) }
+    public static func target(for tripID: UUID) -> Int { 1 }
     public static func slotID(tripID: UUID, index: Int) -> UUID {
         var b = Array(SHA256.hash(data: Data("travel-cat/postcard/\(tripID.uuidString.lowercased())/\(index)".utf8)).prefix(16))
         b[6] = (b[6] & 0x0f) | 0x50
@@ -47,27 +47,45 @@ public final class PostcardBacklogStore: @unchecked Sendable {
     public func reconcile(events: [TripEvent]) throws -> [PostcardBacklogPlan] {
         try repository.withExclusiveLock {
             var state = try load()
-            var trips: [UUID] = []
-            for event in events where !trips.contains(event.tripID) { trips.append(event.tripID) }
             let previousPlans = state.plans
+            var trips: [UUID] = []
+            for event in events + state.supplements where !trips.contains(event.tripID) { trips.append(event.tripID) }
             state.plans = trips.map { trip in
                 var remaining = events.filter { $0.tripID == trip && $0.phase == .postcardReady }
                 let extras = state.supplements.filter { $0.tripID == trip }
-                var slots = (0..<max(PostcardBacklogPlan.target(for: trip), remaining.count + extras.count)).map {
-                    PostcardBacklogPlan.Slot(id: PostcardBacklogPlan.slotID(tripID: trip, index: $0), event: nil, isSupplement: false)
+                // Old slot IDs are durable bindings, including sparse slots beyond the new
+                // default. Only empty, unstarted slots are retired below.
+                var slots = previousPlans.first { $0.tripID == trip }?.slots ?? []
+                if slots.isEmpty {
+                    slots = [.init(id: PostcardBacklogPlan.slotID(tripID: trip, index: 0), event: nil, isSupplement: false)]
                 }
                 for index in slots.indices {
-                    if let match = remaining.firstIndex(where: { $0.id == slots[index].id }) {
+                    let previousID = slots[index].eventID
+                    slots[index].event = nil
+                    slots[index].isSupplement = false
+                    if let match = remaining.firstIndex(where: { $0.id == previousID || $0.id == slots[index].id }) {
                         slots[index].event = remaining.remove(at: match)
-                    } else if let supplement = extras.first(where: { $0.id == slots[index].id }) {
-                        slots[index].event = supplement
-                        slots[index].isSupplement = true
                     }
                 }
-                for index in slots.indices where slots[index].event == nil && !remaining.isEmpty {
-                    slots[index].event = remaining.removeFirst()
+                // Supplements carry their own slot ID; never rediscover them by a
+                // contiguous 0..<count range, which loses a lone legacy index 2.
+                for event in extras {
+                    if let index = slots.firstIndex(where: { $0.id == event.id }) {
+                        slots[index].event = event
+                        slots[index].isSupplement = true
+                    } else {
+                        slots.append(.init(id: event.id, event: event, isSupplement: true))
+                    }
                 }
-                return PostcardBacklogPlan(tripID: trip, slots: slots)
+                for event in remaining {
+                    if let index = slots.firstIndex(where: { $0.event == nil }) {
+                        slots[index].event = event
+                    } else {
+                        slots.append(.init(id: event.id, event: event, isSupplement: false))
+                    }
+                }
+                let bound = slots.filter { $0.event != nil }
+                return PostcardBacklogPlan(tripID: trip, slots: bound.isEmpty ? Array(slots.prefix(1)) : bound)
             }
             if state.plans != previousPlans { try save(state) }
             return state.plans

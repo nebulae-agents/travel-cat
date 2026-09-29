@@ -23,7 +23,7 @@ struct TripPostcardPlan: Codable, Equatable {
         }
     }
 
-    static func target(for tripID: UUID) -> Int { 1 + Int(tripID.uuid.0 % 3) }
+    static func target(for tripID: UUID) -> Int { 1 }
 
     private static func slotID(tripID: UUID, index: Int) -> UUID {
         var bytes = Array(SHA256.hash(data: Data("travel-cat/postcard/\(tripID.uuidString.lowercased())/\(index)".utf8)).prefix(16))
@@ -35,26 +35,32 @@ struct TripPostcardPlan: Codable, Equatable {
 
     mutating func reconcile(events: [TripEvent]) {
         let postcards = events.filter { $0.tripID == tripID && $0.phase == .postcardReady }
-        // Keep every already-published postcard, even if a legacy writer exceeded the target.
-        while slots.count < postcards.count {
-            slots.append(Slot(id: Self.slotID(tripID: tripID, index: slots.count), eventID: nil, imageReady: false))
+        if slots.isEmpty {
+            slots = [Slot(id: Self.slotID(tripID: tripID, index: 0), eventID: nil, imageReady: false)]
         }
         var remaining = postcards
         for index in slots.indices {
+            let previousID = slots[index].eventID
             slots[index].eventID = nil
             slots[index].imageReady = false
-            if let match = remaining.firstIndex(where: { $0.id == slots[index].id }) {
+            if let match = remaining.firstIndex(where: { $0.id == previousID || $0.id == slots[index].id }) {
                 let event = remaining.remove(at: match)
                 slots[index].eventID = event.id
                 slots[index].imageReady = event.postcardStatus == .ready
             }
         }
-        for index in slots.indices where slots[index].eventID == nil {
-            guard !remaining.isEmpty else { break }
-            let event = remaining.removeFirst()
-            slots[index].eventID = event.id
-            slots[index].imageReady = event.postcardStatus == .ready
+        for event in remaining {
+            if let index = slots.firstIndex(where: { $0.eventID == nil }) {
+                slots[index].eventID = event.id
+                slots[index].imageReady = event.postcardStatus == .ready
+            } else {
+                slots.append(Slot(id: event.id, eventID: event.id, imageReady: event.postcardStatus == .ready))
+            }
         }
+        // A trip owes one card only while it has none. Preserve all published
+        // bindings and image work; discard only unstarted legacy placeholders.
+        let bound = slots.filter { $0.eventID != nil }
+        slots = bound.isEmpty ? Array(slots.prefix(1)) : bound
     }
 
     var nextEventID: UUID? { slots.first { $0.eventID == nil }?.id }

@@ -381,6 +381,7 @@ public struct PostcardView: View {
     private let notice: String?
     private let open: (PetPresentation) -> Void
     private let workItem: PostcardWorkItem?
+    private let travelDate: Date?
     private let back: PetPresentation
 
     public init(
@@ -389,6 +390,7 @@ public struct PostcardView: View {
         presentationReference: PostcardPresentationReference? = nil,
         back: PetPresentation = .status,
         workItem: PostcardWorkItem? = nil,
+        travelDate: Date? = nil,
         retry: ((UUID) -> Void)? = nil,
         error: String? = nil,
         notice: String? = nil,
@@ -398,6 +400,7 @@ public struct PostcardView: View {
         self.presentationReference = presentationReference
         self.rootURL = rootURL
         self.workItem = workItem
+        self.travelDate = travelDate ?? (workItem?.isSupplement == true ? TripAlbumChronology.unknownDate : nil)
         self.back = back
         self.retry = retry
         self.error = error
@@ -432,7 +435,11 @@ public struct PostcardView: View {
                     HStack {
                         Label(event.mood.label, systemImage: "sparkles")
                         Spacer()
-                        Text(event.occurredAt, style: .date)
+                        if travelDate == TripAlbumChronology.unknownDate {
+                            Text("旅行日期待确认")
+                        } else {
+                            Text(travelDate ?? event.occurredAt, style: .date)
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -493,9 +500,11 @@ public struct TripAlbumView: View {
     nonisolated public static func orderedEvents(
         tripID: UUID?,
         events: [TripEvent],
-        now: Date = Date()
+        now: Date = Date(),
+        workItems: [PostcardWorkItem] = []
     ) -> [TripEvent] {
-        events.enumerated()
+        let dates = TripAlbumChronology.dates(events: events, workItems: workItems)
+        return events.enumerated()
             .filter {
                 let event = $0.element
                 guard (tripID == nil || event.tripID == tripID), event.occurredAt <= now else { return false }
@@ -507,9 +516,9 @@ public struct TripAlbumView: View {
                 }
             }
             .sorted {
-                if $0.element.occurredAt != $1.element.occurredAt {
-                    return $0.element.occurredAt < $1.element.occurredAt
-                }
+                let left = dates[$0.element.id] ?? $0.element.occurredAt
+                let right = dates[$1.element.id] ?? $1.element.occurredAt
+                if left != right { return left < right }
                 return $0.offset < $1.offset
             }
             .map(\.element)
@@ -526,7 +535,8 @@ public struct TripAlbumView: View {
                 Spacer()
                 Button("关闭") { open(.status) }.buttonStyle(.plain)
             }
-            let ordered = Self.orderedEvents(tripID: tripID, events: events, now: now)
+            let ordered = Self.orderedEvents(tripID: tripID, events: events, now: now, workItems: workItems)
+            let displayDates = TripAlbumChronology.dates(events: events, workItems: workItems)
             let unpublished = workItems.filter { $0.eventID == nil && (tripID == nil || $0.tripID == tripID) }
             if let error { Text(error).font(.callout).foregroundStyle(.red) }
             if let notice { Text(notice).font(.callout).foregroundStyle(.secondary) }
@@ -536,7 +546,7 @@ public struct TripAlbumView: View {
                 GeometryReader { proxy in
                     ScrollView {
                         let messages = ordered.map { PostcardArtworkMetadata(event: $0).visualMessage }
-                        let groups = TripAlbumDateGrouping.groups(orderedEvents: ordered, calendar: calendar)
+                        let groups = TripAlbumDateGrouping.groups(orderedEvents: ordered, calendar: calendar, displayDates: displayDates)
                         let showsYear = TripAlbumDateGrouping.spansMultipleYears(
                             days: groups.map(\.day),
                             calendar: calendar
@@ -866,6 +876,7 @@ public struct PetRootView: View {
                     rootURL: model.dataRoot,
                     presentationReference: model.presentationReferences[event.id],
                     workItem: model.postcardWorkItems.first(where: { $0.eventID == event.id }),
+                    travelDate: TripAlbumChronology.dates(events: model.events, workItems: model.postcardWorkItems)[event.id],
                     retry: model.retryPostcard,
                     error: model.postcardWorkError, notice: model.manualRetryMessage
                 ) { destination in
@@ -903,13 +914,6 @@ private struct PostcardWorkStatusView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if item.isSupplement, item.status == .ready, let date = item.generatedAt {
-                HStack {
-                    Text("补发 · 实际生成")
-                    Text(date, style: .date)
-                    Text(date, style: .time)
-                }
-            }
             if item.status != .ready {
                 Text(item.statusLabel)
                 if let reason = item.failureReason, !reason.isEmpty { Text(reason) }
