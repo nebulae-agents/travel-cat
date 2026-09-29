@@ -22,16 +22,31 @@ struct TravelEventRequest: Codable, Sendable {
     let phase: TravelPhase
     let carriedSupply: Supply?
     let isSupplemental: Bool
+    let homeLocation: HomeLocation?
 
-    init(claim: DueClaim, recentEvents: [TripEvent], phase: TravelPhase, isSupplemental: Bool = false) {
+    init(claim: DueClaim, recentEvents: [TripEvent], phase: TravelPhase, isSupplemental: Bool = false, homeLocation: HomeLocation? = nil) {
         self.claim = claim
         self.recentEvents = recentEvents
         self.phase = phase
         self.isSupplemental = isSupplemental
+        self.homeLocation = homeLocation
         let startsNewTrip = phase == .preparing && claim.snapshot.phase == .resting
         carriedSupply = SupplyCatalog.loadOrEmpty().first {
             $0.id == claim.snapshot.carriedItemID && (startsNewTrip || !claim.snapshot.usedItemIDs.contains($0.id))
         }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case claim, recentEvents, phase, carriedSupply, isSupplemental, homeLocation
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        claim = try values.decode(DueClaim.self, forKey: .claim)
+        recentEvents = try values.decode([TripEvent].self, forKey: .recentEvents)
+        phase = try values.decode(TravelPhase.self, forKey: .phase)
+        carriedSupply = try values.decodeIfPresent(Supply.self, forKey: .carriedSupply)
+        isSupplemental = try values.decodeIfPresent(Bool.self, forKey: .isSupplemental) ?? false
+        homeLocation = try values.decodeIfPresent(HomeLocation.self, forKey: .homeLocation)
     }
 }
 
@@ -97,6 +112,9 @@ final class AutomaticTravelWorker {
         var progressPlans: [PostcardBacklogPlan] = []
         do {
             let contents = try repository.loadContents()
+            // Home lookup belongs to application/settings lifecycle. Story work only
+            // reads the cache and never guesses a home from historical destinations.
+            let homeLocation = try? HomeLocationStore(root: repository.root).load().location
             let backlog = try PostcardBacklogStore(root: repository.root, clock: WorkerClock(read: clock))
             let plans = try backlog.reconcile(events: contents.events)
             progressPlans = plans
@@ -221,7 +239,7 @@ final class AutomaticTravelWorker {
                     lastUpdatedAt: previous.occurredAt, usedItemIDs: Set(tripEvents.compactMap(\.consumedItemID)),
                     visitedPlaces: [], mood: previous.mood, openHook: previous.openHook)
                 let request = TravelEventRequest(claim: DueClaim(due: true, snapshot: context, previousEvent: previous),
-                    recentEvents: Array(tripEvents.suffix(12)), phase: .postcardReady, isSupplemental: true)
+                    recentEvents: Array(tripEvents.suffix(12)), phase: .postcardReady, isSupplemental: true, homeLocation: homeLocation)
                 state.lastActionWasImage = false
                 state.nextModelActionAt = now.addingTimeInterval(catchUpGap)
                 startedModelAction = true
@@ -262,7 +280,7 @@ final class AutomaticTravelWorker {
             let request = TravelEventRequest(
                 claim: DueClaim(due: true, snapshot: contents.snapshot, previousEvent: contents.events.last, characterProfile: contents.characterProfile),
                 recentEvents: Array(contents.events.suffix(12)),
-                phase: Self.nextPhase(contents: contents, now: now))
+                phase: Self.nextPhase(contents: contents, now: now), homeLocation: homeLocation)
             // Allocate the new itinerary before model work; failure and restart retain
             // its trip/slot identities. Existing trips have already reconciled above.
             if request.phase == .preparing {

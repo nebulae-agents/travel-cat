@@ -68,6 +68,8 @@ public struct TripEvent: Codable, Equatable, Identifiable, Sendable {
     public let consumedItemID: String?
     public var postcardStatus: PostcardStatus
     public var postcardRelativePath: String?
+    /// Nil preserves historical artwork; version 1 opts newly published cards into scene styles.
+    public let postcardStyleVersion: Int?
     /// Frozen journey identity. Present only on the first preparing event of new-format trips.
     public let characterProfile: CharacterProfile?
 
@@ -85,19 +87,22 @@ public struct TripEvent: Codable, Equatable, Identifiable, Sendable {
         openHook: String?,
         consumedItemID: String?,
         postcardStatus: PostcardStatus,
-        postcardRelativePath: String?
+        postcardRelativePath: String?,
+        postcardStyleVersion: Int? = nil
     ) {
         self.init(id: id, tripID: tripID, previousEventID: previousEventID, occurredAt: occurredAt,
                   phase: phase, location: location, transport: transport, summary: summary, mood: mood,
                   continuityReferences: continuityReferences, openHook: openHook, consumedItemID: consumedItemID,
-                  postcardStatus: postcardStatus, postcardRelativePath: postcardRelativePath, characterProfile: nil)
+                  postcardStatus: postcardStatus, postcardRelativePath: postcardRelativePath, characterProfile: nil,
+                  postcardStyleVersion: postcardStyleVersion)
     }
 
     public init(
         id: UUID, tripID: UUID, previousEventID: UUID?, occurredAt: Date, phase: TravelPhase,
         location: Location?, transport: String?, summary: String, mood: Mood,
         continuityReferences: [String], openHook: String?, consumedItemID: String?,
-        postcardStatus: PostcardStatus, postcardRelativePath: String?, characterProfile: CharacterProfile?
+        postcardStatus: PostcardStatus, postcardRelativePath: String?, characterProfile: CharacterProfile?,
+        postcardStyleVersion: Int? = nil
     ) {
         self.id = id
         self.tripID = tripID
@@ -113,6 +118,7 @@ public struct TripEvent: Codable, Equatable, Identifiable, Sendable {
         self.consumedItemID = consumedItemID
         self.postcardStatus = postcardStatus
         self.postcardRelativePath = postcardRelativePath
+        self.postcardStyleVersion = postcardStyleVersion
         self.characterProfile = characterProfile
     }
 
@@ -131,6 +137,7 @@ public struct TripEvent: Codable, Equatable, Identifiable, Sendable {
         case consumedItemID
         case postcardStatus
         case postcardRelativePath
+        case postcardStyleVersion
         case characterProfile
     }
 }

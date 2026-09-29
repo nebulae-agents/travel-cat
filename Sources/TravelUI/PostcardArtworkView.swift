@@ -273,7 +273,7 @@ public struct PostcardArtworkView: View {
                 imageSize: image.map { CGSize(width: $0.width, height: $0.height) },
                 hasPresentation: presentationManifest != nil,
                 isGeneratedPresentation: handwritingImage != nil,
-                handwriting: PostcardMoodTypographyResolver().resolve(mood: event.mood)
+                handwriting: PostcardMoodTypographyResolver().resolve(mood: event.mood, sceneStyle: PostcardSceneStyle.resolve(event: event))
             ) {
                 artworkCanvas
             }

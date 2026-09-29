@@ -24,7 +24,11 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private var watcherTask: Task<Void, Never>?
     private var authorizationTask: Task<Void, Never>?
     private var terminationTask: Task<Void, Never>?
-    private let codexExecutor = CodexTravelExecutor()
+    private var homeLocationTask: Task<Void, Never>?
+    private let codexDiagnosticStore = CodexGenerationDiagnosticStore.applicationStore()
+    private lazy var codexExecutor = CodexTravelExecutor(diagnostics: { [codexDiagnosticStore] data in
+        try? codexDiagnosticStore.record(data)
+    })
     private var automaticTravelController: AutomaticTravelController?
     private var postcardRecoveryController: PostcardRecoveryController?
     private var albumPreviewSession: TravelAlbumPreviewSession?
@@ -102,6 +106,10 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             )
             self.model = model
             self.environment = environment
+            homeLocationTask = Task { [weak environment] in
+                guard let environment else { return }
+                await environment.homeLocation.refresh()
+            }
             environment.notificationService.promptRouteHandler = { [weak self] route in
                 self?.performPromptRoute(route)
             }
@@ -118,7 +126,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             environment.generationServices = services
             environment.openGenerationSetup = { [weak self] in self?.showGenerationSetup() }
             let generator = ConfiguredTravelContentGenerator(configuration: { services.configuration },
-                credentials: serviceCredentials, codex: CodexTravelContentGenerator(executor: codexExecutor))
+                credentials: serviceCredentials, codex: CodexTravelContentGenerator(executor: codexExecutor, diagnostics: { [codexDiagnosticStore] data in try? codexDiagnosticStore.record(data) }))
             let worker = AutomaticTravelWorker(repository: repository, generator: generator,
                 didChange: { [weak self] in self?.postcardRecoveryController?.refresh() })
             let recovery = PostcardRecoveryController(repository: repository, model: model, worker: worker,
@@ -135,6 +143,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 didRefresh: { [weak self] in self?.refreshMenuState() })
             postcardRecoveryController = recovery
             recovery.start()
+            environment.postcardBacklogRecovered = { [weak recovery] in recovery?.refresh() }
             let automaticTravel = AutomaticTravelController(
                 isEnabled: { [weak environment, weak services] in
                     (environment?.effectiveSettings.automaticTravelEnabled ?? false) && (services?.isReady ?? false)
@@ -212,6 +221,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         watcherTask?.cancel()
         authorizationTask?.cancel()
         automaticTravelController?.stop()
+        homeLocationTask?.cancel()
         postcardRecoveryController?.stop()
         codexExecutor.cancelAll()
         closeAlbumPreviewSession()
@@ -703,6 +713,7 @@ struct MenuServiceRootView: View {
             if let event = model.events.first(where: { $0.id == id }) {
                 PostcardView(event: event, rootURL: model.dataRoot, presentationReference: model.presentationReferences[event.id],
                     workItem: model.postcardWorkItems.first { $0.eventID == event.id },
+                    travelDate: TripAlbumChronology.dates(events: model.events, workItems: model.postcardWorkItems)[event.id],
                     retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
                     handlePostcardRoute(destination)
                 }

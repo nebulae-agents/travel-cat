@@ -742,6 +742,18 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(requests, [legacyEventID])
     }
 
+    func testSupplementDoesNotMakeOlderTripTheLatestAlbum() {
+        let oldTrip = UUID(), newerTrip = UUID()
+        let old = makeEvent(id: UUID(), tripID: oldTrip, seconds: 10, status: .ready)
+        let newer = makeEvent(id: UUID(), tripID: newerTrip, seconds: 20, status: .ready)
+        let supplement = makeEvent(id: UUID(), tripID: oldTrip, seconds: 100, status: .ready)
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), events: [old, newer, supplement], defaults: isolatedDefaults())
+        model.updatePostcardWork([PostcardWorkItem(id: supplement.id, tripID: oldTrip, eventID: supplement.id,
+            isSupplement: true, generatedAt: supplement.occurredAt, status: .ready)])
+        XCTAssertEqual(model.latestAvailableTripID(), newerTrip)
+        XCTAssertEqual(model.events.last?.occurredAt, supplement.occurredAt, "Audit time remains immutable")
+    }
+
     func testBacklogErrorRetainsAlbumAccessWithoutInventingEvents() {
         let model = AppModel(snapshot: makeSnapshot(phase: .resting), defaults: isolatedDefaults())
         model.updatePostcardWork([], error: "无法读取明信片任务记录")

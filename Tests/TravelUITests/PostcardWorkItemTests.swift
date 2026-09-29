@@ -38,6 +38,10 @@ final class PostcardWorkItemTests: XCTestCase {
         plan.slots[0].event = event
         let ready = PostcardWorkProjection.items(plans: [plan], retries: [:], now: now)[0]
         XCTAssertEqual(ready.status, .ready)
+        let damaged = PostcardWorkProjection.items(plans: [plan], retries: [:], now: now, damagedImageIDs: [eventID])[0]
+        XCTAssertEqual(damaged.status, .damaged)
+        XCTAssertFalse(damaged.statusLabel.contains("3 次"))
+        XCTAssertEqual(damaged.eventID, eventID)
         XCTAssertTrue(ready.isSupplement)
         XCTAssertEqual(ready.generatedAt, event.occurredAt)
     }
