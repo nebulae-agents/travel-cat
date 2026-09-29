@@ -31,7 +31,7 @@ public final class AppModel: ObservableObject {
     }
 
     public func retryPostcard(_ id: UUID) {
-        guard let item = postcardWorkItems.first(where: { $0.id == id && $0.status == .manualRequired }),
+        guard let item = postcardWorkItems.first(where: { $0.id == id && ($0.status == .manualRequired || $0.status == .damaged) }),
               let eventID = item.eventID else { return }
         retryPostcardAction?(eventID)
     }

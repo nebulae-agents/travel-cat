@@ -31,6 +31,7 @@ public final class PostcardBacklogStore: @unchecked Sendable {
         var plans: [PostcardBacklogPlan] = []
         var supplements: [TripEvent] = []
         var retries = ImageRetryStore()
+        var retiredImagePaths: [String]?
     }
     private let repository: TravelRepository
     private let clock: any TravelClock
@@ -123,10 +124,20 @@ public final class PostcardBacklogStore: @unchecked Sendable {
             guard let i = state.supplements.firstIndex(where: { $0.id == eventID }),
                   var retry = state.retries.entries[key(eventID)] else { throw RepositoryError.eventNotFound(eventID) }
             if state.supplements[i].postcardStatus == .pendingImage { return false }
-            guard state.supplements[i].postcardStatus == .imageUnavailable else { throw RepositoryError.invalidImageTransition }
+            let event = state.supplements[i]
+            let damagedReady = event.postcardStatus == .ready && !readyImageIsValid(event, retry: retry)
+            guard event.postcardStatus == .imageUnavailable || damagedReady else { throw RepositoryError.invalidImageTransition }
+            if damagedReady, let path = event.postcardRelativePath {
+                let original = try JSONEncoder.travelCat.encode(state)
+                let history = url.deletingLastPathComponent().appendingPathComponent("postcard-backlog.recovery-\(UUID().uuidString.lowercased()).ready.json")
+                try writer.write(original, to: history)
+                guard try Data(contentsOf: history) == original else { throw RepositoryError.malformedImageRetryState }
+                state.retiredImagePaths = Array(Set((state.retiredImagePaths ?? []) + [path]))
+            }
             retry.queueManual(now: clock.now)
             state.retries.entries[key(eventID)] = retry
             state.supplements[i].postcardStatus = .pendingImage
+            state.supplements[i].postcardRelativePath = nil
             try save(state)
             return true
         }
@@ -196,6 +207,7 @@ public final class PostcardBacklogStore: @unchecked Sendable {
                   retry.activeAttemptToken == result.attemptToken, retry.attemptCount == result.attemptCount,
                   retry.leaseExpiresAt.map({ $0 > clock.now }) == true else { throw RepositoryError.invalidImageResult }
             if result.status == .ready {
+                guard !(state.retiredImagePaths ?? []).contains(result.relativePath ?? "") else { throw RepositoryError.invalidImageResult }
                 let image = try repository.validateReadyImage(result.relativePath, tripID: state.supplements[i].tripID)
                 defer { image.closeAll() }
                 guard image.hasPostcardAspectRatio else { throw RepositoryError.invalidImageResult }
@@ -222,25 +234,100 @@ public final class PostcardBacklogStore: @unchecked Sendable {
     }
 
     private func key(_ id: UUID) -> String { id.uuidString.lowercased() }
+    /// Asset damage is local to its card; it must not disable unrelated work.
+    public func damagedReadyImageIDs() throws -> Set<UUID> {
+        try repository.withExclusiveLock {
+            let state = try load()
+            return Set(state.supplements.filter { event in
+                event.postcardStatus == .ready && !readyImageIsValid(event, retry: state.retries.entries[key(event.id)]!)
+            }.map(\.id))
+        }
+    }
+
+    private func readyImageIsValid(_ event: TripEvent, retry: ImageRetry) -> Bool {
+        do {
+            let image = try repository.validateReadyImage(event.postcardRelativePath, tripID: event.tripID)
+            defer { image.closeAll() }
+            guard image.hasPostcardAspectRatio, image.contentHash == retry.imageContentHash else { return false }
+            try repository.requireUnchanged(image)
+            return true
+        } catch { return false }
+    }
+
+    /// Explicit local recovery only. Unknown records are never reconstructed as empty.
+    /// All pending work is stopped because an external result may already exist.
+    @discardableResult
+    public func recoverFromBackup() throws -> URL {
+        try repository.withExclusiveLock {
+            if (try? load()) != nil { throw RepositoryError.invalidImageTransition }
+            guard let backup = try readData(named: "postcard-backlog.backup.json") else {
+                throw RepositoryError.malformedImageRetryState
+            }
+            let damaged = try readData(named: "postcard-backlog.json") ?? Data()
+            var state = try decode(backup)
+            let preserved = url.deletingLastPathComponent().appendingPathComponent("postcard-backlog.recovery-\(UUID().uuidString.lowercased()).json")
+            let preservedBackup = preserved.deletingPathExtension().appendingPathExtension("source.json")
+            try writer.write(backup, to: preservedBackup)
+            guard try Data(contentsOf: preservedBackup) == backup else { throw RepositoryError.malformedImageRetryState }
+            try writer.write(damaged, to: preserved)
+            guard try Data(contentsOf: preserved) == damaged else { throw RepositoryError.malformedImageRetryState }
+            for i in state.supplements.indices where state.supplements[i].postcardStatus == .pendingImage {
+                let id = key(state.supplements[i].id)
+                var retry = state.retries.entries[id]!
+                retry.activeAttemptToken = nil
+                retry.leaseExpiresAt = nil
+                retry.retryAt = nil
+                retry.terminalStatus = .imageUnavailable
+                retry.lastFailureAt = clock.now
+                retry.lastFailureReason = "恢复安全副本后暂停；上次生成结果未知，请手动重试一次。"
+                state.retries.entries[id] = retry
+                state.supplements[i].postcardStatus = .imageUnavailable
+            }
+            // Plans are projections. Refresh their event values without losing bindings.
+            for p in state.plans.indices {
+                for i in state.plans[p].slots.indices where state.plans[p].slots[i].isSupplement {
+                    if let event = state.supplements.first(where: { $0.id == state.plans[p].slots[i].eventID }) {
+                        state.plans[p].slots[i].event = event
+                    }
+                }
+            }
+            try save(state)
+            return preserved
+        }
+    }
+
     private func load() throws -> State {
+        guard let data = try readData(named: "postcard-backlog.json") else {
+            // A missing main file with a recovery copy is not a new installation.
+            guard try readData(named: "postcard-backlog.backup.json") == nil else { throw RepositoryError.malformedImageRetryState }
+            return State()
+        }
+        return try decode(data)
+    }
+
+    private func readData(named filename: String) throws -> Data? {
         let rootFD = open(repository.root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         guard rootFD >= 0 else { throw RepositoryError.malformedImageRetryState }
         defer { _ = close(rootFD) }
         let stateFD = openat(rootFD, "state", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         guard stateFD >= 0 else { throw RepositoryError.malformedImageRetryState }
         defer { _ = close(stateFD) }
-        let descriptor = openat(stateFD, "postcard-backlog.json", O_RDONLY | O_NOFOLLOW)
+        let descriptor = openat(stateFD, filename, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else {
-            if errno == ENOENT { return State() }
+            if errno == ENOENT { return nil }
             throw RepositoryError.malformedImageRetryState
         }
         defer { _ = close(descriptor) }
         var info = stat()
         guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
-              info.st_nlink == 1, info.st_size > 0, info.st_size <= 64 * 1_024 * 1_024 else {
+              info.st_nlink == 1, info.st_size >= 0, info.st_size <= 64 * 1_024 * 1_024 else {
             throw RepositoryError.malformedImageRetryState
         }
         let data = try FileHandle(fileDescriptor: descriptor, closeOnDealloc: false).readToEnd() ?? Data()
+        return data
+    }
+
+    private func decode(_ data: Data) throws -> State {
         let state = try JSONDecoder.travelCat.decode(State.self, from: data)
         guard state.schemaVersion == 1, Set(state.supplements.map(\.id)).count == state.supplements.count else { throw RepositoryError.malformedImageRetryState }
         _ = try state.retries.validated()
@@ -251,10 +338,7 @@ public final class PostcardBacklogStore: @unchecked Sendable {
             switch event.postcardStatus {
             case .ready:
                 guard retry.terminalStatus == .ready, retry.terminalRelativePath == event.postcardRelativePath else { throw RepositoryError.malformedImageRetryState }
-                let image = try repository.validateReadyImage(event.postcardRelativePath, tripID: event.tripID)
-                defer { image.closeAll() }
-                guard image.hasPostcardAspectRatio, image.contentHash == retry.imageContentHash else { throw RepositoryError.malformedImageRetryState }
-                try repository.requireUnchanged(image)
+                try TravelRepository.validateReadyImagePath(event.postcardRelativePath, tripID: event.tripID)
             case .pendingImage:
                 guard retry.terminalStatus == nil, retry.attemptCount < 3, event.postcardRelativePath == nil else { throw RepositoryError.malformedImageRetryState }
             case .imageUnavailable:
@@ -267,6 +351,13 @@ public final class PostcardBacklogStore: @unchecked Sendable {
     }
     private func save(_ state: State) throws {
         _ = try state.retries.validated()
-        try writer.write(JSONEncoder.travelCat.encode(state), to: url)
+        let data = try JSONEncoder.travelCat.encode(state)
+        _ = try decode(data)
+        let backupURL = url.deletingLastPathComponent().appendingPathComponent("postcard-backlog.backup.json")
+        // Write-ahead mirror: it can be ahead of the main file after a crash, never
+        // behind a successfully committed mutation. Recovery fences all leases.
+        try writer.write(data, to: backupURL)
+        guard try readData(named: "postcard-backlog.backup.json") == data else { throw RepositoryError.malformedImageRetryState }
+        try writer.write(data, to: url)
     }
 }

@@ -1008,6 +1008,7 @@ public struct PostcardArtworkMetadata: Equatable, Sendable {
     public let fullMessage: String
     public let visualMessage: String
     public let mood: Mood
+    public let sceneStyle: PostcardSceneStyle?
 
     public init(event: TripEvent) {
         let displayLocation = PostcardDisplayLocation()
@@ -1016,6 +1017,7 @@ public struct PostcardArtworkMetadata: Equatable, Sendable {
         fullMessage = event.mood.quote
         visualMessage = PostcardVisualMessage.resolve(event.mood.quote)
         mood = event.mood
+        sceneStyle = PostcardSceneStyle.resolve(event: event)
     }
 }
 
@@ -1028,7 +1030,8 @@ public enum PostcardArtworkLayoutResolver {
     ) -> PostcardOverlayLayout {
         guard let analysis, analysis.samples.isValid else {
             let serene = PostcardMoodTypographyResolver().resolve(
-                mood: Mood(level: 0, label: "serene", quote: metadata.visualMessage)
+                mood: metadata.sceneStyle == nil ? Mood(level: 0, label: "serene", quote: metadata.visualMessage) : metadata.mood,
+                sceneStyle: metadata.sceneStyle
             )
             return PostcardOverlaySolver.unknownFallback(
                 message: metadata.visualMessage,
@@ -1037,7 +1040,7 @@ public enum PostcardArtworkLayoutResolver {
                 handwriting: serene
             ).placingMessageBelowImage(reason: .unknownAnalysis)
         }
-        let handwriting = PostcardMoodTypographyResolver().resolve(mood: metadata.mood)
+        let handwriting = PostcardMoodTypographyResolver().resolve(mood: metadata.mood, sceneStyle: metadata.sceneStyle)
         // Preserve known preview cats and every foreground-object boundary.
         // Objectness works for illustrated subjects too, unlike animal labels.
         // Generic animal/attention hints alone do not authorize an overlay.

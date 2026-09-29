@@ -44,8 +44,12 @@ final class CodexTravelExecutorTests: XCTestCase {
             XCTAssertEqual(error as? CodexTravelExecutor.Failure, .generationFailed)
         }
         XCTAssertGreaterThan(capture.value.count, 0)
-        XCTAssertLessThanOrEqual(capture.value.count, 65536)
-        XCTAssertTrue(String(decoding: capture.value, as: UTF8.self).contains("private bounded diagnostic"))
+        XCTAssertLessThanOrEqual(capture.value.count, 4096)
+        let diagnostic = try JSONDecoder().decode(CodexGenerationDiagnostic.self, from: capture.value)
+        XCTAssertEqual(diagnostic.code, .generationFailed)
+        XCTAssertNotNil(diagnostic.exitStatus)
+        XCTAssertFalse(String(decoding: capture.value, as: UTF8.self).contains("private bounded diagnostic"))
+        XCTAssertTrue(String(decoding: capture.value, as: UTF8.self).contains("generationFailed"))
     }
 
     func testFailureDoesNotExposeLogsAndDetectsMissingLogin() async throws {
@@ -54,6 +58,52 @@ final class CodexTravelExecutorTests: XCTestCase {
             do { _ = try await CodexTravelExecutor(executableURL: script).run(prompt: "x", workspace: root); XCTFail("must fail") }
             catch { XCTAssertEqual(error as? CodexTravelExecutor.Failure, expected); XCTAssertFalse(error.localizedDescription.contains("secret-token")) }
         }
+    }
+
+    func testFailuresOfferSpecificSafeActions() async throws {
+        for (log, message) in [
+            ("error sending request: dns error SECRET", "网络"),
+            ("image_gen tool is not available SECRET", "图像工具"),
+            ("unexpected argument --ignore-user-config SECRET", "版本")
+        ] {
+            let (root, script) = try fixture("echo '\(log)' >&2\nexit 1")
+            do { _ = try await CodexTravelExecutor(executableURL: script).run(prompt: "x", workspace: root); XCTFail("must fail") }
+            catch {
+                XCTAssertTrue(error.localizedDescription.contains(message), error.localizedDescription)
+                XCTAssertFalse(error.localizedDescription.contains("SECRET"))
+            }
+        }
+    }
+
+    func testEmptyFinalMessageHasOutputSpecificError() async throws {
+        let (root, script) = try fixture("exit 0")
+        do { _ = try await CodexTravelExecutor(executableURL: script).run(prompt: "x", workspace: root); XCTFail("must fail") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("输出")) }
+    }
+
+    func testFIFOFinalOutputIsRejectedWithoutWaitingForWriter() async throws {
+        let (root, script) = try fixture("""
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = '--output-last-message' ]; then shift; result="$1"; fi
+          shift
+        done
+        /bin/rm "$result"
+        /usr/bin/mkfifo "$result"
+        printf '%s' "$result" > fifo-path
+        """)
+        // Outside the executor's process tree: bounds the old blocking-open bug.
+        let writer = Process()
+        writer.executableURL = URL(fileURLWithPath: "/bin/sh")
+        writer.currentDirectoryURL = root
+        writer.arguments = ["-c", "while [ ! -f fifo-path ]; do sleep 0.05; done; sleep 3; printf x > \"$(cat fifo-path)\""]
+        writer.standardOutput = FileHandle.nullDevice
+        writer.standardError = FileHandle.nullDevice
+        try writer.run()
+        defer { if writer.isRunning { writer.terminate() }; writer.waitUntilExit() }
+        let start = Date()
+        do { _ = try await CodexTravelExecutor(executableURL: script).run(prompt: "x", workspace: root); XCTFail("must reject FIFO") }
+        catch { XCTAssertEqual(error as? CodexTravelExecutor.Failure, .invalidOutput) }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.5)
     }
 
     func testTimeoutStopsDescendants() async throws {

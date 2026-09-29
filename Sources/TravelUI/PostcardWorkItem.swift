@@ -3,13 +3,14 @@ import TravelCore
 import TravelStorage
 
 public enum PostcardWorkStatus: Equatable, Sendable {
-    case pending, generating, manualRequired, ready
+    case pending, generating, manualRequired, damaged, ready
 
     public var label: String {
         switch self {
         case .pending: "等待生成"
         case .generating: "正在生成"
         case .manualRequired: "自动尝试 3 次后已停止；点击重试仅手动尝试一次。"
+        case .damaged: "照片文件缺失或损坏；可手动重新生成一次。"
         case .ready: "已生成"
         }
     }
@@ -26,6 +27,9 @@ public struct PostcardWorkItem: Identifiable, Equatable, Sendable {
     public let isManualQueued: Bool
 
     public var statusLabel: String {
+        if status == .manualRequired, failureReason?.hasPrefix("恢复安全副本") == true {
+            return "恢复后等待手动处理；上次生成结果未知。"
+        }
         if status == .pending {
             if eventID == nil { return "等待生成文字" }
             if isManualQueued { return "手动重试已排队" }
@@ -47,12 +51,14 @@ public struct PostcardWorkItem: Identifiable, Equatable, Sendable {
 }
 
 public enum PostcardWorkProjection {
-    public static func items(plans: [PostcardBacklogPlan], retries: [UUID: ImageRetry], now: Date) -> [PostcardWorkItem] {
+    public static func items(plans: [PostcardBacklogPlan], retries: [UUID: ImageRetry], now: Date, damagedImageIDs: Set<UUID> = []) -> [PostcardWorkItem] {
         plans.flatMap { plan in
             plan.slots.map { slot in
                 let retry = retries[slot.eventID ?? slot.id]
                 let status: PostcardWorkStatus
-                if slot.imageReady {
+                if let id = slot.eventID, damagedImageIDs.contains(id) {
+                    status = .damaged
+                } else if slot.imageReady {
                     status = .ready
                 } else if slot.event?.postcardStatus == .imageUnavailable || retry?.terminalStatus == .imageUnavailable {
                     status = .manualRequired

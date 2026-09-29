@@ -914,7 +914,7 @@ private struct PostcardWorkStatusView: View {
                 Text(item.statusLabel)
                 if let reason = item.failureReason, !reason.isEmpty { Text(reason) }
             }
-            if item.status == .manualRequired, let retry {
+            if item.status == .manualRequired || item.status == .damaged, let retry {
                 Button("手动重试一次") { retry(item.id) }.buttonStyle(.bordered)
             }
         }

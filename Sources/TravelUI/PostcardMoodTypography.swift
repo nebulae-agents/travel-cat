@@ -194,6 +194,40 @@ public struct PostcardMoodTypographyResolver: Sendable {
         )
     }
 
+    /// Only a persisted v1 scene enters this path. Legacy mood resolution stays unchanged.
+    public func resolve(mood: Mood, sceneStyle: PostcardSceneStyle?) -> PostcardHandwritingStyle {
+        guard let sceneStyle else { return resolve(mood: mood) }
+        let moodStyle = resolve(mood: mood)
+        let candidates: [String]
+        switch sceneStyle.category {
+        case .waterside, .garden:
+            candidates = ["LXGWWenKaiLite-Regular"]
+        case .heritage:
+            candidates = ["STSongti-SC-Regular", "STSong", "SongtiSC-Regular"]
+        case .mountain, .urban:
+            candidates = ["HiraginoSansGB-W3", "PingFangSC-Regular"]
+        case .market:
+            candidates = ["HanziPenSC-W3", "HanziPenSC-W5", "LXGWWenKaiLite-Medium"]
+        case .everyday:
+            candidates = [
+                ["LXGWWenKaiLite-Regular"],
+                ["STSongti-SC-Regular", "STSong", "SongtiSC-Regular"],
+                ["HiraginoSansGB-W3", "PingFangSC-Regular"],
+            ][sceneStyle.compositionVariant]
+        }
+        let face = candidates.lazy.compactMap {
+            lookupFace(named: $0, desiredWeight: moodStyle.fontWeight)
+        }.first
+        return PostcardHandwritingStyle(
+            family: moodStyle.family,
+            fontPostScriptName: face?.postScriptName ?? moodStyle.fontPostScriptName,
+            fontWeight: face?.actualWeight ?? moodStyle.fontWeight,
+            sizeScale: moodStyle.sizeScale,
+            lineSpacing: moodStyle.lineSpacing,
+            pawOpacity: moodStyle.pawOpacity
+        )
+    }
+
     private func levelFamily(_ level: Int) -> PostcardHandwritingFamily {
         switch level {
         case ...(-1): .reflective
