@@ -19,7 +19,12 @@ final class CodexTravelContentGenerator: TravelContentGenerating {
         let schema = try copyResource("narrative.schema.json", into: workspace)
         let prompt = TravelGenerationPrompts.narrative()
         let output = try await executor.run(prompt: prompt, workspace: workspace, schema: schema)
-        return try JSONDecoder.travelCat.decode(TravelNarrative.self, from: output)
+        do {
+            return try JSONDecoder.travelCat.decode(TravelNarrative.self, from: output)
+        } catch {
+            recordDiagnostic(.invalidOutput, startedAt: Date())
+            throw error
+        }
     }
 
     func image(for work: PendingImageWork, in workspace: URL) async throws -> URL {

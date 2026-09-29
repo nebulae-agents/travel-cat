@@ -139,6 +139,7 @@ final class TravelCatEnvironment: ObservableObject {
     @Published var automaticTravel: AutomaticTravelController?
     @Published var generationServices: GenerationServiceController?
     var openGenerationSetup: () -> Void = {}
+    var postcardBacklogRecovered: () -> Void = {}
     @Published var recoveryNotice: String?
     @Published var latestCodexDiagnostic: CodexGenerationDiagnostic?
 
@@ -153,6 +154,7 @@ final class TravelCatEnvironment: ObservableObject {
         guard !effectiveSettings.automaticTravelEnabled else { return }
         do {
             _ = try PostcardBacklogStore(root: repository.root).recoverFromBackup()
+            postcardBacklogRecovered()
             recoveryNotice = "补卡记录已从安全副本恢复，损坏原文件已保留。自动旅行已暂停；请检查相册，按需手动重试或重新开启旅行。"
             errorMessage = nil
         } catch {

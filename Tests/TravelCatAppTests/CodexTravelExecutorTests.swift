@@ -15,6 +15,26 @@ final class CodexTravelExecutorTests: XCTestCase {
         return (root, script)
     }
 
+    func testMalformedNarrativeOverridesSuccessfulProcessDiagnostic() async throws {
+        let (root, script) = try fixture("""
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = '--output-last-message' ]; then shift; result="$1"; fi
+          shift
+        done
+        cat >/dev/null
+        printf '{}' > "$result"
+        """)
+        _ = root
+        let capture = DiagnosticCapture()
+        let executor = CodexTravelExecutor(executableURL: script, diagnostics: { capture.set($0) })
+        let generator = CodexTravelContentGenerator(executor: executor, diagnostics: { capture.set($0) })
+        let request = TravelEventRequest(claim: .init(due: true, snapshot: .empty(now: Date()), previousEvent: nil),
+                                         recentEvents: [], phase: .preparing)
+        do { _ = try await generator.narrative(for: request); XCTFail("Malformed narrative must fail") }
+        catch { }
+        XCTAssertEqual(try JSONDecoder().decode(CodexGenerationDiagnostic.self, from: capture.value).code, .invalidOutput)
+    }
+
     func testPassesPromptThroughStdinAndReturnsOnlyFinalMessage() async throws {
         let (root, script) = try fixture("""
         printf '%s\\n' "$@" > arguments

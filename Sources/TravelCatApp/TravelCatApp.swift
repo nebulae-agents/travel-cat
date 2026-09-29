@@ -143,6 +143,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 didRefresh: { [weak self] in self?.refreshMenuState() })
             postcardRecoveryController = recovery
             recovery.start()
+            environment.postcardBacklogRecovered = { [weak recovery] in recovery?.refresh() }
             let automaticTravel = AutomaticTravelController(
                 isEnabled: { [weak environment, weak services] in
                     (environment?.effectiveSettings.automaticTravelEnabled ?? false) && (services?.isReady ?? false)
