@@ -376,7 +376,11 @@ public struct PostcardView: View {
     private let event: TripEvent
     private let presentationReference: PostcardPresentationReference?
     private let rootURL: URL?
+    private let retry: ((UUID) -> Void)?
+    private let error: String?
+    private let notice: String?
     private let open: (PetPresentation) -> Void
+    private let workItem: PostcardWorkItem?
     private let back: PetPresentation
 
     public init(
@@ -384,12 +388,20 @@ public struct PostcardView: View {
         rootURL: URL? = nil,
         presentationReference: PostcardPresentationReference? = nil,
         back: PetPresentation = .status,
+        workItem: PostcardWorkItem? = nil,
+        retry: ((UUID) -> Void)? = nil,
+        error: String? = nil,
+        notice: String? = nil,
         open: @escaping (PetPresentation) -> Void
     ) {
         self.event = event
         self.presentationReference = presentationReference
         self.rootURL = rootURL
+        self.workItem = workItem
         self.back = back
+        self.retry = retry
+        self.error = error
+        self.notice = notice
         self.open = open
     }
 
@@ -414,6 +426,9 @@ public struct PostcardView: View {
                         .font(.title2.bold())
                         .accessibilityLabel(PostcardDisplayLocation().resolveSpoken(event.location))
                     Text(event.summary)
+                    if let workItem { PostcardWorkStatusView(item: workItem, retry: retry) }
+                    if let error { Text(error).font(.caption).foregroundStyle(.red) }
+                    if let notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
                     HStack {
                         Label(event.mood.label, systemImage: "sparkles")
                         Spacer()
@@ -441,8 +456,12 @@ public struct TripAlbumView: View {
     private let events: [TripEvent]
     private let presentationReferences: [UUID: PostcardPresentationReference]
     private let rootURL: URL?
+    private let workItems: [PostcardWorkItem]
     private let calendar: Calendar
     private let now: Date
+    private let retry: ((UUID) -> Void)?
+    private let error: String?
+    private let notice: String?
     private let open: (PetPresentation) -> Void
 
     public init(
@@ -452,6 +471,10 @@ public struct TripAlbumView: View {
         presentationReferences: [UUID: PostcardPresentationReference] = [:],
         calendar: Calendar = .autoupdatingCurrent,
         now: Date = Date(),
+        workItems: [PostcardWorkItem] = [],
+        retry: ((UUID) -> Void)? = nil,
+        error: String? = nil,
+        notice: String? = nil,
         open: @escaping (PetPresentation) -> Void
     ) {
         self.tripID = tripID
@@ -460,6 +483,10 @@ public struct TripAlbumView: View {
         self.rootURL = rootURL
         self.calendar = calendar
         self.now = now
+        self.workItems = workItems
+        self.retry = retry
+        self.error = error
+        self.notice = notice
         self.open = open
     }
 
@@ -500,7 +527,10 @@ public struct TripAlbumView: View {
                 Button("关闭") { open(.status) }.buttonStyle(.plain)
             }
             let ordered = Self.orderedEvents(tripID: tripID, events: events, now: now)
-            if ordered.isEmpty {
+            let unpublished = workItems.filter { $0.eventID == nil && (tripID == nil || $0.tripID == tripID) }
+            if let error { Text(error).font(.callout).foregroundStyle(.red) }
+            if let notice { Text(notice).font(.callout).foregroundStyle(.secondary) }
+            if ordered.isEmpty && unpublished.isEmpty && error == nil {
                 ContentUnavailableView("还没有明信片", systemImage: "photo.stack")
             } else {
                 GeometryReader { proxy in
@@ -516,6 +546,15 @@ public struct TripAlbumView: View {
                             messages: messages
                         )
                         LazyVStack(alignment: .leading, spacing: TripAlbumLayout.dateGroupSpacing) {
+                            ForEach(unpublished) { item in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("计划中的明信片", systemImage: "photo")
+                                    PostcardWorkStatusView(item: item, retry: retry)
+                                }
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                            }
                             ForEach(groups) { group in
                                 VStack(alignment: .leading, spacing: TripAlbumLayout.spacing) {
                                     HStack(spacing: TripAlbumLayout.spacing) {
@@ -549,10 +588,15 @@ public struct TripAlbumView: View {
                                         spacing: TripAlbumLayout.spacing
                                     ) {
                                         ForEach(group.events) { event in
-                                            Button { open(Self.postcardDestination(for: event)) } label: {
-                                                AlbumCard(event: event, rootURL: rootURL, presentationReference: presentationReferences[event.id])
+                                            VStack(alignment: .leading, spacing: 6) {
+                                                Button { open(Self.postcardDestination(for: event)) } label: {
+                                                    AlbumCard(event: event, rootURL: rootURL, presentationReference: presentationReferences[event.id])
+                                                }
+                                                .buttonStyle(.plain)
+                                                if let item = workItems.first(where: { $0.eventID == event.id }) {
+                                                    PostcardWorkStatusView(item: item, retry: retry)
+                                                }
                                             }
-                                            .buttonStyle(.plain)
                                         }
                                     }
                                 }
@@ -820,7 +864,10 @@ public struct PetRootView: View {
                 PostcardView(
                     event: event,
                     rootURL: model.dataRoot,
-                    presentationReference: model.presentationReferences[event.id]
+                    presentationReference: model.presentationReferences[event.id],
+                    workItem: model.postcardWorkItems.first(where: { $0.eventID == event.id }),
+                    retry: model.retryPostcard,
+                    error: model.postcardWorkError, notice: model.manualRetryMessage
                 ) { destination in
                     if destination == .status { model.close() }
                     else { model.handle(destination) }
@@ -829,7 +876,7 @@ public struct PetRootView: View {
                 Button("返回") { model.close() }
             }
         case .album:
-            TripAlbumView(tripID: nil, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences) { destination in
+            TripAlbumView(tripID: nil, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences, workItems: model.postcardWorkItems, retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
                 if destination == .status { model.close() }
                 else { model.handle(destination) }
             }
@@ -846,5 +893,32 @@ public struct PetRootView: View {
                 close: model.close
             )
         }
+    }
+}
+
+@MainActor
+private struct PostcardWorkStatusView: View {
+    let item: PostcardWorkItem
+    let retry: ((UUID) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if item.isSupplement, item.status == .ready, let date = item.generatedAt {
+                HStack {
+                    Text("补发 · 实际生成")
+                    Text(date, style: .date)
+                    Text(date, style: .time)
+                }
+            }
+            if item.status != .ready {
+                Text(item.statusLabel)
+                if let reason = item.failureReason, !reason.isEmpty { Text(reason) }
+            }
+            if item.status == .manualRequired, let retry {
+                Button("手动重试一次") { retry(item.id) }.buttonStyle(.bordered)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 }

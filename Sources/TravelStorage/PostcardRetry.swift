@@ -142,20 +142,31 @@ public struct ImageResultEnvelope: Codable, Equatable, Sendable {
     }
 }
 
+public struct ManualImageAttemptAudit: Codable, Equatable, Sendable {
+    public let occurredAt: Date
+    public let reason: String
+    public let resultHash: String?
+}
+
 public struct ImageRetry: Codable, Equatable, Sendable {
     public var attemptCount: Int
     public var retryAt: Date?
     public let publishedNarrativeHash: String
     var lastResultHash: String?
     var lastAttemptedAt: Date?
-    var activeAttemptToken: String?
-    var leaseExpiresAt: Date?
-    var terminalStatus: PostcardStatus?
+    public internal(set) var activeAttemptToken: String?
+    public internal(set) var leaseExpiresAt: Date?
+    public internal(set) var terminalStatus: PostcardStatus?
     var terminalResultHash: String?
     var imageContentHash: String?
     var terminalRelativePath: String?
     var terminalPresentation: PostcardPresentationReference?
     var currentPresentation: PostcardPresentationReference?
+    public var manualRequests: [Date] = []
+    public var manualPriorResultHashes: [String] = []
+    public var lastFailureReason: String?
+    public var lastFailureAt: Date?
+    public var manualAttemptResults: [ManualImageAttemptAudit] = []
 
     public init(
         attemptCount: Int,
@@ -192,7 +203,7 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         case retryAt = "imageRetryAt"
         case publishedNarrativeHash, lastResultHash, lastAttemptedAt
         case activeAttemptToken, leaseExpiresAt, terminalStatus, terminalResultHash
-        case imageContentHash, terminalRelativePath, terminalPresentation, currentPresentation
+        case imageContentHash, terminalRelativePath, terminalPresentation, currentPresentation, manualRequests, manualPriorResultHashes, lastFailureReason, lastFailureAt, manualAttemptResults
     }
 
     public init(from decoder: Decoder) throws {
@@ -211,6 +222,11 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         terminalRelativePath = try values.decodeIfPresent(String.self, forKey: .terminalRelativePath)
         terminalPresentation = values.contains(.terminalPresentation) ? try values.decode(StrictPresentationReference.self, forKey: .terminalPresentation).value : nil
         currentPresentation = values.contains(.currentPresentation) ? try values.decode(StrictPresentationReference.self, forKey: .currentPresentation).value : nil
+        manualRequests = try values.decodeIfPresent([Date].self, forKey: .manualRequests) ?? []
+        manualPriorResultHashes = try values.decodeIfPresent([String].self, forKey: .manualPriorResultHashes) ?? []
+        lastFailureReason = try values.decodeIfPresent(String.self, forKey: .lastFailureReason)
+        lastFailureAt = try values.decodeIfPresent(Date.self, forKey: .lastFailureAt)
+        manualAttemptResults = try values.decodeIfPresent([ManualImageAttemptAudit].self, forKey: .manualAttemptResults) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -228,12 +244,39 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         try values.encodeIfPresent(terminalRelativePath, forKey: .terminalRelativePath)
         try values.encodeIfPresent(terminalPresentation, forKey: .terminalPresentation)
         try values.encodeIfPresent(currentPresentation, forKey: .currentPresentation)
+        if !manualRequests.isEmpty { try values.encode(manualRequests, forKey: .manualRequests) }
+        if !manualPriorResultHashes.isEmpty { try values.encode(manualPriorResultHashes, forKey: .manualPriorResultHashes) }
+        try values.encodeIfPresent(lastFailureReason, forKey: .lastFailureReason)
+        try values.encodeIfPresent(lastFailureAt, forKey: .lastFailureAt)
+        if !manualAttemptResults.isEmpty { try values.encode(manualAttemptResults, forKey: .manualAttemptResults) }
     }
 
-    mutating func recordFailure(now: Date, mode: TravelMode, resultHash: String) -> PostcardStatus {
+    mutating func queueManual(now: Date) {
+        if let previous = terminalResultHash ?? lastResultHash { manualPriorResultHashes.append(previous) }
+        manualRequests.append(now)
+        attemptCount = 2
+        retryAt = now
+        activeAttemptToken = nil
+        leaseExpiresAt = nil
+        terminalStatus = nil
+        terminalResultHash = nil
+        imageContentHash = nil
+        terminalRelativePath = nil
+        terminalPresentation = nil
+        currentPresentation = nil
+    }
+
+    mutating func recordFailure(now: Date, mode: TravelMode, resultHash: String?, reason: String? = nil) -> PostcardStatus {
         attemptCount += 1
-        lastAttemptedAt = now
-        lastResultHash = resultHash
+        if let resultHash {
+            lastAttemptedAt = now
+            lastResultHash = resultHash
+        }
+        lastFailureAt = now
+        lastFailureReason = reason ?? "Image generation failed"
+        if !manualRequests.isEmpty {
+            manualAttemptResults.append(ManualImageAttemptAudit(occurredAt: now, reason: lastFailureReason!, resultHash: resultHash))
+        }
         activeAttemptToken = nil
         leaseExpiresAt = nil
         guard attemptCount < 3 else {
@@ -392,7 +435,7 @@ struct ImageRetryStore: Codable, Equatable, Sendable {
                   retry.terminalResultHash.map(isLowercaseSHA256) != false,
                   retry.imageContentHash.map(isLowercaseSHA256) != false,
                   (retry.lastResultHash == nil) == (retry.lastAttemptedAt == nil),
-                  retry.attemptCount == 0 || retry.lastAttemptedAt != nil,
+                  retry.attemptCount == 0 || retry.lastAttemptedAt != nil || retry.lastFailureAt != nil || !retry.manualRequests.isEmpty,
                   retry.attemptCount < 3 || retry.retryAt == nil,
                   (retry.activeAttemptToken == nil) == (retry.leaseExpiresAt == nil),
                   retry.activeAttemptToken.map(AttemptTokenValidator.isValid) != false,

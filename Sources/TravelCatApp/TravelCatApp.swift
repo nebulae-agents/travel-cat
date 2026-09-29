@@ -26,6 +26,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private var terminationTask: Task<Void, Never>?
     private let codexExecutor = CodexTravelExecutor()
     private var automaticTravelController: AutomaticTravelController?
+    private var postcardRecoveryController: PostcardRecoveryController?
     private var albumPreviewSession: TravelAlbumPreviewSession?
     @Published private(set) var environment: TravelCatEnvironment?
     @Published private(set) var desktopPetController: DesktopPetController?
@@ -109,13 +110,31 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             let services = try GenerationServiceController(
                 store: TravelGenerationConfigurationStore(root: rootURL), credentials: serviceCredentials,
                 hasExistingHistory: !loaded.events.isEmpty,
-                didSave: { [weak self] in self?.automaticTravelController?.settingsDidChange() })
+                didSave: { [weak self] in
+                    self?.automaticTravelController?.settingsDidChange()
+                    self?.postcardRecoveryController?.refresh()
+                })
             generationServices = services
             environment.generationServices = services
             environment.openGenerationSetup = { [weak self] in self?.showGenerationSetup() }
             let generator = ConfiguredTravelContentGenerator(configuration: { services.configuration },
                 credentials: serviceCredentials, codex: CodexTravelContentGenerator(executor: codexExecutor))
-            let worker = AutomaticTravelWorker(repository: repository, generator: generator)
+            let worker = AutomaticTravelWorker(repository: repository, generator: generator,
+                didChange: { [weak self] in self?.postcardRecoveryController?.refresh() })
+            let recovery = PostcardRecoveryController(repository: repository, model: model, worker: worker,
+                settings: { [weak environment] in environment?.effectiveSettings ?? TravelSettings() },
+                isReady: { [weak services] in services?.isReady ?? false },
+                applyContents: { [weak environment] contents, supplemental, references in
+                    guard let environment else { return }
+                    environment.applyRepositoryContents(RepositoryContents(
+                        snapshot: contents.snapshot, events: contents.events + supplemental,
+                        characterProfile: contents.characterProfile,
+                        selectedCharacterProfile: contents.selectedCharacterProfile,
+                        presentationReferences: contents.presentationReferences.merging(references) { _, extra in extra }))
+                },
+                didRefresh: { [weak self] in self?.refreshMenuState() })
+            postcardRecoveryController = recovery
+            recovery.start()
             let automaticTravel = AutomaticTravelController(
                 isEnabled: { [weak environment, weak services] in
                     (environment?.effectiveSettings.automaticTravelEnabled ?? false) && (services?.isReady ?? false)
@@ -193,6 +212,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         watcherTask?.cancel()
         authorizationTask?.cancel()
         automaticTravelController?.stop()
+        postcardRecoveryController?.stop()
         codexExecutor.cancelAll()
         closeAlbumPreviewSession()
         environment?.journeyTestController?.stop()
@@ -220,7 +240,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 guard !Task.isCancelled, let environment else { break }
                 let changed = contents != previous
                 if changed {
-                    environment.applyRepositoryContents(contents)
+                    if let postcardRecoveryController { postcardRecoveryController.refresh() }
+                    else { environment.applyRepositoryContents(contents) }
                     refreshMenuState()
                 }
                 environment.notificationService.processUnavailable(
@@ -680,14 +701,18 @@ struct MenuServiceRootView: View {
             statusView
         case let .postcard(id):
             if let event = model.events.first(where: { $0.id == id }) {
-                PostcardView(event: event, rootURL: model.dataRoot, presentationReference: model.presentationReferences[event.id]) { destination in
+                PostcardView(event: event, rootURL: model.dataRoot, presentationReference: model.presentationReferences[event.id],
+                    workItem: model.postcardWorkItems.first { $0.eventID == event.id },
+                    retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
                     handlePostcardRoute(destination)
                 }
             } else {
                 statusView
             }
         case let .album(tripID):
-            TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences) { destination in
+            TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences,
+                workItems: model.postcardWorkItems, retry: model.retryPostcard,
+                error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
                 handleAlbumRoute(destination)
             }
         case .pet, .awayTag, .supplies:

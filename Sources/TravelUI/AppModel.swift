@@ -19,6 +19,23 @@ public enum AppModelError: Error, Equatable, Sendable {
 @MainActor
 public final class AppModel: ObservableObject {
     public typealias SupplyPersistence = @MainActor (String?) throws -> TripSnapshot
+    @Published public private(set) var postcardWorkItems: [PostcardWorkItem] = []
+    @Published public private(set) var postcardWorkError: String?
+    @Published public private(set) var manualRetryMessage: String?
+    public var retryPostcardAction: (@MainActor (UUID) -> Void)?
+
+    public func updatePostcardWork(_ items: [PostcardWorkItem], error: String? = nil, manualRetryMessage: String? = nil) {
+        postcardWorkItems = items
+        postcardWorkError = error
+        self.manualRetryMessage = manualRetryMessage
+    }
+
+    public func retryPostcard(_ id: UUID) {
+        guard let item = postcardWorkItems.first(where: { $0.id == id && $0.status == .manualRequired }),
+              let eventID = item.eventID else { return }
+        retryPostcardAction?(eventID)
+    }
+
     @Published public private(set) var snapshot: TripSnapshot
     @Published public private(set) var events: [TripEvent]
     @Published public private(set) var presentationReferences: [UUID: PostcardPresentationReference]
@@ -122,7 +139,7 @@ public final class AppModel: ObservableObject {
                 postcardReturnPresentation = .status
             }
         case let .album(tripID):
-            if !arrived.contains(where: { $0.tripID == tripID && isAlbumEvent($0) }) {
+            if !arrived.contains(where: { $0.tripID == tripID && isAlbumEvent($0) }) && !postcardWorkItems.contains(where: { $0.tripID == tripID }) && postcardWorkError == nil {
                 presentation = .status
             }
         case .supplies:
@@ -190,7 +207,9 @@ public final class AppModel: ObservableObject {
     }
 
     public func latestAvailableTripID() -> UUID? {
-        latestAvailablePostcardID()?.tripID
+        if postcardWorkItems.contains(where: { $0.tripID == snapshot.tripID }) { return snapshot.tripID }
+        return latestAvailablePostcardID()?.tripID ?? postcardWorkItems.last?.tripID
+            ?? (postcardWorkError == nil ? nil : snapshot.tripID)
     }
 
     private func latestAvailablePostcardID() -> TripEvent? {

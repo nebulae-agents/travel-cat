@@ -343,6 +343,8 @@ public final class TravelRepository: @unchecked Sendable {
                 "state/settings.json",
                 "state/home-care.json",
                 "state/image-retries.json",
+                "state/postcard-backlog.json",
+                "state/automatic-travel.json",
                 "state/active-character.json",
                 "state/frozen-character.json",
                 "journal/events.jsonl",
@@ -381,6 +383,8 @@ public final class TravelRepository: @unchecked Sendable {
                 "state/current-trip.json",
                 "state/settings.json",
                 "state/image-retries.json",
+                "state/postcard-backlog.json",
+                "state/automatic-travel.json",
                 "state/active-character.json",
                 "state/frozen-character.json",
                 "journal/events.jsonl",
@@ -402,6 +406,10 @@ public final class TravelRepository: @unchecked Sendable {
             )
             let previousSnapshot = try Data(contentsOf: stagedBackup.appendingPathComponent("state/current-trip.json"))
             let previousJournal = try Data(contentsOf: stagedBackup.appendingPathComponent("journal/events.jsonl"))
+            let backlogURL = root.appendingPathComponent("state/postcard-backlog.json")
+            let previousBacklog = try? Data(contentsOf: stagedBackup.appendingPathComponent("state/postcard-backlog.json"))
+            let automationURL = root.appendingPathComponent("state/automatic-travel.json")
+            let previousAutomation = try? Data(contentsOf: stagedBackup.appendingPathComponent("state/automatic-travel.json"))
             let previousRetries = try? Data(contentsOf: stagedBackup.appendingPathComponent("state/image-retries.json"))
             let previousCharacterAnchor = hasCharacterAnchor
                 ? try Data(contentsOf: stagedBackup.appendingPathComponent("state/frozen-character.json")) : nil
@@ -414,6 +422,8 @@ public final class TravelRepository: @unchecked Sendable {
             let old = root.appendingPathComponent(".postcards-\(UUID().uuidString).old", isDirectory: true)
             do {
                 try writer.write(JSONEncoder.travelCat.encode(TripSnapshot.empty(now: now)), to: snapshotURL)
+                if fileManager.fileExists(atPath: automationURL.path) { try fileManager.removeItem(at: automationURL) }
+                if fileManager.fileExists(atPath: backlogURL.path) { try fileManager.removeItem(at: backlogURL) }
                 try writer.write(Data(), to: journalURL)
                 try writer.write(JSONEncoder.travelCat.encode(ImageRetryStore()), to: imageRetryURL)
                 if hasCharacterAnchor { try fileManager.removeItem(at: characterAnchorURL) }
@@ -422,6 +432,8 @@ public final class TravelRepository: @unchecked Sendable {
                 try fileManager.removeItem(at: old)
             } catch {
                 let resetError = error
+                if let previousAutomation { try? writer.write(previousAutomation, to: automationURL) }
+                if let previousBacklog { try? writer.write(previousBacklog, to: backlogURL) }
                 try? writer.write(previousSnapshot, to: snapshotURL)
                 try? writer.write(previousJournal, to: journalURL)
                 if let previousCharacterAnchor {
@@ -597,16 +609,31 @@ public final class TravelRepository: @unchecked Sendable {
         try pendingImages(mode: mode, trustedNow: clock.now, matchingCharacterProfile: matchingCharacterProfile)
     }
 
+    public func pendingManualImage(eventID: UUID, mode: TravelMode, matchingCharacterProfile: CharacterProfile? = nil) throws -> PendingImageWork? {
+        try pendingImages(mode: mode, trustedNow: clock.now, matchingCharacterProfile: matchingCharacterProfile, manualEventID: eventID).first
+    }
+
     // Test-only compatibility hook. Production scheduling always uses the injected clock above.
     func pendingImages(now: Date) throws -> [PendingImageWork] {
         try pendingImages(mode: .fast, trustedNow: now)
     }
 
-    private func pendingImages(mode: TravelMode, trustedNow now: Date, matchingCharacterProfile: CharacterProfile? = nil) throws -> [PendingImageWork] {
+    private func pendingImages(mode: TravelMode, trustedNow now: Date, matchingCharacterProfile: CharacterProfile? = nil, manualEventID: UUID? = nil) throws -> [PendingImageWork] {
         try withExclusiveLock {
             var events = try readEventsUnlocked()
             var store = try loadRetryStoreUnlocked()
             try reconcileRetryStoreUnlocked(events: &events, store: &store)
+            for index in events.indices where events[index].postcardStatus == .pendingImage {
+                let key = retryKey(events[index].id)
+                guard var retry = store.entries[key], !retry.manualRequests.isEmpty,
+                      retry.activeAttemptToken != nil, retry.leaseExpiresAt.map({ $0 <= now }) == true else { continue }
+                _ = retry.recordFailure(now: now, mode: mode, resultHash: nil, reason: "Image generation lease expired")
+                retry.terminalStatus = .imageUnavailable
+                store.entries[key] = retry
+                try writeRetryStoreUnlocked(store)
+                events[index].postcardStatus = .imageUnavailable
+                try writer.write(try encodedJournal(events), to: journalURL)
+            }
             let due = try events
                 .filter { $0.postcardStatus == .pendingImage }
                 .compactMap { event -> (TripEvent, ImageRetry)? in
@@ -615,6 +642,7 @@ public final class TravelRepository: @unchecked Sendable {
                         return nil
                     }
                     let retry = try retryForPendingEventUnlocked(event, store: &store)
+                    if let manualEventID, event.id != manualEventID || retry.manualRequests.isEmpty { return nil }
                     guard retry.retryAt.map({ $0 <= now }) ?? true,
                           retry.leaseExpiresAt.map({ $0 <= now }) ?? true else { return nil }
                     return (event, retry)
@@ -634,6 +662,30 @@ public final class TravelRepository: @unchecked Sendable {
             store.entries[retryKey(event.id)] = leased
             try writeRetryStoreUnlocked(store)
             return [PendingImageWork(event: event, retry: leased, characterProfile: profile)]
+        }
+    }
+
+    /// Queue exactly one additional attempt; repeated clicks while queued or leased are idempotent.
+    @discardableResult
+    public func requestManualImageRetry(eventID: UUID, mode: TravelMode) throws -> Bool {
+        try withExclusiveLock {
+            var events = try readEventsUnlocked()
+            var store = try loadRetryStoreUnlocked()
+            try reconcileRetryStoreUnlocked(events: &events, store: &store)
+            guard let index = events.firstIndex(where: { $0.id == eventID }) else {
+                throw RepositoryError.eventNotFound(eventID)
+            }
+            if events[index].postcardStatus == .pendingImage { return false }
+            guard events[index].postcardStatus == .imageUnavailable,
+                  var retry = store.entries[retryKey(eventID)] else {
+                throw RepositoryError.invalidImageTransition
+            }
+            retry.queueManual(now: clock.now)
+            store.entries[retryKey(eventID)] = retry
+            try writeRetryStoreUnlocked(store)
+            events[index].postcardStatus = .pendingImage
+            try writer.write(try encodedJournal(events), to: journalURL)
+            return true
         }
     }
 
@@ -673,6 +725,7 @@ public final class TravelRepository: @unchecked Sendable {
             var retry = try retryForEventUnlocked(existing, store: &store)
             try requireNarrativeHash(existing, retry: retry)
             let resultHash = try NarrativeHasher.hash(result)
+            guard !retry.manualPriorResultHashes.contains(resultHash) else { throw RepositoryError.invalidImageResult }
             guard result.publishedNarrativeHash == retry.publishedNarrativeHash else {
                 throw RepositoryError.invalidImageResult
             }
@@ -691,6 +744,7 @@ public final class TravelRepository: @unchecked Sendable {
             }
             guard retry.activeAttemptToken == result.attemptToken,
                   retry.attemptCount == result.attemptCount,
+                  retry.manualRequests.isEmpty || retry.leaseExpiresAt.map({ $0 > trustedNow }) == true,
                   retry.retryAt.map({ $0 <= trustedNow }) ?? true else {
                 throw RepositoryError.invalidImageResult
             }
@@ -699,7 +753,7 @@ public final class TravelRepository: @unchecked Sendable {
             case .ready:
                 throw RepositoryError.invalidImageResult
             case .failed, .rejectedIdentity:
-                let terminal = retry.recordFailure(now: trustedNow, mode: mode, resultHash: resultHash)
+                let terminal = retry.recordFailure(now: trustedNow, mode: mode, resultHash: resultHash, reason: result.reason)
                 if terminal == .imageUnavailable {
                     retry.terminalStatus = .imageUnavailable
                     retry.terminalResultHash = resultHash
@@ -748,6 +802,7 @@ public final class TravelRepository: @unchecked Sendable {
             guard try NarrativeHasher.hash(event) == NarrativeHasher.hash(initialEvent) else { throw RepositoryError.invalidImageResult }
             var retry = try retryForEventUnlocked(event, store: &store)
             let resultHash = try NarrativeHasher.hash(result)
+            guard !retry.manualPriorResultHashes.contains(resultHash) else { throw RepositoryError.invalidImageResult }
             try requireReadySubmission(result, event: event, retry: retry, resultHash: resultHash)
             try requireUnchanged(validated)
             try revalidate()
@@ -1023,6 +1078,11 @@ public final class TravelRepository: @unchecked Sendable {
             guard retry.attemptCount == 0 ? retry.retryAt == nil : (retry.attemptCount >= 3 || retry.retryAt != nil || retry.terminalStatus == .ready) else {
                 throw RepositoryError.malformedImageRetryState
             }
+            if events[index].postcardStatus == .imageUnavailable,
+               !retry.manualRequests.isEmpty, retry.terminalStatus == nil, retry.attemptCount == 2 {
+                events[index].postcardStatus = .pendingImage
+                changedJournal = true
+            }
             if events[index].postcardStatus == .pendingImage, retry.terminalStatus == .ready {
                 guard let path = retry.terminalRelativePath,
                       retry.currentPresentation == nil,
@@ -1071,7 +1131,7 @@ public final class TravelRepository: @unchecked Sendable {
         if changedJournal { try writer.write(try encodedJournal(events), to: journalURL) }
     }
 
-    private struct ValidatedImage {
+    struct ValidatedImage {
         let descriptor: Int32
         let tripDescriptor: Int32
         let parentDescriptors: [Int32]
@@ -1090,7 +1150,7 @@ public final class TravelRepository: @unchecked Sendable {
         }
     }
 
-    private func validateReadyImage(_ path: String?, tripID: UUID) throws -> ValidatedImage {
+    func validateReadyImage(_ path: String?, tripID: UUID) throws -> ValidatedImage {
         try validateReadyImage(path, tripID: tripID, allowLegacyStoredPath: false)
     }
 
@@ -1206,7 +1266,7 @@ public final class TravelRepository: @unchecked Sendable {
         }
     }
 
-    private func requireUnchanged(_ image: ValidatedImage) throws {
+    func requireUnchanged(_ image: ValidatedImage) throws {
         var descriptorInfo = stat()
         var pathInfo = stat()
         var postcardsPathInfo = stat()
@@ -1259,7 +1319,7 @@ public final class TravelRepository: @unchecked Sendable {
         try JSONDecoder.travelCat.decode(TripSnapshot.self, from: Data(contentsOf: snapshotURL))
     }
 
-    private func readEventsUnlocked() throws -> [TripEvent] {
+    func readEventsUnlocked() throws -> [TripEvent] {
         let data = try Data(contentsOf: journalURL)
         guard let text = String(data: data, encoding: .utf8) else {
             throw RepositoryError.malformedJournal(line: 1, reason: "journal is not UTF-8")
@@ -1644,7 +1704,16 @@ public final class TravelRepository: @unchecked Sendable {
         return nil
     }
 
-    private func profileForTripUnlocked(_ tripID: UUID, events: [TripEvent]) throws -> CharacterProfile {
+    public func characterProfile(for tripID: UUID) throws -> CharacterProfile {
+        try withExclusiveLock {
+            let events = try readEventsUnlocked()
+            try validateJournalChain(events)
+            guard events.contains(where: { $0.tripID == tripID }) else { throw RepositoryError.continuityConflict }
+            return try profileForTripUnlocked(tripID, events: events)
+        }
+    }
+
+    func profileForTripUnlocked(_ tripID: UUID, events: [TripEvent]) throws -> CharacterProfile {
         let profile = events.first(where: { $0.tripID == tripID })?.characterProfile ?? .defaultBlackCat
         return try CharacterProfileStore(dataRoot: root).validatedProfile(profile)
     }

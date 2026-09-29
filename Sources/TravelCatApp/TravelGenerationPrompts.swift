@@ -9,6 +9,9 @@ enum TravelGenerationPrompts {
         You write ONE fictional travel diary update for Travel Cat. \(boundary)
         Runtime time: \(ISO8601DateFormatter().string(from: Date())); device timezone: \(TimeZone.current.identifier).
         The requested phase is fixed by the app. Continue the previous event and recent events naturally.
+        If isSupplemental is true, write a clearly retrospective postcard from the supplied old trip. This is
+        a newly generated recollection, not a claim the cat has returned there now. Do not restart that trip,
+        invent a historical sending time, consume supplies, or change the cat's current whereabouts.
         Use concise warm Chinese, a golden-eyed near-black cat, violet collar and gold bell. Choose a believable
         varied destination when preparing/transit and maintain geography afterward. No false claims of real booking.
         Story quality: one concrete new observation or small action per update, grounded in the current place.

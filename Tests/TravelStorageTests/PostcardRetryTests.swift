@@ -60,6 +60,28 @@ final class PostcardRetryTests: XCTestCase {
         XCTAssertEqual(try repository.markImage(try XCTUnwrap(last), mode: .fast).status, .imageUnavailable)
     }
 
+    func testManualRetryPersistsAndConsumesOnlyOneAttempt() throws {
+        let clock = RetryTestClock(now: firstAttempt)
+        let root = try temporaryDirectory()
+        var repository = try TravelRepository(root: root, clock: clock)
+        _ = try publishPostcard(in: repository)
+        for _ in 0..<3 {
+            let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
+            _ = try repository.markImage(envelope(work, status: .failed, attemptedAt: clock.now, reason: "network"), mode: .fast)
+            clock.now = clock.now.addingTimeInterval(300)
+        }
+        XCTAssertTrue(try repository.requestManualImageRetry(eventID: eventID, mode: .fast))
+        XCTAssertFalse(try repository.requestManualImageRetry(eventID: eventID, mode: .fast))
+        repository = try TravelRepository(root: root, clock: clock)
+        let work = try XCTUnwrap(repository.pendingManualImage(eventID: eventID, mode: .fast))
+        XCTAssertEqual(work.imageAttemptCount, 2)
+        XCTAssertNil(try repository.pendingManualImage(eventID: eventID, mode: .fast))
+        _ = try repository.markImage(envelope(work, status: .failed, attemptedAt: clock.now, reason: "manual"), mode: .fast)
+        XCTAssertEqual(try repository.events().first?.postcardStatus, .imageUnavailable)
+        XCTAssertTrue(try repository.pendingImages(mode: .fast).isEmpty)
+        XCTAssertEqual(try repository.imageRetry(for: eventID)?.manualRequests.count, 1)
+    }
+
     func testConcurrentSameAttemptCountsOnce() async throws {
         let clock = RetryTestClock(now: firstAttempt)
         let repository = try TravelRepository(root: temporaryDirectory(), clock: clock)

@@ -320,7 +320,16 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertFalse(watcherSource.contains("notificationService.process("))
         XCTAssertTrue(watcherSource.contains("notificationService.processUnavailable("))
         XCTAssertTrue(watcherSource.contains("petPromptService.ingestCurrent"))
-        assertOrder(watcherSource, "environment.applyRepositoryContents", before: "petPromptService.ingestCurrent")
+        assertOrder(watcherSource, "postcardRecoveryController.refresh()", before: "petPromptService.ingestCurrent")
+        XCTAssertTrue(source.contains("environment.applyRepositoryContents(RepositoryContents("))
+        XCTAssertTrue(source.contains("events: contents.events + supplemental"))
+        XCTAssertTrue(source.contains("selectedCharacterProfile: contents.selectedCharacterProfile"))
+        XCTAssertTrue(source.contains("presentationReferences: contents.presentationReferences.merging(references)"))
+        XCTAssertTrue(source.contains("didRefresh: { [weak self] in self?.refreshMenuState() }"))
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let recovery = try String(contentsOf: root.appendingPathComponent("Sources/TravelCatApp/PostcardRecoveryController.swift"), encoding: .utf8)
+        XCTAssertTrue(recovery.contains("defer { didRefresh() }"))
+        XCTAssertTrue(recovery.contains("applyContents(contents, supplemental, references)"))
         assertOrder(watcherSource, "petPromptService.ingestCurrent", before: "previous = contents")
     }
 
