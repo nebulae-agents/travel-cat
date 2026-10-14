@@ -2,6 +2,19 @@ import AppKit
 import ImageIO
 import SwiftUI
 
+/// A closed configuration editor begins from saved values; an existing editor
+/// retains its draft when brought forward or restored from the Dock.
+@MainActor
+struct GenerationSetupPresentationSession {
+    private var identity = UUID()
+
+    func content<Content: View>(_ content: Content) -> AnyView {
+        AnyView(content.id(identity))
+    }
+
+    mutating func windowDidClose() { identity = UUID() }
+}
+
 @MainActor
 struct GenerationSetupView: View {
     @ObservedObject var controller: GenerationServiceController

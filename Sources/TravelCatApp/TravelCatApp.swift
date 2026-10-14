@@ -9,6 +9,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private var model: AppModel?
     private lazy var utilityWindowController = TravelUtilityWindowController()
     private lazy var generationWindowController = TravelUtilityWindowController()
+    private var generationSetupSession = GenerationSetupPresentationSession()
     private let serviceCredentials = KeychainTravelServiceCredentialStore()
     private var generationServices: GenerationServiceController?
     private lazy var settingsWindowController = TravelUtilityWindowController()
@@ -315,11 +316,16 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
 
     func showGenerationSetup() {
         guard let services = generationServices else { return }
+        generationWindowController.setCloseHandler { [weak self] in
+            self?.generationSetupSession.windowDidClose()
+        }
         generationWindowController.show(
-            content: AnyView(GenerationSetupView(controller: services, credentials: serviceCredentials,
-                executor: codexExecutor, completed: { [weak self] in
-                    self?.generationWindowController.window?.close()
-                })), size: NSSize(width: 640, height: 760))
+            content: generationSetupSession.content(
+                GenerationSetupView(controller: services, credentials: serviceCredentials,
+                    executor: codexExecutor, completed: { [weak self] in
+                        self?.generationWindowController.window?.close()
+                    })),
+            size: NSSize(width: 640, height: 760))
         generationWindowController.window?.title = "Travel Cat · 模型与连接"
         generationWindowController.window?.contentMinSize = NSSize(width: 600, height: 630)
         generationWindowController.bringToFront()

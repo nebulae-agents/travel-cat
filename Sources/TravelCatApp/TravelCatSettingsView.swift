@@ -148,14 +148,15 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func recoverPostcardBacklog() {
-        // Pause and persist before restoring uncertain work; restoring never starts a model call.
+        // Pause automatic travel before restoring backlog state. Previously queued
+        // manual requests retain their existing authorization.
         settings.automaticTravelEnabled = false
         saveSettings()
         guard !effectiveSettings.automaticTravelEnabled else { return }
         do {
             _ = try PostcardBacklogStore(root: repository.root).recoverFromBackup()
             postcardBacklogRecovered()
-            recoveryNotice = "补卡记录已从安全副本恢复，损坏原文件已保留。自动旅行已暂停；请检查相册，按需手动重试或重新开启旅行。"
+            recoveryNotice = "补卡记录已从安全副本恢复，损坏原文件已保留。自动旅行已暂停；请检查相册。待补卡任务需手动重试，之前已排队的手动重试可能继续。"
             errorMessage = nil
         } catch {
             recoveryNotice = nil
@@ -471,7 +472,7 @@ struct TravelCatSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Button("导出备份…") { environment.exportData() }
                 if environment.model.postcardWorkError != nil {
-                    Text("补卡记录读取异常。恢复会暂停自动旅行，并保留损坏原文件；恢复后的未完成任务需要手动处理。")
+                    Text("补卡记录读取异常。恢复会暂停自动旅行，并保留损坏原文件；待补卡任务需重新手动重试，之前已排队的手动重试可能继续。")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("暂停旅行并从安全副本恢复补卡记录") { environment.recoverPostcardBacklog() }
                 }

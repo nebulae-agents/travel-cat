@@ -1,0 +1,46 @@
+{
+  "checkedDate": "2026-10-14",
+  "relatedTests": 17,
+  "defaultSkipped": 1,
+  "failures": 0,
+  "optInFixturePrepared": true,
+  "launcherGuards": {
+    "forcedEnvironment": true,
+    "rejectWrongPermissions": true,
+    "rejectSymlinkProof": true,
+    "rejectHardlinkProof": true,
+    "rejectFIFOWithoutBlocking": true,
+    "clangWarningsAsErrorsPassed": true
+  },
+  "installedAppSample": {
+    "version": "1.4.1",
+    "build": "31",
+    "publicCandidateInstalled": false,
+    "cardClickBothDirections": true,
+    "bottomButtonBothDirections": true,
+    "turningStateObserved": true,
+    "bottomButtonDisabledDuringTurn": true,
+    "finalFacesNormalOrientation": true,
+    "intermediatePixelsVerified": false,
+    "systemReduceMotionVerified": false
+  },
+  "formalRetention": {
+    "dataFiles": 73,
+    "dataFilesUnchanged": true,
+    "scopedPreferenceEntries": 10,
+    "scopedPreferencesUnchanged": true,
+    "dataLocationUnchanged": true
+  },
+  "isolatedRecovery": {
+    "nativeConnection": "timeout",
+    "requestedTimeoutSeconds": 20,
+    "reportedElapsedSeconds": 644.9487,
+    "actualIsolatedRootOpened": true,
+    "loopbackReceivedRequests": 0,
+    "nativeButtonsVerified": false,
+    "testCopyTerminated": true,
+    "loopbackServiceExited": true,
+    "normalQuitVerified": false
+  },
+  "animationSourceSHA256": "1d43a365b0ca4d7d2d840edb661b9d3e5df8f5420abb295cdfdf60e4d1380e03"
+}
