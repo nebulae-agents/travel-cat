@@ -147,8 +147,8 @@
       "path": "Sources/TravelUI/PostcardPostageView.swift",
       "status": "new",
       "incomingSHA256": "83482a27eee9d19b14cc861ac0d83a8104226f63e47ad66f21fc79a7d5e8615f",
-      "publicSHA256": "83482a27eee9d19b14cc861ac0d83a8104226f63e47ad66f21fc79a7d5e8615f",
-      "adaptedForPublicCompatibility": false
+      "publicSHA256": "72f0986cc57957c7c7786d1b49c0f64d884eea07aff0c622e9c51401f5aea4f6",
+      "adaptedForPublicCompatibility": true
     },
     {
       "path": "Sources/TravelUI/PostcardRecipientEditor.swift",
@@ -196,7 +196,7 @@
       "path": "Sources/TravelUI/TravelViews.swift",
       "status": "conflict",
       "incomingSHA256": "9d6626e48fadd7913c09905380a96fddb63fff45542de92fc78f85d54cc3270a",
-      "publicSHA256": "2d7115912547635bdfc25211e5f929d09ffbfa67abbcfba7c742b521a27d723d",
+      "publicSHA256": "19b0b471c7546b20347f046492286f42aed58041577aeb698ed58ac9dc7b2ce2",
       "adaptedForPublicCompatibility": true
     },
     {
