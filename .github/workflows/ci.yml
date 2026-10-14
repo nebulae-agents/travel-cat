@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && github.run_id || 'latest' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   source-checks:
     runs-on: macos-15
@@ -30,6 +34,28 @@ jobs:
           python3 --version
           node --version
           echo "TRAVEL_CAT_SCRATCH_ROOT=$RUNNER_TEMP/travel-cat-swift" >> "$GITHUB_ENV"
+      - name: Prepare SwiftPM cache
+        id: swift-cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch_path="$(Scripts/travel-cat-swift.sh scratch-path)"
+          echo "scratch-path=$scratch_path" >> "$GITHUB_OUTPUT"
+          toolchain_hash="$(
+            set -e
+            {
+              swift --version
+              xcodebuild -version
+              xcrun --sdk macosx --show-sdk-version
+              sw_vers -productVersion
+            } | shasum -a 256 | awk '{print $1}'
+          )"
+          echo "toolchain-hash=$toolchain_hash" >> "$GITHUB_OUTPUT"
+      - name: Restore SwiftPM build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.swift-cache.outputs.scratch-path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-travel-cat-swiftpm-v1-${{ steps.swift-cache.outputs.toolchain-hash }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Scripts/travel-cat-swift.sh', 'Sources/**', 'Tests/**') }}
       - name: Python source contracts
         run: python3 -m unittest discover -s Scripts/tests -p '*_tests.py'
       - name: Upload tooling contracts
