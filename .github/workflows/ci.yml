@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE
           test -d "$DEVELOPER_DIR"
           swift --version
           python3 --version
@@ -44,13 +44,23 @@ jobs:
         env:
           TZ: UTC
         run: |
-          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE
           Scripts/travel-cat-swift.sh test
       - name: Prompt tests (Asia/Shanghai)
         env:
           TZ: Asia/Shanghai
         run: |
-          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE
           Scripts/travel-cat-swift.sh test --filter PetTravelPromptServiceTests
+      - name: Preserve synthetic date and public-place crops
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: postcard-glyph-crops-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 3
+          if-no-files-found: ignore
+          # This directory contains only the test helper's date/stamp and Kyoto
+          # place crops. Full frames, names, addresses and quotes are excluded.
+          path: /tmp/travelcat-raster-diagnostics/*.png
       - name: Public upload audit
         run: Scripts/audit-project-upload.sh
