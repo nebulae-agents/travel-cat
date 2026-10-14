@@ -490,7 +490,9 @@ public final class PetTravelPromptCoordinator {
                 openHook: event.openHook,
                 consumedItemID: event.consumedItemID,
                 postcardStatus: .pendingImage,
-                postcardRelativePath: nil
+                postcardRelativePath: nil,
+                characterProfile: event.characterProfile,
+                postcardStyleVersion: event.postcardStyleVersion
             )
         }
     }

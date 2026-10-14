@@ -63,7 +63,7 @@ final class PostcardRecoveryController {
                 retries[eventID] = try slot.isSupplement
                     ? backlog.imageRetry(for: eventID) : repository.imageRetry(for: eventID)
             }
-            model.updatePostcardWork(PostcardWorkProjection.items(plans: plans, retries: retries, now: now()),
+            model.updatePostcardWork(PostcardWorkProjection.items(plans: plans, retries: retries, now: now(), damagedImageIDs: try backlog.damagedReadyImageIDs()),
                                      manualRetryMessage: manualMessage)
             let references: [UUID: PostcardPresentationReference] = [:]
             if let applyContents { applyContents(contents, supplemental, references) }
@@ -81,7 +81,7 @@ final class PostcardRecoveryController {
             }
         } catch {
             model.updatePostcardWork(model.postcardWorkItems,
-                error: "明信片记录暂时无法读取，原始文件已保留。请修复数据后重试；不会清空或覆盖补发记录。",
+                error: "明信片记录暂时无法读取，原始文件已保留。可在设置中尝试从安全副本恢复；不会清空补发记录。",
                 manualRetryMessage: manualMessage)
         }
     }

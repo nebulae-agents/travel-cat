@@ -462,6 +462,7 @@ enum NarrativeHasher {
         let continuityReferences: [String]
         let openHook: String?
         let consumedItemID: String?
+        let postcardStyleVersion: Int?
     }
 
     static func hash(_ event: TripEvent) throws -> String {
@@ -477,7 +478,8 @@ enum NarrativeHasher {
             mood: event.mood,
             continuityReferences: event.continuityReferences,
             openHook: event.openHook,
-            consumedItemID: event.consumedItemID
+            consumedItemID: event.consumedItemID,
+            postcardStyleVersion: event.postcardStyleVersion
         )
         let data = try JSONEncoder.travelCat.encode(projection)
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()

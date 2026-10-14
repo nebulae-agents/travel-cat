@@ -10,10 +10,29 @@ import TravelUI
 
 @MainActor
 final class AutomaticTravelLifecycleTests: XCTestCase {
+    func testOnePostcardPlanRetiresLegacyEmptySlotsButPreservesEveryPublishedBinding() throws {
+        let trip = UUID(uuidString: "02000000-0000-4000-8000-000000000001")!
+        var plan = TripPostcardPlan(tripID: trip)
+        XCTAssertEqual(plan.slots.count, 1)
+        let legacySlots = (0..<3).map { TripPostcardPlan.Slot(id: PostcardBacklogPlan.slotID(tripID: trip, index: $0), eventID: nil, imageReady: false) }
+        plan.slots = legacySlots
+        plan.reconcile(events: [])
+        XCTAssertEqual(plan.slots.map(\.id), [legacySlots[0].id])
+        plan.slots = legacySlots
+        let cards = legacySlots.map { TripEvent(id: $0.id, tripID: trip, previousEventID: nil, occurredAt: Date(), phase: .postcardReady, location: Location(country: "中国", city: "城市", place: "公园"), transport: nil, summary: "散步", mood: Mood(level: 0, label: "平静", quote: "慢慢走"), continuityReferences: [], openHook: nil, consumedItemID: nil, postcardStatus: .pendingImage, postcardRelativePath: nil) }
+        plan.reconcile(events: [cards[2]])
+        XCTAssertEqual(plan.slots.map(\.id), [legacySlots[2].id])
+        XCTAssertEqual(plan.unpublishedCount, 0)
+        plan.reconcile(events: cards)
+        XCTAssertEqual(Set(plan.slots.compactMap(\.eventID)), Set(cards.map(\.id)))
+        XCTAssertEqual(plan.slots.count, 3)
+    }
+
+
     func testRecoveryRefreshNotifiesMenuAfterPlansLoadAndOnBacklogError() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(), dataRoot: f.root)
         var observed: [UUID?] = []
         let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
@@ -22,14 +41,14 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         defer { controller.stop() }
         controller.start()
         XCTAssertEqual(observed.last!, try f.repository.loadSnapshot().tripID)
-        XCTAssertEqual(model.postcardWorkItems.count, 3)
+        XCTAssertEqual(model.postcardWorkItems.count, 1)
         let broken = Data("corrupt supplemental records".utf8)
         let url = f.root.appendingPathComponent("state/postcard-backlog.json")
         try broken.write(to: url)
         controller.refresh()
         XCTAssertEqual(observed.count, 2)
         XCTAssertNotNil(model.postcardWorkError)
-        XCTAssertEqual(model.postcardWorkItems.count, 3)
+        XCTAssertEqual(model.postcardWorkItems.count, 1)
         XCTAssertEqual(try Data(contentsOf: url), broken)
     }
 
@@ -227,13 +246,13 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(try f.repository.events().count, 0)
     }
 
-    func testOfflineBeforeFirstPostcardFulfillsEveryDurableSlot() async throws {
+    func testOfflineBeforeFirstPostcardFulfillsSingleDurableSlot() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.exploring)
         let before = try f.plan()
-        XCTAssertEqual(before.slots.count, 3)
+        XCTAssertEqual(before.slots.count, 1)
         f.clock.advance(4 * 24 * 3600)
         let resumedAt = f.clock.now
         let restarted = f.makeWorker()
@@ -247,17 +266,17 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
             f.clock.set(max(f.clock.now.addingTimeInterval(1), outcome.nextCheckAt))
         }
         let postcards = try f.repository.events().filter { $0.phase == .postcardReady }
-        XCTAssertEqual(postcards.count, 3)
+        XCTAssertEqual(postcards.count, 1)
         XCTAssertEqual(Set(postcards.map(\.id)), Set(before.slots.map(\.id)))
         XCTAssertTrue(postcards.allSatisfy { $0.occurredAt >= resumedAt && $0.postcardStatus == .ready })
         XCTAssertEqual(try f.repository.loadSnapshot().phase, .resting)
         XCTAssertEqual(try f.plan().remainingImageCount, 0)
     }
 
-    func testOfflineMidTripAndRestartRetainRemainingSlots() async throws {
+    func testOfflineMidTripAndRestartKeepOnePublishedCard() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.postcardReady)
         f.clock.advance(15) // Persisted minimum model-action gap.
         let original = try f.plan()
@@ -271,15 +290,15 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
             worker = f.makeWorker()
         }
         let postcards = try f.repository.events().filter { $0.phase == .postcardReady }
-        XCTAssertEqual(postcards.count, 3)
-        XCTAssertEqual(Set(postcards.map(\.id)).count, 3)
+        XCTAssertEqual(postcards.count, 1)
+        XCTAssertEqual(Set(postcards.map(\.id)).count, 1)
         XCTAssertTrue(postcards.allSatisfy { $0.postcardStatus == .ready })
     }
 
     func testDailyOfflineCatchUpUsesMinuteGapAndKeepsFutureDeparture() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.exploring)
         _ = try await f.worker.step(settings: .init(mode: .daily))
         f.clock.advance(4 * 24 * 3600)
@@ -292,20 +311,20 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
             XCTAssertEqual(outcome.nextCheckAt.timeIntervalSince(f.clock.now), 60)
             f.clock.set(outcome.nextCheckAt)
         }
-        XCTAssertEqual(try f.repository.events().filter { $0.phase == .postcardReady }.count, 3)
+        XCTAssertEqual(try f.repository.events().filter { $0.phase == .postcardReady }.count, 1)
         XCTAssertEqual(try f.repository.loadSnapshot().phase, .resting)
     }
 
     func testPostcardTextFailureRetainsSlotAndRetryAcrossRestart() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.exploring)
         f.clock.advance(4 * 24 * 3600)
         let plannedID = try XCTUnwrap(f.plan().nextEventID)
         f.generator.failNarrative = true
         let failed = try await f.worker.step(settings: .init(mode: .fast))
-        XCTAssertTrue(failed.message.contains("3"))
+        XCTAssertTrue(failed.message.contains("1"))
         let calls = f.generator.narrativeCalls
         f.generator.failNarrative = false
         _ = try await f.makeWorker().step(settings: .init(mode: .fast))
@@ -319,7 +338,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
     func testLegacyStateAndStalePublicationPlanRebuildFromJournal() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.postcardReady)
         f.clock.advance(15) // Persisted minimum model-action gap.
         let postcard = try XCTUnwrap(f.repository.events().last)
@@ -342,7 +361,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
     func testLegacyRandomEventIDsBindWithoutRewritingHistory() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.postcardReady)
         f.clock.advance(15) // Persisted minimum model-action gap.
         let events = try f.repository.events()
@@ -353,14 +372,14 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         plan.slots = alternate.slots
         plan.reconcile(events: events)
         XCTAssertEqual(plan.slots.compactMap(\.eventID), [postcard.id])
-        XCTAssertEqual(plan.unpublishedCount, 2)
+        XCTAssertEqual(plan.unpublishedCount, 0)
         XCTAssertEqual(try f.repository.events(), events)
     }
 
-    func testLegacyRestingTripBackfillsWithoutChangingOldJournalOrSnapshot() async throws {
+    func testLegacyRestingTripWithOneCardDoesNotBackfillOrChangeJournalOrSnapshot() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.postcardReady)
         f.clock.advance(15)
         _ = try await f.worker.step(settings: .init(mode: .fast))
@@ -369,18 +388,10 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         let original = try f.repository.loadContents()
         let journalURL = f.root.appendingPathComponent("journal/events.jsonl")
         let bytes = try Data(contentsOf: journalURL)
-        f.clock.advance(4 * 24 * 3600)
-        let resumedAt = f.clock.now
         let backlog = try PostcardBacklogStore(root: f.root, clock: f.clock)
-        for _ in 0..<12 {
-            let outcome = try await f.makeWorker().step(settings: .init(mode: .fast))
-            let extras = try backlog.supplementalEvents()
-            if extras.count == 2 && extras.allSatisfy({ $0.postcardStatus == .ready }) { break }
-            f.clock.set(outcome.nextCheckAt)
-        }
-        let extras = try backlog.supplementalEvents()
-        XCTAssertEqual(extras.count, 2)
-        XCTAssertTrue(extras.allSatisfy { $0.tripID == original.snapshot.tripID && $0.occurredAt >= resumedAt && $0.postcardStatus == .ready })
+        _ = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertTrue(try backlog.supplementalEvents().isEmpty)
+        XCTAssertEqual(try backlog.reconcile(events: original.events).first?.slots.count, 1)
         XCTAssertEqual(try Data(contentsOf: journalURL), bytes)
         XCTAssertEqual(try f.repository.loadSnapshot(), original.snapshot)
     }
@@ -388,7 +399,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
     func testOldTripDebtSurvivesNewTripAndModeChange() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.publishPhase(.transit)
         try await f.publishPhase(.returning)
         try await f.publishPhase(.resting)
@@ -402,14 +413,14 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(try f.repository.loadSnapshot(), current)
         let plans = try backlog.reconcile(events: f.repository.events())
         XCTAssertEqual(plans.count, 2)
-        XCTAssertEqual(plans.first?.slots.count, 3)
+        XCTAssertEqual(plans.first?.slots.count, 1)
         XCTAssertNotNil(plans.last?.slots.first)
     }
 
     func testRepeatedWakeCannotBypassPersistedModelGap() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.postcardReady)
         let calls = f.generator.imageCalls + f.generator.narrativeCalls
         for _ in 0..<5 { _ = try await f.makeWorker().step(settings: .init(mode: .fast)) }
@@ -425,7 +436,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
     func testCorruptAutomaticCachePreservesBytesAndRebuildsFromJournal() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.exploring)
         let ids = try f.plan().slots.map(\.id)
         let corrupt = Data("{broken original scheduling state".utf8)
@@ -447,7 +458,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
     func testQueuedManualRetryResumesOnStartupWhileAutomaticTravelIsPaused() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }
-        try await f.startThreePostcardTrip()
+        try await f.startOnePostcardTrip()
         try await f.reach(.postcardReady)
         let event = try XCTUnwrap(f.repository.events().last)
         for _ in 0..<3 {
@@ -524,7 +535,7 @@ private final class LifecycleFixture {
         return try JSONDecoder.travelCat.decode(TripPostcardPlan.self,
             from: JSONSerialization.data(withJSONObject: try XCTUnwrap(object["postcardPlan"])))
     }
-    func startThreePostcardTrip() async throws {
+    func startOnePostcardTrip() async throws {
         let initial = try await worker.step(settings: .init(mode: .fast))
         let plan = TripPostcardPlan(tripID: UUID(uuidString: "02000000-0000-4000-8000-000000000001")!)
         try updateState { $0["postcardPlan"] = try JSONSerialization.jsonObject(with: JSONEncoder.travelCat.encode(plan)) }

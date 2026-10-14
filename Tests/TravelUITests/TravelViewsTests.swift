@@ -409,7 +409,7 @@ final class TravelViewsTests: XCTestCase {
         let albumEnd = try XCTUnwrap(source.range(of: "public struct TripAlbumGeometry"))
         let albumSource = String(source[albumStart.lowerBound..<albumEnd.lowerBound])
 
-        XCTAssertTrue(albumSource.contains("TripAlbumDateGrouping.groups(orderedEvents: ordered, calendar: calendar)"))
+        XCTAssertTrue(albumSource.contains("TripAlbumDateGrouping.groups(orderedEvents: ordered, calendar: calendar, displayDates: displayDates)"))
         XCTAssertTrue(albumSource.contains("TripAlbumDateGrouping.visibleLabel"))
         XCTAssertTrue(albumSource.contains("TripAlbumDateGrouping.accessibilityLabel"))
         XCTAssertTrue(albumSource.contains(".accessibilityAddTraits(.isHeader)"))

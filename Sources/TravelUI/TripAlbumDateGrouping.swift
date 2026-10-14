@@ -16,12 +16,14 @@ public struct TripAlbumDateGroup: Identifiable, Equatable, Sendable {
 public enum TripAlbumDateGrouping {
     public static func groups(
         orderedEvents: [TripEvent],
-        calendar: Calendar
+        calendar: Calendar,
+        displayDates: [UUID: Date] = [:]
     ) -> [TripAlbumDateGroup] {
         var result: [TripAlbumDateGroup] = []
 
         for event in orderedEvents {
-            let day = calendar.startOfDay(for: event.occurredAt)
+            let date = displayDates[event.id] ?? event.occurredAt
+            let day = date == TripAlbumChronology.unknownDate ? date : calendar.startOfDay(for: date)
             if let lastGroup = result.last, lastGroup.day == day {
                 result[result.count - 1] = TripAlbumDateGroup(
                     day: lastGroup.day,
@@ -36,10 +38,11 @@ public enum TripAlbumDateGrouping {
     }
 
     public static func spansMultipleYears(days: [Date], calendar: Calendar) -> Bool {
-        Set(days.map { calendar.component(.year, from: $0) }).count > 1
+        Set(days.filter { $0 != TripAlbumChronology.unknownDate }.map { calendar.component(.year, from: $0) }).count > 1
     }
 
     public static func visibleLabel(for day: Date, showsYear: Bool, calendar: Calendar) -> String {
+        guard day != TripAlbumChronology.unknownDate else { return "旅行日期待确认" }
         guard let components = components(for: day, calendar: calendar) else {
             return fallbackLabel(for: day, includesYear: showsYear, calendar: calendar)
         }
@@ -54,6 +57,7 @@ public enum TripAlbumDateGrouping {
     }
 
     public static func accessibilityLabel(for day: Date, calendar: Calendar) -> String {
+        guard day != TripAlbumChronology.unknownDate else { return "旅行日期待确认" }
         guard let components = components(for: day, calendar: calendar) else {
             return fallbackLabel(for: day, includesYear: true, calendar: calendar)
         }

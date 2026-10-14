@@ -4,15 +4,14 @@ import Foundation
 /// A single ephemeral CLI request. Callers supply a private temporary workspace.
 @MainActor
 final class CodexTravelExecutor {
-    enum Failure: Error, LocalizedError, Equatable {
+    enum Failure: String, Error, LocalizedError, Equatable {
         case notInstalled, notLoggedIn, timedOut, generationFailed
+        case networkUnavailable, toolUnavailable, incompatibleCLI, invalidOutput
         var errorDescription: String? {
-            switch self {
-            case .notInstalled: "未找到 Codex 命令行程序，请先安装 Codex。"
-            case .notLoggedIn: "Codex 尚未登录或登录已失效，请先在 Codex 中登录。"
-            case .timedOut: "Codex 生成超时，请稍后重试。"
-            case .generationFailed: "Codex 未能完成生成，请检查连接后重试。"
-            }
+            CodexGenerationDiagnostic(code: diagnosticCode, recordedAt: Date(), durationMilliseconds: 0, exitStatus: nil).userMessage
+        }
+        var diagnosticCode: CodexGenerationDiagnostic.Code {
+            CodexGenerationDiagnostic.Code(rawValue: rawValue) ?? .generationFailed
         }
     }
 
@@ -35,7 +34,10 @@ final class CodexTravelExecutor {
     func run(prompt: String, workspace: URL, schema: URL? = nil, images: [URL] = []) async throws -> Data {
         try Task.checkCancellation()
         guard let executable = executableURL ?? Self.locateExecutable(),
-              FileManager.default.isExecutableFile(atPath: executable.path) else { throw Failure.notInstalled }
+              FileManager.default.isExecutableFile(atPath: executable.path) else {
+            if let data = try? JSONEncoder().encode(CodexGenerationDiagnostic(code: .notInstalled, recordedAt: Date(), durationMilliseconds: 0, exitStatus: nil)) { diagnostics(data) }
+            throw Failure.notInstalled
+        }
         let limit = timeout
         let sink = diagnostics
         let id = UUID()
@@ -93,8 +95,34 @@ final class CodexTravelExecutor {
     }
 
     nonisolated private static func execute(executable: URL, prompt: String, workspace: URL, schema: URL?, images: [URL], timeout: TimeInterval, invocation: Invocation, diagnosticsSink: @Sendable (Data) -> Void) throws -> Data {
+        let start = ProcessInfo.processInfo.systemUptime
         var diagnostics = Data()
-        defer { diagnosticsSink(diagnostics) }
+        var exitStatus: Int32?
+        var code = CodexGenerationDiagnostic.Code.generationFailed
+        defer {
+            let diagnostic = CodexGenerationDiagnostic(code: code, recordedAt: Date(), durationMilliseconds: Int(max(0, ProcessInfo.processInfo.systemUptime - start) * 1000), exitStatus: exitStatus)
+            if let data = try? JSONEncoder().encode(diagnostic) { diagnosticsSink(data) }
+        }
+        do {
+            let data = try executeRequest(executable: executable, prompt: prompt, workspace: workspace, schema: schema, images: images, timeout: timeout, invocation: invocation, diagnostics: &diagnostics, exitStatus: &exitStatus)
+            code = .succeeded
+            return data
+        } catch {
+            code = (error as? Failure)?.diagnosticCode ?? (error is CancellationError ? .cancelled : .generationFailed)
+            throw error
+        }
+    }
+
+    nonisolated private static func classifyFailure(_ diagnostics: Data) -> Failure {
+        let log = String(decoding: diagnostics, as: UTF8.self).lowercased()
+        if ["not logged in", "unauthorized", "authentication failed", "authentication error", "401 unauthorized", "please log in", "please login"].contains(where: log.contains) { return .notLoggedIn }
+        if ["unexpected argument", "unrecognized option", "unknown option"].contains(where: log.contains) { return .incompatibleCLI }
+        if log.contains("image_gen") && ["not available", "unavailable", "not found", "not supported"].contains(where: log.contains) { return .toolUnavailable }
+        if ["dns error", "failed to lookup", "connection refused", "connection reset", "network is unreachable", "network access is disabled", "error sending request", "failed to connect", "tls handshake"].contains(where: log.contains) { return .networkUnavailable }
+        return .generationFailed
+    }
+
+    nonisolated private static func executeRequest(executable: URL, prompt: String, workspace: URL, schema: URL?, images: [URL], timeout: TimeInterval, invocation: Invocation, diagnostics: inout Data, exitStatus: inout Int32?) throws -> Data {
         try Task.checkCancellation()
         let result = workspace.appendingPathComponent("codex-result-\(UUID().uuidString).json")
         let resultFD = open(result.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600)
@@ -168,22 +196,27 @@ final class CodexTravelExecutor {
                 if diagnostics.count > 65536 { diagnostics.removeFirst(diagnostics.count - 65536) }
             }
             if let status = try invocation.poll() {
-                guard status == 0 else {
-                    let log = String(decoding: diagnostics, as: UTF8.self).lowercased()
-                    if ["not logged in", "unauthorized", "authentication", "401", "please log in", "please login"].contains(where: log.contains) { throw Failure.notLoggedIn }
-                    throw Failure.generationFailed
+                // Reap can race the final stderr write; drain the remaining bounded
+                // pipe bytes before classifying the failure.
+                for _ in 0..<8 {
+                    let count = read(output[0], &buffer, buffer.count)
+                    if count <= 0 { break }
+                    diagnostics.append(contentsOf: buffer.prefix(count))
+                    if diagnostics.count > 65536 { diagnostics.removeFirst(diagnostics.count - 65536) }
                 }
+                exitStatus = status
+                guard status == 0 else { throw classifyFailure(diagnostics) }
                 break
             }
             Thread.sleep(forTimeInterval: 0.01)
         }
-        let descriptor = open(result.path, O_RDONLY | O_NOFOLLOW)
-        guard descriptor >= 0 else { throw Failure.generationFailed }
+        let descriptor = open(result.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { throw Failure.invalidOutput }
         defer { close(descriptor) }
         var info = stat()
-        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size > 0, info.st_size <= 4 * 1024 * 1024 else { throw Failure.generationFailed }
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size > 0, info.st_size <= 4 * 1024 * 1024 else { throw Failure.invalidOutput }
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
-        guard let data = try? handle.read(upToCount: 4 * 1024 * 1024 + 1), data.count <= 4 * 1024 * 1024, !data.isEmpty else { throw Failure.generationFailed }
+        guard let data = try? handle.read(upToCount: 4 * 1024 * 1024 + 1), data.count <= 4 * 1024 * 1024, !data.isEmpty else { throw Failure.invalidOutput }
         return data
     }
     /// Serializes spawn, reaping and application-exit cancellation to avoid PID reuse races.

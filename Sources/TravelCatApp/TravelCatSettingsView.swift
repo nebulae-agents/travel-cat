@@ -122,6 +122,7 @@ final class TravelCatEnvironment: ObservableObject {
     let repository: TravelRepository
     let model: AppModel
     let settingsStore: TravelSettingsStore
+    let homeLocation: HomeLocationController
     let notificationService: NotificationService
     let bubbleController: PetTravelBubbleController
     let statusToastController: TravelStatusToastController
@@ -138,6 +139,29 @@ final class TravelCatEnvironment: ObservableObject {
     @Published var automaticTravel: AutomaticTravelController?
     @Published var generationServices: GenerationServiceController?
     var openGenerationSetup: () -> Void = {}
+    var postcardBacklogRecovered: () -> Void = {}
+    @Published var recoveryNotice: String?
+    @Published var latestCodexDiagnostic: CodexGenerationDiagnostic?
+
+    func refreshCodexDiagnostic() {
+        latestCodexDiagnostic = CodexGenerationDiagnosticStore.applicationStore().latest()
+    }
+
+    func recoverPostcardBacklog() {
+        // Pause and persist before restoring uncertain work; restoring never starts a model call.
+        settings.automaticTravelEnabled = false
+        saveSettings()
+        guard !effectiveSettings.automaticTravelEnabled else { return }
+        do {
+            _ = try PostcardBacklogStore(root: repository.root).recoverFromBackup()
+            postcardBacklogRecovered()
+            recoveryNotice = "补卡记录已从安全副本恢复，损坏原文件已保留。自动旅行已暂停；请检查相册，按需手动重试或重新开启旅行。"
+            errorMessage = nil
+        } catch {
+            recoveryNotice = nil
+            errorMessage = "未恢复：当前记录可能正常，或没有可验证的安全副本。原始数据已保留，自动旅行保持暂停。"
+        }
+    }
 
     var effectiveSettings: TravelSettings { settingsLifecycle.effectiveSettings }
     var lastPersistedSettings: TravelSettings { settingsLifecycle.lastPersistedSettings }
@@ -155,6 +179,7 @@ final class TravelCatEnvironment: ObservableObject {
         promptStateChanged: @escaping () -> Void
     ) throws {
         self.repository = repository
+        homeLocation = HomeLocationController(store: HomeLocationStore(root: repository.root))
         self.model = model
         self.settings = settings
         let characterConfiguration: CharacterConfigurationResponse
@@ -372,9 +397,19 @@ struct TravelCatSettingsView: View {
             CharacterSettingsSection(environment: environment, model: environment.model)
             Section("模型与连接") {
                 Button("配置文字与图片服务…") { environment.openGenerationSetup() }
+                if let diagnostic = environment.latestCodexDiagnostic {
+                    Text(diagnostic.userMessage).font(.caption)
+                    Text(diagnostic.recordedAt, style: .time).font(.caption2).foregroundStyle(.secondary)
+                }
+                Button("刷新最近 Codex 诊断") { environment.refreshCodexDiagnostic() }
+                Text("仅保存最近一次调用的错误类别和时间，不保存日记、图片、密钥或原始日志。")
+                    .font(.caption).foregroundStyle(.secondary)
                 if let services = environment.generationServices {
                     GenerationReadinessView(controller: services)
                 }
+            }
+            Section("家的城市") {
+                HomeLocationSettingsView(controller: environment.homeLocation)
             }
             Section("旅行") {
                 Toggle("自动旅行", isOn: $environment.settings.automaticTravelEnabled)
@@ -430,6 +465,12 @@ struct TravelCatSettingsView: View {
                 Text("所有旅程和明信片持续保留，新旅行不会清空旧相册。")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("导出备份…") { environment.exportData() }
+                if environment.model.postcardWorkError != nil {
+                    Text("补卡记录读取异常。恢复会暂停自动旅行，并保留损坏原文件；恢复后的未完成任务需要手动处理。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("暂停旅行并从安全副本恢复补卡记录") { environment.recoverPostcardBacklog() }
+                }
+                if let notice = environment.recoveryNotice { Text(notice).font(.caption) }
             }
             if let message = environment.errorMessage {
                 Text(message).foregroundStyle(.red).textSelection(.enabled)
@@ -439,6 +480,7 @@ struct TravelCatSettingsView: View {
         .padding(20)
         .frame(width: 480)
         .frame(minHeight: 520)
+        .onAppear { environment.refreshCodexDiagnostic() }
         .onChange(of: environment.settings) { _, _ in environment.saveSettings() }
         .onAppear { environment.refreshCharacterConfiguration() }
         .alert("清除所有旅行历史？", isPresented: $confirmsClear) {
@@ -523,5 +565,50 @@ struct AutomaticTravelStatusView: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+@MainActor
+private struct HomeLocationSettingsView: View {
+    @ObservedObject var controller: HomeLocationController
+    @State private var manualCity = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(controller.state.location?.displayName ?? "尚未设置；故事不会猜测家的城市")
+                .font(.headline)
+            if let location = controller.state.location {
+                Text(location.source == .manual ? "来源：手动确认" : "来源：IP 城市定位 · ipwho.is")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("IP 定位反映网络出口，可能受代理、VPN 或运营商影响，不等于实际住址。手动城市不会被自动覆盖。")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("允许通过 ipwho.is 进行 IP 城市定位", isOn: Binding(
+                get: { controller.state.ipLookupEnabled },
+                set: { enabled in
+                    controller.setIPLookupEnabled(enabled)
+                    if enabled { Task { await controller.refresh() } }
+                }
+            ))
+            Text("启用后该服务会看到请求的公网 IP；本应用只保存城市和来源，不保存 IP 地址。")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("按当前 IP 重新定位") { Task { await controller.refresh(force: true) } }
+                    .disabled(controller.isLocating || !controller.state.ipLookupEnabled)
+                if controller.isLocating { ProgressView().controlSize(.small) }
+            }
+            if let candidate = controller.proposedLocation {
+                Text("IP 候选：\(candidate.displayName)").font(.callout)
+                Button("将家的城市改为“\(candidate.city)”") { controller.useProposedLocation() }
+            }
+            HStack {
+                TextField("手动填写实际家的城市", text: $manualCity)
+                Button("保存城市") { controller.setManualCity(manualCity) }
+                    .disabled(manualCity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let message = controller.message { Text(message).font(.caption).foregroundStyle(.secondary) }
+            if let error = controller.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
+        }
+        .onAppear { manualCity = controller.state.location?.city ?? "" }
     }
 }

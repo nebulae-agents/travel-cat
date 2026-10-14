@@ -327,6 +327,12 @@ public final class TravelRepository: @unchecked Sendable {
         }
     }
 
+    private func backlogRecoveryFiles() throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("state").path)
+            .filter { $0 == "postcard-backlog.backup.json" || ($0.hasPrefix("postcard-backlog.recovery-") && $0.hasSuffix(".json")) }
+            .map { "state/" + $0 }
+    }
+
     public func export(to destination: URL) throws -> URL {
         try withExclusiveLock {
             let fileManager = FileManager.default
@@ -341,6 +347,7 @@ public final class TravelRepository: @unchecked Sendable {
             for relative in [
                 "state/current-trip.json",
                 "state/settings.json",
+                "state/home-location.json",
                 "state/home-care.json",
                 "state/image-retries.json",
                 "state/postcard-backlog.json",
@@ -348,7 +355,7 @@ public final class TravelRepository: @unchecked Sendable {
                 "state/active-character.json",
                 "state/frozen-character.json",
                 "journal/events.jsonl",
-            ] {
+            ] + (try backlogRecoveryFiles()) {
                 let source = root.appendingPathComponent(relative)
                 try copyOptionalRegularFile(source, to: temporary.appendingPathComponent(relative))
             }
@@ -379,6 +386,7 @@ public final class TravelRepository: @unchecked Sendable {
             try fileManager.createDirectory(at: stagedBackup.appendingPathComponent("state"), withIntermediateDirectories: true)
             defer { try? fileManager.removeItem(at: stagedBackup) }
             try fileManager.createDirectory(at: stagedBackup.appendingPathComponent("journal"), withIntermediateDirectories: true)
+            let recoveryFiles = try backlogRecoveryFiles()
             for relative in [
                 "state/current-trip.json",
                 "state/settings.json",
@@ -388,7 +396,7 @@ public final class TravelRepository: @unchecked Sendable {
                 "state/active-character.json",
                 "state/frozen-character.json",
                 "journal/events.jsonl",
-            ] {
+            ] + recoveryFiles {
                 if relative == "state/frozen-character.json", !hasCharacterAnchor { continue }
                 try copyOptionalRegularFile(
                     root.appendingPathComponent(relative),
@@ -404,6 +412,9 @@ public final class TravelRepository: @unchecked Sendable {
                 to: stagedBackup.appendingPathComponent("characters", isDirectory: true),
                 skippingTransientFiles: false
             )
+            let previousRecoveryFiles = try recoveryFiles.map { relative in
+                (relative, try Data(contentsOf: stagedBackup.appendingPathComponent(relative)))
+            }
             let previousSnapshot = try Data(contentsOf: stagedBackup.appendingPathComponent("state/current-trip.json"))
             let previousJournal = try Data(contentsOf: stagedBackup.appendingPathComponent("journal/events.jsonl"))
             let backlogURL = root.appendingPathComponent("state/postcard-backlog.json")
@@ -424,6 +435,7 @@ public final class TravelRepository: @unchecked Sendable {
                 try writer.write(JSONEncoder.travelCat.encode(TripSnapshot.empty(now: now)), to: snapshotURL)
                 if fileManager.fileExists(atPath: automationURL.path) { try fileManager.removeItem(at: automationURL) }
                 if fileManager.fileExists(atPath: backlogURL.path) { try fileManager.removeItem(at: backlogURL) }
+                for relative in recoveryFiles { try fileManager.removeItem(at: root.appendingPathComponent(relative)) }
                 try writer.write(Data(), to: journalURL)
                 try writer.write(JSONEncoder.travelCat.encode(ImageRetryStore()), to: imageRetryURL)
                 if hasCharacterAnchor { try fileManager.removeItem(at: characterAnchorURL) }
@@ -432,6 +444,7 @@ public final class TravelRepository: @unchecked Sendable {
                 try fileManager.removeItem(at: old)
             } catch {
                 let resetError = error
+                for (relative, data) in previousRecoveryFiles { try? writer.write(data, to: root.appendingPathComponent(relative)) }
                 if let previousAutomation { try? writer.write(previousAutomation, to: automationURL) }
                 if let previousBacklog { try? writer.write(previousBacklog, to: backlogURL) }
                 try? writer.write(previousSnapshot, to: snapshotURL)
@@ -1158,11 +1171,12 @@ public final class TravelRepository: @unchecked Sendable {
         try validateReadyImage(path, tripID: tripID, allowLegacyStoredPath: true)
     }
 
-    private func validateReadyImage(
-        _ path: String?,
-        tripID: UUID,
-        allowLegacyStoredPath: Bool
-    ) throws -> ValidatedImage {
+    /// Structural validation is independent of whether the asset is still present.
+    static func validateReadyImagePath(_ path: String?, tripID: UUID) throws {
+        _ = try readyImagePathComponents(path, tripID: tripID, allowLegacyStoredPath: false)
+    }
+
+    private static func readyImagePathComponents(_ path: String?, tripID: UUID, allowLegacyStoredPath: Bool) throws -> (String, String, String, String) {
         guard let path else { throw RepositoryError.unsafePostcardPath }
         let components = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         let tripComponent = tripID.uuidString.lowercased()
@@ -1197,6 +1211,15 @@ public final class TravelRepository: @unchecked Sendable {
         guard extensionName == "png" || extensionName == "webp" else {
             throw RepositoryError.invalidImageResult
         }
+        return (path, directoryComponent, filename, extensionName)
+    }
+
+    private func validateReadyImage(
+        _ path: String?,
+        tripID: UUID,
+        allowLegacyStoredPath: Bool
+    ) throws -> ValidatedImage {
+        let (path, directoryComponent, filename, extensionName) = try Self.readyImagePathComponents(path, tripID: tripID, allowLegacyStoredPath: allowLegacyStoredPath)
         let rootDescriptor = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         guard rootDescriptor >= 0 else { throw RepositoryError.unsafePostcardPath }
         var parents = [rootDescriptor]
@@ -1216,7 +1239,7 @@ public final class TravelRepository: @unchecked Sendable {
         var tripInfo = stat()
         guard fstat(tripDescriptor, &tripInfo) == 0,
               (tripInfo.st_mode & S_IFMT) == S_IFDIR else { try fail(.unsafePostcardPath) }
-        let descriptor = openat(tripDescriptor, filename, O_RDONLY | O_NOFOLLOW)
+        let descriptor = openat(tripDescriptor, filename, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else { try fail(.invalidImageResult) }
         var info = stat()
         guard fstat(descriptor, &info) == 0,
@@ -1784,6 +1807,7 @@ public final class TravelRepository: @unchecked Sendable {
                   continuityReferences: event.continuityReferences, openHook: event.openHook,
                   consumedItemID: event.consumedItemID, postcardStatus: event.postcardStatus,
                   postcardRelativePath: event.postcardRelativePath,
-                  characterProfile: profile == .defaultBlackCat ? nil : profile)
+                  characterProfile: profile == .defaultBlackCat ? nil : profile,
+                  postcardStyleVersion: event.postcardStyleVersion)
     }
 }

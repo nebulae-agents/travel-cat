@@ -42,7 +42,7 @@ final class ConfiguredTravelContentGenerator: TravelContentGenerating {
         let service = config.image
         if service.kind == .codex { return try await codex.image(for: work, in: workspace) }
         let event = try JSONEncoder.travelCat.encode(work.event)
-        let data = try await generateImage(service: service, scene: String(decoding: event, as: UTF8.self))
+        let data = try await generateImage(service: service, scene: String(decoding: event, as: UTF8.self), event: work.event)
         try Task.checkCancellation()
         let target = workspace.appendingPathComponent("postcard.png")
         try data.write(to: target, options: .atomic)
@@ -50,12 +50,13 @@ final class ConfiguredTravelContentGenerator: TravelContentGenerating {
     }
 
     func generateImage(service: TravelServiceConfiguration, scene: String, apiKey: String? = nil,
-                       useStoredCredential: Bool = true) async throws -> Data {
+                       useStoredCredential: Bool = true, event: TripEvent? = nil) async throws -> Data {
         try service.validate()
         let references = service.useImageEdits ? try ["front.png", "side.png", "sitting.png"].map(resource) : []
         let key = useStoredCredential ? try credentials.read(id: service.credentialID) : apiKey
+        let imagePrompt = event.map { TravelGenerationPrompts.image(for: $0) } ?? TravelGenerationPrompts.image
         return try await client.image(baseURL: service.validatedBaseURL(), model: service.model, apiKey: key,
-                                      prompt: (service.useImageEdits ? TravelGenerationPrompts.image : TravelGenerationPrompts.image.replacingOccurrences(of: "Preserve the attached cat identity.", with: "Follow this cat description consistently.")) + "\nSCENE JSON:\n" + scene,
+                                      prompt: (service.useImageEdits ? imagePrompt : imagePrompt.replacingOccurrences(of: "Preserve the attached cat identity.", with: "Follow this cat description consistently.")) + "\nSCENE JSON:\n" + scene,
                                       referenceImages: references, useEdits: service.useImageEdits)
     }
 
