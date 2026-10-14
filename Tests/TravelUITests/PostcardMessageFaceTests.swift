@@ -42,19 +42,42 @@ final class PostcardMessageFaceTests: XCTestCase {
         XCTAssertFalse(label.contains("1970"), "The event publication date is not an inferred travel date")
     }
 
+    func testRecordedDateGlyphsStayDistinctAtBothCardSizesAndEveryFare() throws {
+        let date = try XCTUnwrap(Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 1, hour: 12)))
+        let event = postcard(location: .init(country: "中国", city: "佛山", place: "岭南天地巷口的木窗旁"))
+        for (city, country) in [("佛山", "中国"), ("广州", "中国"), ("北京", "中国"), ("巴黎", "法国")] {
+            let home = HomeLocation(country: country, city: city, source: .manual, updatedAt: date)
+            for width in [320.0, 640.0] {
+                let draw: (Date?) throws -> CGImage = { value in
+                    try self.raster(PostcardMessageFaceView(event: event, travelDate: value,
+                                                           homeLocation: home), width: width)
+                }
+                try PostcardRasterEvidence.assertRecordedDay(draw(date), date: date, render: draw)
+            }
+        }
+    }
+
     func testKnownTravelDateIsReadableAtCompactAndLargeSizes() throws {
         let date = try XCTUnwrap(Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 1, hour: 12)))
+        let event = postcard()
         for width in [320.0, 640.0] {
-            let (image, observations) = try render(PostcardMessageFaceView(event: postcard(), travelDate: date), width: width)
+            let (image, observations) = try render(PostcardMessageFaceView(event: event, travelDate: date), width: width)
+            try PostcardRasterEvidence.assertRecordedDay(image, date: date) { value in
+                try self.raster(PostcardMessageFaceView(event: event, travelDate: value), width: width)
+            }
             try png(image).write(to: URL(fileURLWithPath: "/tmp/travelcat-message-date-\(Int(width)).png"))
+            try PostcardRasterEvidence.write(PostcardRasterEvidence.postmark(image),
+                                             tag: "date-known-\(Int(width))")
+            // OCR may read 01 as 02/04 on older Vision models. Use it for line
+            // position and legibility; exact day glyphs are checked above.
             let dateLabel = try XCTUnwrap(observations.first {
-                $0.topCandidates(1).first?.string.contains("10.01") == true
+                $0.topCandidates(1).first?.string.contains("10.") == true
             })
             XCTAssertGreaterThan(dateLabel.boundingBox.height, 0.025, "Travel date needs readable type")
             XCTAssertGreaterThan(dateLabel.boundingBox.midX, 0.82, "The dated cancellation must be over the upper-right stamp")
             XCTAssertTrue(observations.contains { $0.topCandidates(1).first?.string.contains("2026") == true })
             XCTAssertEqual(observations.filter {
-                $0.topCandidates(1).first?.string.contains("10.01") == true
+                $0.topCandidates(1).first?.string.contains("10.") == true
             }.count, 1)
         }
     }
@@ -71,9 +94,11 @@ final class PostcardMessageFaceTests: XCTestCase {
             for width in [320.0, 640.0] {
                 let (image, observations) = try render(face, width: width)
                 try png(image).write(to: URL(fileURLWithPath: "/tmp/travelcat-stamps-\(expected)-\(Int(width)).png"))
+                try PostcardRasterEvidence.write(PostcardRasterEvidence.postmark(image),
+                                                 tag: "date-fare-\(expected)-\(Int(width))")
                 let text = observations.compactMap { $0.topCandidates(1).first?.string }.joined()
                 XCTAssertTrue(text.contains("2026"), text)
-                XCTAssertTrue(text.contains("10.01"), text)
+                XCTAssertTrue(text.contains("10."), text)
                 XCTAssertTrue(text.contains("旅行伙伴"), text)
                 XCTAssertTrue(text.contains("收件处说明"), text)
                 XCTAssertTrue(text.contains("木窗旁"), text)
@@ -169,10 +194,14 @@ final class PostcardMessageFaceTests: XCTestCase {
             postcardStatus: .pendingImage, postcardRelativePath: nil)
     }
 
-    private func render(_ face: PostcardMessageFaceView, width: CGFloat) throws -> (CGImage, [VNRecognizedTextObservation]) {
+    private func raster(_ face: PostcardMessageFaceView, width: CGFloat) throws -> CGImage {
         let renderer = ImageRenderer(content: face.frame(width: width))
         renderer.scale = 2
-        let image = try XCTUnwrap(renderer.cgImage)
+        return try XCTUnwrap(renderer.cgImage)
+    }
+
+    private func render(_ face: PostcardMessageFaceView, width: CGFloat) throws -> (CGImage, [VNRecognizedTextObservation]) {
+        let image = try raster(face, width: width)
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["zh-Hans", "en-US"]
