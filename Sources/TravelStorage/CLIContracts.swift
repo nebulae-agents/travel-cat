@@ -17,6 +17,9 @@ public enum TravelCLICommand: String, Equatable, Sendable {
     case character
     case configureCharacter = "configure-character"
     case installDefaultPet = "install-default-pet"
+    // Manual artwork maintenance is deliberately excluded from scheduled launchers.
+    case artworkCandidates = "artwork-candidates"
+    case installArtwork = "install-artwork"
 
     public static func parse(arguments: [String]) throws -> TravelCLICommand {
         guard arguments.count == 1,

@@ -11,7 +11,7 @@ public struct PostcardSceneStyle: Equatable, Sendable {
     public let compositionVariant: Int
 
     public static func resolve(event: TripEvent) -> PostcardSceneStyle? {
-        guard event.postcardStyleVersion == 1 else { return nil }
+        guard let version = event.postcardStyleVersion, (1...4).contains(version) else { return nil }
         let category = classify(event.location?.place ?? "")
             ?? classify(event.summary)
             ?? .everyday

@@ -34,6 +34,20 @@ final class PostcardSceneStyleTests: XCTestCase {
         XCTAssertNil(PostcardSceneStyle.resolve(event: try styledEvent(place: "西湖", version: 99)))
     }
 
+    func testVersionTwoKeepsTheSameStableSceneAndComposition() throws {
+        let original = try styledEvent(place: "阿尔卑斯山", version: 1)
+        let improved = try styledEvent(place: "阿尔卑斯山", version: 2)
+        XCTAssertNotNil(PostcardSceneStyle.resolve(event: improved))
+        XCTAssertEqual(PostcardSceneStyle.resolve(event: improved), PostcardSceneStyle.resolve(event: original))
+    }
+
+    func testVersionFourKeepsVersionThreeSceneAndComposition() throws {
+        let previous = try styledEvent(place: "西湖湖岸", version: 3)
+        let latest = try styledEvent(place: "西湖湖岸", version: 4)
+        XCTAssertNotNil(PostcardSceneStyle.resolve(event: latest))
+        XCTAssertEqual(PostcardSceneStyle.resolve(event: latest), PostcardSceneStyle.resolve(event: previous))
+    }
+
     func testUnknownPlaceStillHasStableVariedCompositionAcrossCards() throws {
         var variants = Set<Int>()
         for number in 1...24 {

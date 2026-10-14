@@ -41,6 +41,8 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var presentationReferences: [UUID: PostcardPresentationReference]
     @Published public private(set) var unreadPostcardIDs: [UUID]
     @Published public private(set) var readPostcardIDs: [UUID]
+    @Published public private(set) var favouritePostcardIDs: Set<UUID>
+    @Published public private(set) var postcardRecipient: PostcardRecipientInfo = .empty
     @Published public private(set) var presentation: PetPresentation
     @Published public private(set) var supplyErrorMessage: String?
     @Published public private(set) var characterProfile: CharacterProfile
@@ -55,6 +57,7 @@ public final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let readDefaultsKey: String
+    private var waitingReadIDs: Set<UUID>
     private let persistSupply: SupplyPersistence?
     private let clock: () -> Date
     private var postcardReturnPresentation = PetPresentation.status
@@ -86,11 +89,18 @@ public final class AppModel: ObservableObject {
         self.persistSupply = persistSupply
         self.clock = clock
         readDefaultsKey = Self.readDefaultsScopeKey(dataRoot: dataRoot)
+        if let data = defaults.data(forKey: readDefaultsKey + ".recipient"),
+           let recipient = try? JSONDecoder().decode(PostcardRecipientInfo.self, from: data) {
+            postcardRecipient = recipient.normalized
+        }
         let storedIDs = defaults.stringArray(forKey: readDefaultsKey) ?? []
         readPostcardIDs = storedIDs.compactMap(UUID.init(uuidString:))
+        waitingReadIDs = Set((defaults.stringArray(forKey: readDefaultsKey + ".waiting") ?? []).compactMap(UUID.init(uuidString:)))
+        favouritePostcardIDs = Set((defaults.stringArray(forKey: readDefaultsKey + ".favourites") ?? []).compactMap(UUID.init(uuidString:)))
         unreadPostcardIDs = []
         supplyErrorMessage = nil
         presentation = Self.basePresentation(snapshot.phase)
+        resetNewImageReads()
         refreshUnread()
     }
 
@@ -108,7 +118,8 @@ public final class AppModel: ObservableObject {
     }
 
     public var nextUnreadPostcardID: UUID? {
-        unreadPostcardIDs.first
+        let readyIDs = Set(arrivedEvents().filter { PostcardFace.hasScenery(for: $0) }.map(\.id))
+        return unreadPostcardIDs.first { readyIDs.contains($0) } ?? unreadPostcardIDs.first
     }
 
     public func apply(next: TripSnapshot, events: [TripEvent], presentationReferences: [UUID: PostcardPresentationReference]? = nil, characterProfile: CharacterProfile? = nil) {
@@ -123,9 +134,15 @@ public final class AppModel: ObservableObject {
                 snapshot.carriedItemID = next.carriedItemID
             }
         }
+        for event in events where event.postcardStatus == .ready {
+            if self.events.contains(where: { $0.id == event.id && ($0.postcardStatus != .ready || $0.postcardRelativePath != event.postcardRelativePath) }) {
+                waitingReadIDs.insert(event.id)
+            }
+        }
         self.events = events
         self.presentationReferences = (presentationReferences ?? self.presentationReferences).filter { id, _ in events.contains { $0.id == id } }
         if let characterProfile { self.characterProfile = characterProfile }
+        resetNewImageReads()
         refreshUnread()
         let arrived = arrivedEvents()
         if wasBase {
@@ -177,7 +194,6 @@ public final class AppModel: ObservableObject {
             }
             guard allowedFromStatus || allowedFromAlbum else { return }
             postcardReturnPresentation = allowedFromAlbum ? presentation : .status
-            markRead(id)
             presentation = .postcard(id)
         case let .album(tripID):
             guard case let .postcard(eventID) = presentation,
@@ -244,8 +260,13 @@ public final class AppModel: ObservableObject {
     public func openLatestPostcardFromMenu() {
         openStatusFromMenu()
         guard let id = latestAvailablePostcardID()?.id else { return }
-        markRead(id)
         presentation = .postcard(id)
+    }
+
+    public func openHouseFromDesktop() {
+        openStatusFromMenu()
+        guard let id = nextUnreadPostcardID else { return }
+        handle(.postcard(id))
     }
 
     public func openLatestAlbumFromMenu() {
@@ -266,7 +287,6 @@ public final class AppModel: ObservableObject {
               let event = matchingEvents.first,
               event.tripID == tripID,
               event.postcardStatus == .ready else { return false }
-        markRead(eventID)
         presentation = .postcard(eventID)
         return true
     }
@@ -380,11 +400,51 @@ public final class AppModel: ObservableObject {
         return events.filter { $0.occurredAt <= now }
     }
 
+    /// Called only by a visible scenic face after its image has loaded successfully.
+    public func postcardFrontDidDisplay(_ id: UUID, relativePath: String) {
+        let matching = arrivedEvents().filter { $0.id == id }
+        guard presentation == .postcard(id), matching.count == 1,
+              let event = matching.first, event.postcardStatus == .ready,
+              !relativePath.isEmpty, event.postcardRelativePath == relativePath else { return }
+        markRead(id)
+    }
+
     private func markRead(_ id: UUID) {
         guard !readPostcardIDs.contains(id) else { return }
         readPostcardIDs.append(id)
+        if events.first(where: { $0.id == id })?.postcardStatus != .ready { waitingReadIDs.insert(id) }
+        defaults.set(waitingReadIDs.map(\.uuidString), forKey: readDefaultsKey + ".waiting")
         defaults.set(readPostcardIDs.map(\.uuidString), forKey: readDefaultsKey)
         refreshUnread()
+    }
+
+    private func resetNewImageReads() {
+        let read = Set(readPostcardIDs)
+        let waiting = Set(events.filter { $0.postcardStatus != .ready && read.contains($0.id) }.map(\.id))
+        if !waiting.isSubset(of: waitingReadIDs) {
+            waitingReadIDs.formUnion(waiting)
+            defaults.set(waitingReadIDs.map(\.uuidString).sorted(), forKey: readDefaultsKey + ".waiting")
+        }
+        let newlyReady = Set(events.filter { $0.postcardStatus == .ready }.map(\.id)).intersection(waitingReadIDs)
+        guard !newlyReady.isEmpty else { return }
+        readPostcardIDs.removeAll { newlyReady.contains($0) }
+        waitingReadIDs.subtract(newlyReady)
+        defaults.set(readPostcardIDs.map(\.uuidString), forKey: readDefaultsKey)
+        defaults.set(waitingReadIDs.map(\.uuidString), forKey: readDefaultsKey + ".waiting")
+    }
+
+    public func toggleFavourite(_ id: UUID) {
+        guard arrivedEvents().contains(where: { $0.id == id && $0.postcardStatus == .ready }) else { return }
+        if favouritePostcardIDs.contains(id) { favouritePostcardIDs.remove(id) }
+        else { favouritePostcardIDs.insert(id) }
+        defaults.set(favouritePostcardIDs.map(\.uuidString).sorted(), forKey: readDefaultsKey + ".favourites")
+    }
+
+    public func savePostcardRecipient(_ recipient: PostcardRecipientInfo) {
+        let normalized = recipient.normalized
+        guard let data = try? JSONEncoder().encode(normalized) else { return }
+        defaults.set(data, forKey: readDefaultsKey + ".recipient")
+        postcardRecipient = normalized
     }
 
     nonisolated public static func readDefaultsScopeKey(dataRoot: URL?) -> String {

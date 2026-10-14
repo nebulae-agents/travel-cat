@@ -6,7 +6,7 @@ import TravelUI
 
 @main
 enum TravelCatCLI {
-    private static let usage = "usage: travelcatctl status|journal|claim|publish|pending-images|prepare-postcard|mark-image|validate-candidate|character|configure-character|install-default-pet\n"
+    private static let usage = "usage: travelcatctl status|journal|claim|publish|pending-images|prepare-postcard|mark-image|validate-candidate|character|configure-character|install-default-pet|artwork-candidates|install-artwork\n"
 
     static func main() {
         do {
@@ -21,6 +21,11 @@ enum TravelCatCLI {
                 exit(EX_TEMPFAIL)
             }
             if TravelCLIErrorPolicy.isSilentSuccess(error) {
+                if let command = CommandLine.arguments.dropFirst().first,
+                   [TravelCLICommand.artworkCandidates.rawValue, TravelCLICommand.installArtwork.rawValue].contains(command) {
+                    writeStandardError("travelcatctl: repository busy; retry artwork maintenance\n")
+                    exit(EX_TEMPFAIL)
+                }
                 if Array(CommandLine.arguments.dropFirst()) == [TravelCLICommand.validateCandidate.rawValue] {
                     // No snapshot was safely loaded. -1 is the documented unavailable-version sentinel.
                     try? writeJSON(ValidationResult(
@@ -69,9 +74,20 @@ enum TravelCatCLI {
             ? try PostcardPreparationRequest.decode(readStandardInput(maximumBytes: 65_536))
             : nil
 
+        if command == .artworkCandidates {
+            try writeJSON(PostcardArtworkRevisionStore(root: configuration.root).candidates())
+            return
+        }
+        if command == .installArtwork {
+            let requests = try JSONDecoder.travelCat.decode([PostcardArtworkRevisionRequest].self, from: readStandardInput())
+            try PostcardArtworkRevisionStore(root: configuration.root).install(requests)
+            try writeJSON(["installed": requests.count])
+            return
+        }
         let repository = try TravelRepository(root: configuration.root, clock: FixedClock(now: configuration.now))
 
         switch command {
+        case .artworkCandidates, .installArtwork: break // Handled without bootstrap above.
         case .status:
             try writeJSON(repository.loadSnapshot())
         case .journal:

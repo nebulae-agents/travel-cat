@@ -187,6 +187,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         let scene = OwnedPetSceneView(
             model: model,
             showStatus: { [weak self] in self?.showCurrentJourney() },
+            showHouse: { [weak self] in self?.showHouseArrival() },
             showPostcard: { [weak self] in self?.showLatestPostcard() },
             showAlbum: { [weak self] in self?.showLatestAlbum() },
             showSettings: { [weak self] in self?.showSettings() },
@@ -296,6 +297,14 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         guard let model, hasLatestPostcard else { return }
         model.openLatestPostcardFromMenu()
         show(model: model, size: TravelUtilityWindowController.postcardSize)
+    }
+
+    func showHouseArrival() {
+        guard startupError == nil, let model else { showCurrentJourney(); return }
+        model.openHouseFromDesktop()
+        let size = model.presentation == .status
+            ? TravelUtilityWindowController.statusSize : TravelUtilityWindowController.postcardSize
+        show(model: model, size: size)
     }
 
     func showLatestAlbum() {
@@ -527,6 +536,9 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     private func show(model: AppModel, size: NSSize) {
+        utilityWindowController.setCloseHandler { [weak model] in
+            model?.close()
+        }
         utilityWindowController.show(
             content: AnyView(MenuServiceRootView(
                 model: model,
@@ -714,7 +726,10 @@ struct MenuServiceRootView: View {
                 PostcardView(event: event, rootURL: model.dataRoot, presentationReference: model.presentationReferences[event.id],
                     workItem: model.postcardWorkItems.first { $0.eventID == event.id },
                     travelDate: TripAlbumChronology.dates(events: model.events, workItems: model.postcardWorkItems)[event.id],
-                    retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
+                    retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage,
+                    isFavourite: model.favouritePostcardIDs.contains(event.id), toggleFavourite: { model.toggleFavourite(event.id) },
+                    isUnread: model.unreadPostcardIDs.contains(event.id), recipient: model.postcardRecipient,
+                    onSceneryDisplayed: { model.postcardFrontDidDisplay(event.id, relativePath: $0) }, recipientModel: model) { destination in
                     handlePostcardRoute(destination)
                 }
             } else {
@@ -723,7 +738,8 @@ struct MenuServiceRootView: View {
         case let .album(tripID):
             TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences,
                 workItems: model.postcardWorkItems, retry: model.retryPostcard,
-                error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
+                error: model.postcardWorkError, notice: model.manualRetryMessage,
+                unreadIDs: Set(model.unreadPostcardIDs), favouriteIDs: model.favouritePostcardIDs, recipient: model.postcardRecipient) { destination in
                 handleAlbumRoute(destination)
             }
         case .pet, .awayTag, .supplies:
@@ -859,6 +875,7 @@ private struct OwnedPetSceneView: View {
     @ObservedObject var model: AppModel
     @Environment(\.petPlaybackEnabled) private var playbackEnabled
     let showStatus: () -> Void
+    let showHouse: () -> Void
     let showPostcard: () -> Void
     let showAlbum: () -> Void
     let showSettings: () -> Void
@@ -871,7 +888,7 @@ private struct OwnedPetSceneView: View {
                 PetHouseView(phase: model.snapshot.phase, hasUnreadPostcard: !model.unreadPostcardIDs.isEmpty,
                              isActive: playbackEnabled, reaction: model.homeCareReaction)
                     .contentShape(Rectangle())
-                    .onTapGesture(perform: showStatus)
+                    .onTapGesture(perform: showHouse)
                     .contextMenu {
                         Button("当前状态", action: showStatus)
                         Button("最新明信片", action: showPostcard).disabled(model.latestAvailableTripID() == nil)

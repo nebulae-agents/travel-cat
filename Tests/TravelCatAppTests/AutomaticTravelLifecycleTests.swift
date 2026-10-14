@@ -455,6 +455,39 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(try f.repository.events().last?.id, ids.first)
     }
 
+    func testBackupRecoveryClearsProjectedErrorWithoutChangingJournalOrStartingGeneration() async throws {
+        let f = try LifecycleFixture()
+        defer { f.clean() }
+        try await f.startOnePostcardTrip()
+        let snapshot = try f.repository.loadSnapshot()
+        let events = try f.repository.events()
+        let journalURL = f.root.appendingPathComponent("journal/events.jsonl")
+        let journal = try Data(contentsOf: journalURL)
+        let model = AppModel(snapshot: snapshot, events: events, dataRoot: f.root)
+        var paused = TravelSettings(mode: .fast)
+        paused.automaticTravelEnabled = false
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { paused }, isReady: { true }, now: { f.clock.now })
+        defer { controller.stop() }
+        controller.start()
+        let originalItems = model.postcardWorkItems
+        XCTAssertFalse(originalItems.isEmpty)
+        let calls = f.generator.narrativeCalls + f.generator.imageCalls
+        let damaged = Data("{damaged backlog retained for recovery".utf8)
+        try damaged.write(to: f.root.appendingPathComponent("state/postcard-backlog.json"))
+        controller.refresh()
+        XCTAssertNotNil(model.postcardWorkError)
+        let preserved = try PostcardBacklogStore(root: f.root, clock: f.clock).recoverFromBackup()
+        controller.refresh()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(model.postcardWorkError)
+        XCTAssertEqual(model.postcardWorkItems.map(\.id), originalItems.map(\.id))
+        XCTAssertEqual(try Data(contentsOf: preserved), damaged)
+        XCTAssertEqual(try Data(contentsOf: journalURL), journal)
+        XCTAssertEqual(try f.repository.loadSnapshot(), snapshot)
+        XCTAssertEqual(f.generator.narrativeCalls + f.generator.imageCalls, calls)
+    }
+
     func testQueuedManualRetryResumesOnStartupWhileAutomaticTravelIsPaused() async throws {
         let f = try LifecycleFixture()
         defer { f.clean() }

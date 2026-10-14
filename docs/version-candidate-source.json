@@ -1,0 +1,361 @@
+{
+  "sourceCommittedBaseline": "25c2258",
+  "privateDiffBase": "085170c",
+  "method": "reviewed three-way source transfer; no private Git ancestry",
+  "files": [
+    {
+      "path": "Scripts/prepare-postage-cities.py",
+      "status": "new",
+      "incomingSHA256": "f4ce413885202b02465e645562a417c4739ed5afe8531cbce59f0d7d2cf55960",
+      "publicSHA256": "f4ce413885202b02465e645562a417c4739ed5afe8531cbce59f0d7d2cf55960",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelCatApp/AutomaticTravelWorker.swift",
+      "status": "merged",
+      "incomingSHA256": "689917ee6549113fbcecdd4662f1f2f27ba4f71d058e242e742ea0a56e6d91ed",
+      "publicSHA256": "ab5f7333138a31b95b919bc8c9e0b6704288607de351bd3b5fda2e0f82b6a5d7",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelCatApp/StandalonePetController.swift",
+      "status": "merged",
+      "incomingSHA256": "3b323ce04cceb1320cd1c46920366126e07c9a3e87cb3a5a06ff66b1c898f3a4",
+      "publicSHA256": "e889ebff1664cc6a7f7c57f9d940b4ba355f701362f97eaf9f0ae9bae3d0597b",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelCatApp/TravelCatApp.swift",
+      "status": "conflict",
+      "incomingSHA256": "ad73be8c3918f89f3aa4783a48de32dd6afc283cf0823253e15826f745b81120",
+      "publicSHA256": "68a9c08523d2bc7bd5d1e4525ff5070a0e63064f45c5a36ebc78e9c96d1798ee",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelCatApp/TravelCatSettingsView.swift",
+      "status": "merged",
+      "incomingSHA256": "b61184ab44a3dc153a1459df00d1b633a06ffce152a435c56218c0498f2dfd4e",
+      "publicSHA256": "4c50897b7dd544950ca6952dfcdccc3c576e19dcfe1f20d5b724a3c0804867ed",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelCatApp/TravelGenerationPrompts.swift",
+      "status": "updated",
+      "incomingSHA256": "c94397e075bfe96d514a3f0c367cefbff8f07c4874100f5b7ac7352947053932",
+      "publicSHA256": "c94397e075bfe96d514a3f0c367cefbff8f07c4874100f5b7ac7352947053932",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelCatCLI/main.swift",
+      "status": "conflict",
+      "incomingSHA256": "6ba4a75c84fff914d2406cb98294702d0c20aafe8e688aeacde87fc02b5bab2d",
+      "publicSHA256": "df8e03597142af479fd22e24d0f933bf326db4e8b7118264c4850f6a4b51b965",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelCore/PostcardSceneStyle.swift",
+      "status": "updated",
+      "incomingSHA256": "3f6173a2050a686979d947705614632402c6457aaf575fd85ce08f8cc0a030ae",
+      "publicSHA256": "3f6173a2050a686979d947705614632402c6457aaf575fd85ce08f8cc0a030ae",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelCore/TravelStoryMemory.swift",
+      "status": "new",
+      "incomingSHA256": "fc31a4031032c79b3bb8b0ea45526223894da62df656d25bc5fc678f673edc44",
+      "publicSHA256": "fc31a4031032c79b3bb8b0ea45526223894da62df656d25bc5fc678f673edc44",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelStorage/AgentEventEnvelope.swift",
+      "status": "updated",
+      "incomingSHA256": "e7b4816493dcc0bd049e71b6784f09d552fc8d53596a7a6f3629e18dafbb7ff0",
+      "publicSHA256": "e7b4816493dcc0bd049e71b6784f09d552fc8d53596a7a6f3629e18dafbb7ff0",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelStorage/CLIContracts.swift",
+      "status": "conflict",
+      "incomingSHA256": "bf3c05d56a3a7f45cf2c46e5005d95af2fa1c1aac51547fff45d4526f439df7c",
+      "publicSHA256": "4651f3e58e9004ad39d469ac899c277852a31e3b014cd32e9e662ddd19a02b72",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelStorage/PostcardArtworkRevisionStore.swift",
+      "status": "new",
+      "incomingSHA256": "5cc708396840b8ee600ae487a8dd47077c79a260819d4eb8d36b7282b2048a93",
+      "publicSHA256": "c51dfc7fb07f976f87fac475fa5a8846c1245adc2d05224348f5cd13363c63ac",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelStorage/TravelRepository.swift",
+      "status": "conflict",
+      "incomingSHA256": "92d317ff6e7705235c296789c4ed166c8e998bd2137de52197263a1e2edef54c",
+      "publicSHA256": "e55544b27179078805a77cae9ba2a92971443a0eb59ba9de8bd248f3e9c2e3f3",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelUI/AppModel.swift",
+      "status": "conflict",
+      "incomingSHA256": "d8a5af1955683dea74e292628ad5ee28bcdd03812c6d85013e42c19581798d30",
+      "publicSHA256": "67e2e5e0e96678f13d78752de6c1af2f9c7c03f11ee8b47b1fc6342afd0154e9",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelUI/PetHouseView.swift",
+      "status": "updated",
+      "incomingSHA256": "7768d0637dd5e62d1891739345496b67e1d83e62fc2f16c03d0b118568606ae9",
+      "publicSHA256": "7768d0637dd5e62d1891739345496b67e1d83e62fc2f16c03d0b118568606ae9",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/PostcardArtworkView.swift",
+      "status": "conflict",
+      "incomingSHA256": "e45c025b3d1beb43e4855d8f90ceec46a0d71e9df7fdaae045e5ac779db6e5be",
+      "publicSHA256": "6e366c20e1c9dabd0413562ef6196d310a58d99b36216e4077e0a85ac25c97e1",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelUI/PostcardEnvelopeView.swift",
+      "status": "new",
+      "incomingSHA256": "71c9ec5a19897b8e5ca93f764bdecfcfe7bbdb0862c3c2f4d704f568cb13ea7f",
+      "publicSHA256": "71c9ec5a19897b8e5ca93f764bdecfcfe7bbdb0862c3c2f4d704f568cb13ea7f",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/PostcardExporter.swift",
+      "status": "new",
+      "incomingSHA256": "b2c8eed19ce8f6a3bf121b8b51361f01918023018e0b71ee5d5dcdc9be8b03ab",
+      "publicSHA256": "b2c8eed19ce8f6a3bf121b8b51361f01918023018e0b71ee5d5dcdc9be8b03ab",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/PostcardMessageFaceView.swift",
+      "status": "new",
+      "incomingSHA256": "8ee4ac2228a643eeb42b96b4edd2dc5817392e5954f096d0d3c666a2bb2f4925",
+      "publicSHA256": "8ee4ac2228a643eeb42b96b4edd2dc5817392e5954f096d0d3c666a2bb2f4925",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/PostcardPostage.swift",
+      "status": "new",
+      "incomingSHA256": "4764525051e5ce6a543323f5207ce2554703186e6c2edf4da0f97424cfad5f2d",
+      "publicSHA256": "4764525051e5ce6a543323f5207ce2554703186e6c2edf4da0f97424cfad5f2d",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/PostcardPostageView.swift",
+      "status": "new",
+      "incomingSHA256": "83482a27eee9d19b14cc861ac0d83a8104226f63e47ad66f21fc79a7d5e8615f",
+      "publicSHA256": "83482a27eee9d19b14cc861ac0d83a8104226f63e47ad66f21fc79a7d5e8615f",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/PostcardRecipientEditor.swift",
+      "status": "new",
+      "incomingSHA256": "52f591d266c8906b44e006b8adad2bed6328716abae9dceb41c95e590cca2154",
+      "publicSHA256": "52f591d266c8906b44e006b8adad2bed6328716abae9dceb41c95e590cca2154",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/PostcardRecipientInfo.swift",
+      "status": "new",
+      "incomingSHA256": "3fbeb57dfc072a726e6aa79948ef85217d7172d3090098c6b6e701583105d476",
+      "publicSHA256": "3fbeb57dfc072a726e6aa79948ef85217d7172d3090098c6b6e701583105d476",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/PostcardScenicFaceView.swift",
+      "status": "new",
+      "incomingSHA256": "9b6a01513415c81f7f7afd6a55e94c8e7e224fdced8bf78a768e7533575df86f",
+      "publicSHA256": "8cc7ea9741e35a2aaf35f0ce435dd3104870b545678565da0af046ace8803393",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Sources/TravelUI/PostcardTwoSidedView.swift",
+      "status": "new",
+      "incomingSHA256": "4d75108fcc8aee61180257f275a70e80046972f02447fa6d0efb4d4de2e1993e",
+      "publicSHA256": "4d75108fcc8aee61180257f275a70e80046972f02447fa6d0efb4d4de2e1993e",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/Resources/Postage/GEONAMES_NOTICES.md",
+      "status": "new",
+      "incomingSHA256": "5c7752eab67e19acb692068d319662f49257e7ad34251f06980e5d36358ae62c",
+      "publicSHA256": "5c7752eab67e19acb692068d319662f49257e7ad34251f06980e5d36358ae62c",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/Resources/Postage/cities.tsv",
+      "status": "new",
+      "incomingSHA256": "554fb96fb131829d9db02363df721116492f2578e7d17aae73b5544f4a189180",
+      "publicSHA256": "554fb96fb131829d9db02363df721116492f2578e7d17aae73b5544f4a189180",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Sources/TravelUI/TravelViews.swift",
+      "status": "conflict",
+      "incomingSHA256": "9d6626e48fadd7913c09905380a96fddb63fff45542de92fc78f85d54cc3270a",
+      "publicSHA256": "2d7115912547635bdfc25211e5f929d09ffbfa67abbcfba7c742b521a27d723d",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Tests/Fixtures/TravelGenerationPrompts/README.md",
+      "status": "new",
+      "incomingSHA256": "4355e491127a3160093518d045bb2c9931f4f629c177942963ab4d35689e042f",
+      "publicSHA256": "4355e491127a3160093518d045bb2c9931f4f629c177942963ab4d35689e042f",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/Fixtures/TravelGenerationPrompts/generate.py",
+      "status": "new",
+      "incomingSHA256": "f823b9b7c4791e2665401c22b22f2b0ee490aee66d354474dfb90ff52bd16934",
+      "publicSHA256": "f823b9b7c4791e2665401c22b22f2b0ee490aee66d354474dfb90ff52bd16934",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/Fixtures/TravelGenerationPrompts/historical-image-prompts.json",
+      "status": "new",
+      "incomingSHA256": "fb34ad0698b940e4bb3fabd03510697e191256ece54793c0db6559175072d828",
+      "publicSHA256": "fb34ad0698b940e4bb3fabd03510697e191256ece54793c0db6559175072d828",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelCatAppTests/AutomaticTravelLifecycleTests.swift",
+      "status": "conflict",
+      "incomingSHA256": "5a2487258fff9c211997a8bd1864fb391e2d3067fb2e540b7a0755a16b8be1c9",
+      "publicSHA256": "3a278203d4af4406a5a69d34bff5899ae11a859baccb0c13dbd44b94cd4c045a",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Tests/TravelCatAppTests/GenerationServiceControllerTests.swift",
+      "status": "updated",
+      "incomingSHA256": "6edbb0127a922b96e7bfba11023e477b72cf3d3c0b625940bdaacf587a22f330",
+      "publicSHA256": "6edbb0127a922b96e7bfba11023e477b72cf3d3c0b625940bdaacf587a22f330",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelCatAppTests/LandmarkPostcardAcceptanceTests.swift",
+      "status": "new",
+      "incomingSHA256": "482e4a0564f36cecf9155adbb7e28a09ebd3dea89bd230ec7f3181880ce51cbd",
+      "publicSHA256": "482e4a0564f36cecf9155adbb7e28a09ebd3dea89bd230ec7f3181880ce51cbd",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelCatAppTests/NativeProviderConnectionTests.swift",
+      "status": "new",
+      "incomingSHA256": "b4dc07b60fb775b3aa6bd7145cb1563c6e641d4722c371214d18f4497656a12c",
+      "publicSHA256": "b4dc07b60fb775b3aa6bd7145cb1563c6e641d4722c371214d18f4497656a12c",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelCatAppTests/StandalonePetControllerTests.swift",
+      "status": "updated",
+      "incomingSHA256": "f7cf0cc0e6cee1f5b820aba07961d6e6ecac454c3c1e16e43872aa54323f5fbb",
+      "publicSHA256": "f7cf0cc0e6cee1f5b820aba07961d6e6ecac454c3c1e16e43872aa54323f5fbb",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelCatAppTests/TravelGenerationPromptSnapshotTests.swift",
+      "status": "new",
+      "incomingSHA256": "b84e4ba94b0d77b0c61bcc1fd188c84e0730794e47d84744ca685eebce661c46",
+      "publicSHA256": "b84e4ba94b0d77b0c61bcc1fd188c84e0730794e47d84744ca685eebce661c46",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelCatAppTests/TravelGenerationPromptStyleTests.swift",
+      "status": "updated",
+      "incomingSHA256": "51f4e5053521af303690e1bfbe8d54fd4546413617329006c0a148e69a9b58eb",
+      "publicSHA256": "51f4e5053521af303690e1bfbe8d54fd4546413617329006c0a148e69a9b58eb",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelCatAppTests/TravelStoryMemoryRequestTests.swift",
+      "status": "new",
+      "incomingSHA256": "0e910cb25bbd87049af6992002886254906d8be212441c9a1e847d8cf6de1f86",
+      "publicSHA256": "0e910cb25bbd87049af6992002886254906d8be212441c9a1e847d8cf6de1f86",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelCoreTests/PostcardSceneStyleTests.swift",
+      "status": "updated",
+      "incomingSHA256": "ac4ea36b790497b8d6e9dbb43e68f68119cfef524f517247db601d476f5b0736",
+      "publicSHA256": "ac4ea36b790497b8d6e9dbb43e68f68119cfef524f517247db601d476f5b0736",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelStorageTests/PostcardArtworkRevisionTests.swift",
+      "status": "new",
+      "incomingSHA256": "cfa0d9bf4ef5a1c2fee8ee04089f79d5ec1794838c3a02b56e2058d149040ea6",
+      "publicSHA256": "e4797910c8f316fecb89d9e2771748284539e2065d59bceea39684b287dd4dfb",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Tests/TravelStorageTests/PostcardStylePersistenceTests.swift",
+      "status": "updated",
+      "incomingSHA256": "137d03bab053fb50f1b5d376d9eec6c7d25f7983a6c24002e74d19ce2465efef",
+      "publicSHA256": "137d03bab053fb50f1b5d376d9eec6c7d25f7983a6c24002e74d19ce2465efef",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelUITests/AppModelTests.swift",
+      "status": "conflict",
+      "incomingSHA256": "8b0e387930fe39013af19051850eee948f2d2893bec32d021891a171b60f05b2",
+      "publicSHA256": "74ff52315a460b39f3263526211f95a8ac344fdd37363bc7a698c6aa99c4e104",
+      "adaptedForPublicCompatibility": true
+    },
+    {
+      "path": "Tests/TravelUITests/PostcardArtworkIdentityTests.swift",
+      "status": "new",
+      "incomingSHA256": "e1729b258ac8f684c15bf9e7909c99bb5ed9e4035186f96a64ab9c6c69dc9411",
+      "publicSHA256": "e1729b258ac8f684c15bf9e7909c99bb5ed9e4035186f96a64ab9c6c69dc9411",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelUITests/PostcardLibraryTests.swift",
+      "status": "new",
+      "incomingSHA256": "e011aea506f7adbfebdad5dda3098f95c520af043e8d1556566a4a3fec195e6b",
+      "publicSHA256": "e011aea506f7adbfebdad5dda3098f95c520af043e8d1556566a4a3fec195e6b",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelUITests/PostcardMessageFaceTests.swift",
+      "status": "new",
+      "incomingSHA256": "e77bbf975da52c8c0cfdc429fde350b6ab817d2d031433eb2339c7ae04171c8e",
+      "publicSHA256": "e77bbf975da52c8c0cfdc429fde350b6ab817d2d031433eb2339c7ae04171c8e",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelUITests/PostcardPostageTests.swift",
+      "status": "new",
+      "incomingSHA256": "042d2efb70265a3843d93cc3da9c68efb4bd37f492154db3a83354d16a81388d",
+      "publicSHA256": "042d2efb70265a3843d93cc3da9c68efb4bd37f492154db3a83354d16a81388d",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelUITests/PostcardScenicFaceTests.swift",
+      "status": "new",
+      "incomingSHA256": "8c1477d87adcfa68bf5c64d4d93f5aba15ecc445622c6bd4a076d8eb54a40086",
+      "publicSHA256": "8c1477d87adcfa68bf5c64d4d93f5aba15ecc445622c6bd4a076d8eb54a40086",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "Tests/TravelUITests/PostcardTwoSidedPolicyTests.swift",
+      "status": "new",
+      "incomingSHA256": "3ed13dffd3eb6694e9d911c8ca6c72348d3a540265a6d5618b87fc436405ef98",
+      "publicSHA256": "3ed13dffd3eb6694e9d911c8ca6c72348d3a540265a6d5618b87fc436405ef98",
+      "adaptedForPublicCompatibility": false
+    },
+    {
+      "path": "packaging/Info.plist",
+      "status": "updated",
+      "incomingSHA256": "4818a91ee2f4b87152d9956a9b386c4c5699211221a4f2060f1282dd9495cb50",
+      "publicSHA256": "509953f2d258fba22090854b44c82a98a56a68f036bdd05f8f3e243bc6ec1549",
+      "adaptedForPublicCompatibility": true
+    }
+  ],
+  "additionalCompatibilityFiles": [
+    "Sources/TravelUI/PostcardScenicArtworkView.swift",
+    "Tests/TravelStorageTests/PostcardPresentationPublicationTests.swift"
+  ]
+}

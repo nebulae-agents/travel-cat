@@ -63,7 +63,7 @@ final class StandalonePetController: NSWindowController, NSWindowDelegate, NSMen
 
     init(model: AppModel, openJourney: @escaping () -> Void, openPostcard: @escaping () -> Void,
          openAlbum: @escaping () -> Void, openSupplies: @escaping () -> Void,
-         positionStore: WindowPositionStore = WindowPositionStore()) {
+         positionStore: WindowPositionStore = WindowPositionStore(), openHouse: (() -> Void)? = nil) {
         self.positionStore = positionStore
         self.model = model
         routes = [openJourney, openPostcard, openAlbum, openSupplies]
@@ -85,7 +85,7 @@ final class StandalonePetController: NSWindowController, NSWindowDelegate, NSMen
         panel.contentView = hosting
         super.init(window: panel)
         panel.delegate = self
-        panel.primaryAction = openJourney
+        panel.primaryAction = openHouse ?? openJourney
         for (index, title) in ["当前旅程", "最新明信片", "旅行册", "用品"].enumerated() {
             let item = NSMenuItem(title: title, action: #selector(performRoute(_:)), keyEquivalent: "")
             item.tag = index
