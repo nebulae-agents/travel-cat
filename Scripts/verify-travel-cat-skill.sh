@@ -1,6 +1,14 @@
 #!/bin/zsh
 set -euo pipefail
 
+# Report assertion location without logging candidate bodies or credentials.
+skill_contract_stage=build
+TRAPZERR() {
+    local failure_code=$?
+    print -u2 -r -- "skill-contract: exit=$failure_code stage=$skill_contract_stage at=${funcfiletrace[1]:-unknown}"
+    return "$failure_code"
+}
+
 script_dir=${0:A:h}
 project_root=${script_dir:h}
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/travel-cat-skill.XXXXXX")
@@ -18,6 +26,7 @@ travelcatctl="$binary_dir/travelcatctl"
 export TRAVEL_CAT_MODE=fast
 
 # Preparing: one claim, one validation, one publication, one-version advance.
+skill_contract_stage=preparing
 export TRAVEL_CAT_DATA="$temporary_root/preparing"
 export TRAVEL_CAT_NOW="2030-08-11T12:00:00Z"
 preparing_before="$temporary_root/preparing-before.json"
@@ -38,6 +47,7 @@ jq -e '.stateVersion == 1 and .lastEventID == "10000000-0000-0000-0000-000000000
 test "$(grep -cve '^[[:space:]]*$' "$TRAVEL_CAT_DATA/journal/events.jsonl")" -eq 1
 
 # Postcard: materialize a coherent claimed state, then publish one pendingImage text event.
+skill_contract_stage=postcard
 export TRAVEL_CAT_DATA="$temporary_root/postcard"
 export TRAVEL_CAT_NOW="2030-08-12T09:30:00Z"
 postcard_claim="$temporary_root/postcard-claim.json"
@@ -101,6 +111,7 @@ postcard_file_count=$(find "$TRAVEL_CAT_DATA/postcards" -type f -print | wc -l |
 test "$postcard_file_count" -eq 0
 
 # Due false: claim is read-only and produces no repository change.
+skill_contract_stage=not-due
 export TRAVEL_CAT_DATA="$temporary_root/preparing"
 export TRAVEL_CAT_NOW="2030-08-11T12:00:01Z"
 due_false_before=$(cksum "$TRAVEL_CAT_DATA/state/current-trip.json" "$TRAVEL_CAT_DATA/journal/events.jsonl")
