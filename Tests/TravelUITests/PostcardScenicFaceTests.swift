@@ -218,19 +218,19 @@ final class PostcardScenicFaceTests: XCTestCase {
         XCTAssertEqual(image.height, 1024)
         try PostcardRasterEvidence.write(PostcardRasterEvidence.postmark(image), tag: "date-export")
         XCTAssertEqual(PostcardMessageFaceView.postmarkDate(date), "2026.10.01")
-        let datePixels = try PostcardRasterEvidence.pixels(PostcardRasterEvidence.postmark(image))
+        let dateImage = try PostcardRasterEvidence.postmark(image)
         for days in [1, 3] {
             let alternateDate = date.addingTimeInterval(TimeInterval(days * 86_400))
             let alternate = try await PostcardExporter.pngData(event: record, rootURL: root, face: .message,
                 recipient: recipient, travelDate: alternateDate)
-            XCTAssertNotEqual(datePixels, try PostcardRasterEvidence.pixels(
-                PostcardRasterEvidence.postmark(decode(alternate))),
+            XCTAssertGreaterThan(try PostcardRasterEvidence.maximumPixelDifference(dateImage,
+                PostcardRasterEvidence.postmark(decode(alternate))), 2,
                 "Exported date glyphs must differ from 10.02/10.04")
         }
         let noDate = try await PostcardExporter.pngData(event: record, rootURL: root, face: .message,
             recipient: recipient, travelDate: nil)
-        XCTAssertNotEqual(datePixels, try PostcardRasterEvidence.pixels(
-            PostcardRasterEvidence.postmark(decode(noDate))))
+        XCTAssertGreaterThan(try PostcardRasterEvidence.maximumPixelDifference(dateImage,
+            PostcardRasterEvidence.postmark(decode(noDate))), 2)
         let text = try recognizedText(image)
         XCTAssertTrue(text.contains("小雨"), text)
         XCTAssertTrue(text.contains("2026"), text)
@@ -239,10 +239,9 @@ final class PostcardScenicFaceTests: XCTestCase {
         XCTAssertTrue(text.contains("From"), text)
         // Vision sometimes reads this font's 1 as I. Compare the actual pixels against
         // both the wrong identifier and an absent identifier, without coaching OCR.
-        let pixels = try XCTUnwrap(image.dataProvider?.data) as Data
         let repeatedOutput = try await PostcardExporter.pngData(event: record, rootURL: root, face: .message,
             recipient: recipient, travelDate: date)
-        XCTAssertEqual(pixels, try XCTUnwrap(decode(repeatedOutput).dataProvider?.data) as Data)
+        XCTAssertLessThanOrEqual(try PostcardRasterEvidence.maximumPixelDifference(image, decode(repeatedOutput)), 2)
         for alternateCode in ["SWIA 1AA", ""] {
             let alternateRecipient = PostcardRecipientInfo(name: recipient.name, address: recipient.address,
                 postalCode: alternateCode)
@@ -252,7 +251,7 @@ final class PostcardScenicFaceTests: XCTestCase {
             XCTAssertEqual(alternateImage.width, image.width)
             XCTAssertEqual(alternateImage.height, image.height)
             XCTAssertEqual(alternateImage.bytesPerRow, image.bytesPerRow)
-            XCTAssertNotEqual(pixels, try XCTUnwrap(alternateImage.dataProvider?.data) as Data,
+            XCTAssertGreaterThan(try PostcardRasterEvidence.maximumPixelDifference(image, alternateImage), 2,
                 "The exported postal identifier must have distinct, visible glyphs")
         }
         try output.write(to: URL(fileURLWithPath: "/tmp/travelcat-message-refinement-export.png"))

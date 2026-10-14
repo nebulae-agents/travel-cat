@@ -315,7 +315,7 @@
       "path": "Tests/TravelUITests/PostcardLibraryTests.swift",
       "status": "new",
       "incomingSHA256": "e011aea506f7adbfebdad5dda3098f95c520af043e8d1556566a4a3fec195e6b",
-      "publicSHA256": "4d5b649929e4edc7bf528249244fe52fbb06300fca30c82a8fec1f8c80a3610c",
+      "publicSHA256": "d441dce7f8ea31b8e656fb9c743d029f4fea1cab5e25b3a532c5d1fc52af7da5",
       "adaptedForPublicCompatibility": true
     },
     {
@@ -336,7 +336,7 @@
       "path": "Tests/TravelUITests/PostcardScenicFaceTests.swift",
       "status": "new",
       "incomingSHA256": "8c1477d87adcfa68bf5c64d4d93f5aba15ecc445622c6bd4a076d8eb54a40086",
-      "publicSHA256": "dcd812ffa55a51075b709d7845d8878483a3eae20399a89b57ae6dd8168647b1",
+      "publicSHA256": "7121e84c749c86969035bfeef5af656fba4d16f909a910de4da65f52ca176cc2",
       "adaptedForPublicCompatibility": true
     },
     {
@@ -361,7 +361,7 @@
   "verificationSupportFiles": [
     {
       "path": "Tests/TravelUITests/PostcardRasterEvidence.swift",
-      "SHA256": "446b6e9205944357416c394381aa81eda1a2da99d24e41ccb77a95fa63dfffe4",
+      "SHA256": "d5a2e663b780a706850b15fd2da6cafa7d0e946e0498df29c031e0a8249c7819",
       "purpose": "synthetic date and public-place pixel controls"
     }
   ]
