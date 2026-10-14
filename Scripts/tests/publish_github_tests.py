@@ -480,7 +480,19 @@ class PublishArtifactsTests(unittest.TestCase):
         for variable in ("TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE", "TRAVEL_CAT_LIVE_RENDER_SESSION",
                          "TRAVEL_CAT_LIVE_PRODUCTION_ROOT"):
             self.assertNotIn(variable + ":", job_environment)
-        self.assertGreaterEqual(steps.count("unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE"), 3)
+        offline_variables = {
+            "TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE", "TRAVEL_CAT_LIVE_RENDER_SESSION",
+            "TRAVEL_CAT_LIVE_PRODUCTION_ROOT", "TRAVEL_CAT_LIVE_GENERATION",
+            "TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT", "TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT",
+            "TRAVELCAT_REVISION_BENCHMARK_PHOTO", "TRAVEL_CAT_LANDMARK_ACCEPTANCE",
+            "TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT", "TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE",
+        }
+        offline_unsets = [line.strip().split()[1:] for line in steps.splitlines()
+                          if line.strip().startswith("unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE ")]
+        self.assertGreaterEqual(len(offline_unsets), 3)
+        for variables in offline_unsets:
+            self.assertTrue(offline_variables.issubset(variables),
+                            f"Offline CI leaves opt-ins active: {sorted(offline_variables - set(variables))}")
 
         readme = (ROOT / "README.md").read_text()
         for expected in ("Deploy Local.command", "Publish to GitHub.command", "gh auth login",
