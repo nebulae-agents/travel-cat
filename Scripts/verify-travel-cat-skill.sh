@@ -19,7 +19,7 @@ export SWIFTPM_MODULECACHE_OVERRIDE="$temporary_root/swiftpm-cache"
 
 cd "$project_root"
 swift_wrapper="$project_root/Scripts/travel-cat-swift.sh"
-"$swift_wrapper" build --disable-sandbox --product travelcatctl >/dev/null
+"$swift_wrapper" build --disable-sandbox --product travelcatctl
 binary_dir=$("$swift_wrapper" build --disable-sandbox --show-bin-path)
 travelcatctl="$binary_dir/travelcatctl"
 
