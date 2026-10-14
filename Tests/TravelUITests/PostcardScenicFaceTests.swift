@@ -216,10 +216,26 @@ final class PostcardScenicFaceTests: XCTestCase {
         let image = try decode(output)
         XCTAssertEqual(image.width, 1536)
         XCTAssertEqual(image.height, 1024)
+        try PostcardRasterEvidence.write(PostcardRasterEvidence.postmark(image), tag: "date-export")
+        XCTAssertEqual(PostcardMessageFaceView.postmarkDate(date), "2026.10.01")
+        let datePixels = try PostcardRasterEvidence.pixels(PostcardRasterEvidence.postmark(image))
+        for days in [1, 3] {
+            let alternateDate = date.addingTimeInterval(TimeInterval(days * 86_400))
+            let alternate = try await PostcardExporter.pngData(event: record, rootURL: root, face: .message,
+                recipient: recipient, travelDate: alternateDate)
+            XCTAssertNotEqual(datePixels, try PostcardRasterEvidence.pixels(
+                PostcardRasterEvidence.postmark(decode(alternate))),
+                "Exported date glyphs must differ from 10.02/10.04")
+        }
+        let noDate = try await PostcardExporter.pngData(event: record, rootURL: root, face: .message,
+            recipient: recipient, travelDate: nil)
+        XCTAssertNotEqual(datePixels, try PostcardRasterEvidence.pixels(
+            PostcardRasterEvidence.postmark(decode(noDate))))
         let text = try recognizedText(image)
         XCTAssertTrue(text.contains("小雨"), text)
         XCTAssertTrue(text.contains("2026"), text)
-        XCTAssertTrue(text.contains("10.01"), text)
+        // OCR locates the date; crop controls above distinguish the exact day.
+        XCTAssertTrue(text.contains("10."), text)
         XCTAssertTrue(text.contains("From"), text)
         // Vision sometimes reads this font's 1 as I. Compare the actual pixels against
         // both the wrong identifier and an absent identifier, without coaching OCR.
