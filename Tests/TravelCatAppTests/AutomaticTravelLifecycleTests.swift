@@ -525,6 +525,50 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(f.generator.imageCalls, 1)
     }
 
+    func testBacklogRecoveryPreservesPreviouslyQueuedPrimaryManualRetryWhilePaused() async throws {
+        let f = try LifecycleFixture()
+        defer { f.clean() }
+        try await f.startOnePostcardTrip()
+        try await f.reach(.postcardReady)
+        let event = try XCTUnwrap(f.repository.events().last)
+        for _ in 0..<3 {
+            f.clock.advance(300)
+            let work = try XCTUnwrap(f.repository.pendingImages(mode: .fast).first)
+            _ = try f.repository.markImage(.init(eventId: event.id, status: .failed, attemptedAt: f.clock.now,
+                relativePath: nil, reason: "fixture failure", attemptToken: work.attemptToken,
+                attemptCount: work.imageAttemptCount, publishedNarrativeHash: work.publishedNarrativeHash), mode: .fast)
+        }
+        try f.repository.requestManualImageRetry(eventID: event.id, mode: .fast)
+        _ = try PostcardBacklogStore(root: f.root, clock: f.clock).reconcile(events: f.repository.events())
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(), dataRoot: f.root, clock: { f.clock.now })
+        var paused = TravelSettings(mode: .fast)
+        paused.automaticTravelEnabled = false
+        f.generator.imageWidth = nil
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { paused }, isReady: { true }, now: { f.clock.now },
+            sleep: { seconds in f.clock.advance(seconds); await Task.yield() })
+        defer { controller.stop() }
+        try Data("{damaged backlog fixture".utf8).write(to: f.root.appendingPathComponent("state/postcard-backlog.json"))
+        controller.start()
+        XCTAssertNotNil(model.postcardWorkError)
+        let before = f.generator.imageCalls
+        let narrativeCalls = f.generator.narrativeCalls
+        let snapshot = try f.repository.loadSnapshot()
+        let requests = try XCTUnwrap(f.repository.imageRetry(for: event.id)).manualRequests
+        _ = try PostcardBacklogStore(root: f.root, clock: f.clock).recoverFromBackup()
+        controller.refresh()
+        await waitUntil { (try? f.repository.imageRetry(for: event.id)?.manualAttemptResults.count) == 1 }
+        XCTAssertEqual(f.generator.imageCalls, before + 1, "Only the already authorized manual request may resume")
+        XCTAssertEqual(f.generator.narrativeCalls, narrativeCalls)
+        XCTAssertEqual(try f.repository.loadSnapshot(), snapshot)
+        let retry = try XCTUnwrap(f.repository.imageRetry(for: event.id))
+        XCTAssertEqual(retry.manualRequests, requests, "Recovery must not invent or discard a user's manual request")
+        XCTAssertEqual(retry.manualAttemptResults.count, 1)
+        f.clock.advance(1000)
+        _ = try await f.worker.step(settings: paused)
+        XCTAssertEqual(f.generator.imageCalls, before + 1, "The manual failure cannot start an automatic retry loop")
+    }
+
     private func waitUntil(_ predicate: () -> Bool) async {
         for _ in 0..<1000 {
             if predicate() { return }
