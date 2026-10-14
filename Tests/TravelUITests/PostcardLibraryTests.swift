@@ -47,11 +47,10 @@ final class PostcardLibraryTests: XCTestCase {
         try png(image).write(to: URL(fileURLWithPath: "/tmp/travelcat-album-envelope-grid.png"))
         try PostcardRasterEvidence.write(PostcardRasterEvidence.publicPlace(image, paperBounds: bounds),
                                          tag: "public-kyoto-place")
-        let placePixels = try PostcardRasterEvidence.pixels(
-            PostcardRasterEvidence.publicPlace(image, paperBounds: bounds))
+        let placeImage = try PostcardRasterEvidence.publicPlace(image, paperBounds: bounds)
         let repeated = try raster(event)
-        XCTAssertEqual(placePixels, try PostcardRasterEvidence.pixels(
-            PostcardRasterEvidence.publicPlace(repeated, paperBounds: envelopePaperBounds(repeated))))
+        XCTAssertLessThanOrEqual(try PostcardRasterEvidence.maximumPixelDifference(placeImage,
+            PostcardRasterEvidence.publicPlace(repeated, paperBounds: envelopePaperBounds(repeated))), 2)
         for wrongPlace in ["務川河畔", "川河畔"] {
             let alternate = TripEvent(id: event.id, tripID: event.tripID,
                 previousEventID: event.previousEventID, occurredAt: event.occurredAt, phase: event.phase,
@@ -61,8 +60,8 @@ final class PostcardLibraryTests: XCTestCase {
                 consumedItemID: event.consumedItemID, postcardStatus: event.postcardStatus,
                 postcardRelativePath: event.postcardRelativePath, postcardStyleVersion: event.postcardStyleVersion)
             let rendered = try raster(alternate)
-            XCTAssertNotEqual(placePixels, try PostcardRasterEvidence.pixels(
-                PostcardRasterEvidence.publicPlace(rendered, paperBounds: envelopePaperBounds(rendered))),
+            XCTAssertGreaterThan(try PostcardRasterEvidence.maximumPixelDifference(placeImage,
+                PostcardRasterEvidence.publicPlace(rendered, paperBounds: envelopePaperBounds(rendered))), 2,
                 "Actual public-place glyphs must differ from a near-shape or missing-character substitution")
         }
         let request = VNRecognizeTextRequest()

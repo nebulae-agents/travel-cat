@@ -34,19 +34,32 @@ enum PostcardRasterEvidence {
         return Data(bytes)
     }
 
+    static func maximumPixelDifference(_ first: CGImage, _ second: CGImage,
+                                       file: StaticString = #filePath, line: UInt = #line) throws -> Int {
+        XCTAssertEqual(first.width, second.width, file: file, line: line)
+        XCTAssertEqual(first.height, second.height, file: file, line: line)
+        guard first.width == second.width, first.height == second.height else { return .max }
+        let a = try pixels(first), b = try pixels(second)
+        XCTAssertEqual(a.count, b.count, file: file, line: line)
+        guard a.count == b.count else { return .max }
+        // ImageRenderer dithers the paper gradient by at most two channel levels.
+        // Every channel is checked; text/layout differences must exceed that same bound.
+        return zip(a, b).map { abs(Int($0) - Int($1)) }.max() ?? 0
+    }
+
     static func assertRecordedDay(_ image: CGImage, date: Date,
                                   render: (Date?) throws -> CGImage,
                                   file: StaticString = #filePath, line: UInt = #line) throws {
         XCTAssertEqual(PostcardMessageFaceView.postmarkDate(date), "2026.10.01", file: file, line: line)
-        let original = try pixels(postmark(image))
-        XCTAssertEqual(original, try pixels(postmark(render(date))),
+        let original = try postmark(image)
+        XCTAssertLessThanOrEqual(try maximumPixelDifference(original, postmark(render(date))), 2,
                        "Repeated date rendering must be stable", file: file, line: line)
         for days in [1, 3] {
             let other = date.addingTimeInterval(TimeInterval(days * 86_400))
-            XCTAssertNotEqual(original, try pixels(postmark(render(other))),
+            XCTAssertGreaterThan(try maximumPixelDifference(original, postmark(render(other))), 2,
                               "Recorded day glyphs must differ from 10.02/10.04", file: file, line: line)
         }
-        XCTAssertNotEqual(original, try pixels(postmark(render(nil))),
+        XCTAssertGreaterThan(try maximumPixelDifference(original, postmark(render(nil))), 2,
                           "A recorded date must differ from an absent postmark", file: file, line: line)
     }
 
