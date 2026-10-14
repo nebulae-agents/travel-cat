@@ -11,7 +11,81 @@ private final class SetupViewTestCredentials: TravelServiceCredentialStoring {
     func save(_ secret: String?, id: String) throws { accessCount += 1 }
 }
 
+@MainActor
+private final class SetupSessionDraftRecorder {
+    var binding: Binding<String>?
+    func observe(_ binding: Binding<String>) { self.binding = binding }
+}
+
+@MainActor
+private struct SetupSessionDraftProbe: View {
+    @State private var draft: String
+    let recorder: SetupSessionDraftRecorder
+
+    init(savedValue: String, recorder: SetupSessionDraftRecorder) {
+        _draft = State(initialValue: savedValue)
+        self.recorder = recorder
+    }
+
+    var body: some View {
+        // Observe the actual mounted @State binding without changing view state.
+        recorder.observe($draft)
+        return Text(draft).frame(width: 200, height: 80)
+    }
+}
+
 final class GenerationSetupViewTests: XCTestCase {
+    @MainActor func testClosedSetupSessionDiscardsDraftWhileExistingSessionRetainsIt() async throws {
+        _ = NSApplication.shared
+        var session = GenerationSetupPresentationSession()
+        let recorder = SetupSessionDraftRecorder()
+        func content(_ savedValue: String) -> AnyView {
+            session.content(SetupSessionDraftProbe(savedValue: savedValue, recorder: recorder))
+        }
+        let hosting = NSHostingView(rootView: content("saved-model"))
+        hosting.sizingOptions = []
+        let windowController = TravelUtilityWindowController()
+        let window = try XCTUnwrap(windowController.window)
+        var closeCallbacks = 0
+        windowController.setCloseHandler {
+            closeCallbacks += 1
+            session.windowDidClose()
+        }
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+
+        func render(_ expected: String) async throws {
+            for _ in 0..<100 {
+                hosting.layoutSubtreeIfNeeded()
+                if recorder.binding?.wrappedValue == expected { return }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(recorder.binding?.wrappedValue, expected)
+        }
+        try await render("saved-model")
+        try XCTUnwrap(recorder.binding).wrappedValue = "cancelled-model"
+        try await render("cancelled-model")
+        window.close()
+        XCTAssertEqual(closeCallbacks, 1)
+        hosting.rootView = content("saved-model")
+        try await render("saved-model")
+
+        try XCTUnwrap(recorder.binding).wrappedValue = "active-draft"
+        try await render("active-draft")
+        hosting.rootView = content("must-not-replace-edit")
+        try await render("active-draft")
+
+        // Reopening stays hidden in this test, so AppKit still regards this
+        // window as closed. Deliver the next real delegate callback directly,
+        // without ordering a test window on the user's screen.
+        windowController.windowWillClose(Notification(name: NSWindow.willCloseNotification, object: window))
+        XCTAssertEqual(closeCallbacks, 2)
+        hosting.rootView = content("newly-saved-model")
+        try await render("newly-saved-model")
+        XCTAssertFalse(window.isVisible, "Session regression must never open a screen window")
+    }
+
     @MainActor func testCompatibleServiceSetupRendersAtMinimumAndPreferredSize() throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
