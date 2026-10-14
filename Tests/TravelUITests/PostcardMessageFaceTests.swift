@@ -47,6 +47,8 @@ final class PostcardMessageFaceTests: XCTestCase {
         for width in [320.0, 640.0] {
             let (image, observations) = try render(PostcardMessageFaceView(event: postcard(), travelDate: date), width: width)
             try png(image).write(to: URL(fileURLWithPath: "/tmp/travelcat-message-date-\(Int(width)).png"))
+            try PostcardRasterEvidence.write(PostcardRasterEvidence.postmark(image),
+                                             tag: "date-known-\(Int(width))")
             let dateLabel = try XCTUnwrap(observations.first {
                 $0.topCandidates(1).first?.string.contains("10.01") == true
             })
@@ -71,6 +73,8 @@ final class PostcardMessageFaceTests: XCTestCase {
             for width in [320.0, 640.0] {
                 let (image, observations) = try render(face, width: width)
                 try png(image).write(to: URL(fileURLWithPath: "/tmp/travelcat-stamps-\(expected)-\(Int(width)).png"))
+                try PostcardRasterEvidence.write(PostcardRasterEvidence.postmark(image),
+                                                 tag: "date-fare-\(expected)-\(Int(width))")
                 let text = observations.compactMap { $0.topCandidates(1).first?.string }.joined()
                 XCTAssertTrue(text.contains("2026"), text)
                 XCTAssertTrue(text.contains("10.01"), text)

@@ -42,6 +42,8 @@ final class PostcardLibraryTests: XCTestCase {
         let bounds = try envelopePaperBounds(image)
         XCTAssertEqual(bounds.width / bounds.height, 1.5, accuracy: 0.03)
         try png(image).write(to: URL(fileURLWithPath: "/tmp/travelcat-album-envelope-grid.png"))
+        try PostcardRasterEvidence.write(PostcardRasterEvidence.publicPlace(image, paperBounds: bounds),
+                                         tag: "public-kyoto-place")
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["zh-Hans", "en-US"]

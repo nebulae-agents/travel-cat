@@ -216,6 +216,7 @@ final class PostcardScenicFaceTests: XCTestCase {
         let image = try decode(output)
         XCTAssertEqual(image.width, 1536)
         XCTAssertEqual(image.height, 1024)
+        try PostcardRasterEvidence.write(PostcardRasterEvidence.postmark(image), tag: "date-export")
         let text = try recognizedText(image)
         XCTAssertTrue(text.contains("小雨"), text)
         XCTAssertTrue(text.contains("2026"), text)
