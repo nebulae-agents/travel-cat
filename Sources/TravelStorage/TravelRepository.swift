@@ -333,6 +333,15 @@ public final class TravelRepository: @unchecked Sendable {
             .map { "state/" + $0 }
     }
 
+    private func artworkRevisionFiles() throws -> [String] {
+        let relative = "state/postcard-artwork-revisions.json"
+        var info = stat()
+        if lstat(root.appendingPathComponent(relative).path, &info) == 0 { return [relative] }
+        let code = errno
+        guard code == ENOENT else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+        return []
+    }
+
     public func export(to destination: URL) throws -> URL {
         try withExclusiveLock {
             let fileManager = FileManager.default
@@ -355,7 +364,7 @@ public final class TravelRepository: @unchecked Sendable {
                 "state/active-character.json",
                 "state/frozen-character.json",
                 "journal/events.jsonl",
-            ] + (try backlogRecoveryFiles()) {
+            ] + (try backlogRecoveryFiles()) + (try artworkRevisionFiles()) {
                 let source = root.appendingPathComponent(relative)
                 try copyOptionalRegularFile(source, to: temporary.appendingPathComponent(relative))
             }
@@ -386,7 +395,7 @@ public final class TravelRepository: @unchecked Sendable {
             try fileManager.createDirectory(at: stagedBackup.appendingPathComponent("state"), withIntermediateDirectories: true)
             defer { try? fileManager.removeItem(at: stagedBackup) }
             try fileManager.createDirectory(at: stagedBackup.appendingPathComponent("journal"), withIntermediateDirectories: true)
-            let recoveryFiles = try backlogRecoveryFiles()
+            let recoveryFiles = try backlogRecoveryFiles() + artworkRevisionFiles()
             for relative in [
                 "state/current-trip.json",
                 "state/settings.json",
