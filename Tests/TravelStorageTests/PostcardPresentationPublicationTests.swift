@@ -7,6 +7,26 @@ import XCTest
 @testable import TravelStorage
 
 final class PostcardPresentationPublicationTests: XCTestCase {
+    func testArtworkMaintenanceDoesNotOverrideAcceptedPreparedPresentation() throws {
+        let (repo, work, path) = try fixture()
+        let reference = try prepare(repo, work.event, path)
+        _ = try repo.markImage(envelope(work, path, reference), mode: .fast)
+        let event = try XCTUnwrap(repo.events().first)
+        let store = try PostcardArtworkRevisionStore(root: repo.root)
+        let source = try Data(contentsOf: repo.root.appendingPathComponent(path))
+        let revisionPath = "postcards/\(event.tripID.uuidString.lowercased())/revision.png"
+        try source.write(to: repo.root.appendingPathComponent(revisionPath))
+        let request = PostcardArtworkRevisionRequest(eventID: event.id,
+            narrativeHash: try NarrativeHasher.hash(event), originalRelativePath: path,
+            relativePath: revisionPath, contentHash: digest(source))
+
+        XCTAssertFalse(try store.candidates().contains { $0.event.id == event.id })
+        XCTAssertThrowsError(try store.install([request]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.root.appendingPathComponent("state/postcard-artwork-revisions.json").path))
+        XCTAssertEqual(try repo.loadContents().presentationReferences[event.id], reference)
+        XCTAssertEqual(try Data(contentsOf: repo.root.appendingPathComponent(path)), source)
+    }
+
     func testLegacyReadyConversionWithNilCASPreservesOriginalReplay() throws {
         let (repo, work, path) = try fixture()
         let result = envelope(work, path, nil)

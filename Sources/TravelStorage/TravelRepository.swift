@@ -188,7 +188,12 @@ public final class TravelRepository: @unchecked Sendable {
     var imageValidationHook: (() -> Void)?
     var publishAfterJournalHook: (() throws -> Void)?
 
-    public init(root: URL, clock: any TravelClock = SystemClock()) throws {
+    public convenience init(root: URL, clock: any TravelClock = SystemClock()) throws {
+        try self.init(root: root, clock: clock, initialize: true)
+    }
+
+    /// Presentation-only artwork lookups must not bootstrap or reconcile user state.
+    init(root: URL, clock: any TravelClock, initialize: Bool) throws {
         self.root = root.standardizedFileURL
         snapshotURL = self.root.appendingPathComponent("state/current-trip.json")
         journalURL = self.root.appendingPathComponent("journal/events.jsonl")
@@ -199,6 +204,7 @@ public final class TravelRepository: @unchecked Sendable {
         self.clock = clock
         imageValidationHook = nil
         publishAfterJournalHook = nil
+        guard initialize else { return }
         try bootstrap()
         try withExclusiveLock {
             var events = try readEventsUnlocked()
@@ -904,7 +910,7 @@ public final class TravelRepository: @unchecked Sendable {
         return URL(fileURLWithPath: String(cString: path))
     }
 
-    private func presentationReferencesUnlocked(events: [TripEvent]) throws -> [UUID: PostcardPresentationReference] {
+    func presentationReferencesUnlocked(events: [TripEvent]) throws -> [UUID: PostcardPresentationReference] {
         let store = try loadRetryStoreUnlocked()
         var references: [UUID: PostcardPresentationReference] = [:]
         for event in events where event.postcardStatus == .ready {
@@ -1154,6 +1160,7 @@ public final class TravelRepository: @unchecked Sendable {
     }
 
     struct ValidatedImage {
+        let data: Data
         let descriptor: Int32
         let tripDescriptor: Int32
         let parentDescriptors: [Int32]
@@ -1285,6 +1292,7 @@ public final class TravelRepository: @unchecked Sendable {
             }
             let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             return ValidatedImage(
+                data: data,
                 descriptor: descriptor, tripDescriptor: tripDescriptor, parentDescriptors: parents,
                 postcardsInfo: postcardsInfo, tripInfo: tripInfo, tripComponent: directoryComponent,
                 filename: filename, relativePath: path, fileInfo: info, contentHash: hash,

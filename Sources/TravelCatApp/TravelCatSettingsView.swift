@@ -411,6 +411,11 @@ struct TravelCatSettingsView: View {
             Section("家的城市") {
                 HomeLocationSettingsView(controller: environment.homeLocation)
             }
+            Section("明信片") {
+                PostcardRecipientSettingsView(model: environment.model)
+                Text("收件人、地址和邮编用于明信片文字面，仅保存在本机。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("旅行") {
                 Toggle("自动旅行", isOn: $environment.settings.automaticTravelEnabled)
                 if environment.selectedCharacterProfile != .defaultBlackCat || environment.effectiveCharacterProfile != .defaultBlackCat {

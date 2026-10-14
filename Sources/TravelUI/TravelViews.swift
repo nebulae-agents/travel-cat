@@ -1,9 +1,11 @@
 import AppKit
 import Darwin
+import CryptoKit
 import Foundation
 import ImageIO
 import SwiftUI
 import TravelCore
+import TravelStorage
 
 public struct Supply: Codable, Identifiable, Equatable, Sendable {
     public let id: String
@@ -42,6 +44,12 @@ public enum PostcardImageLoaderError: Error, Equatable, Sendable {
     case ioFailure(Int32)
 }
 
+struct PostcardImageData: Sendable {
+    let data: Data
+    /// Present only for pixels returned by the complete revision validation.
+    let validatedContentHash: String?
+}
+
 public enum PostcardImageLoader {
     public static let defaultMaximumBytes = 15 * 1_024 * 1_024
 
@@ -50,10 +58,22 @@ public enum PostcardImageLoader {
         rootURL: URL,
         maximumBytes: Int = defaultMaximumBytes
     ) throws -> Data {
+        try loadArtworkData(relativePath: relativePath, rootURL: rootURL, maximumBytes: maximumBytes).data
+    }
+
+    static func loadArtworkData(
+        relativePath: String,
+        rootURL: URL,
+        maximumBytes: Int = defaultMaximumBytes
+    ) throws -> PostcardImageData {
         guard maximumBytes > 0,
               !relativePath.isEmpty,
               !relativePath.hasPrefix("/") else { throw PostcardImageLoaderError.invalidPath }
         let byteLimit = min(maximumBytes, defaultMaximumBytes)
+        if let revision = (try? PostcardArtworkRevisionStore(root: rootURL))?.revisionData(for: relativePath) {
+            guard revision.data.count <= byteLimit else { throw PostcardImageLoaderError.tooLarge }
+            return PostcardImageData(data: revision.data, validatedContentHash: revision.contentHash)
+        }
         let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         let isCanonical = components.count == 3 && components.first == "postcards"
         let isLegacy = components.count == 2 && components.first != "postcards"
@@ -110,7 +130,7 @@ public enum PostcardImageLoader {
             guard result.count + count <= byteLimit else { throw PostcardImageLoaderError.tooLarge }
             result.append(buffer, count: count)
         }
-        return result
+        return PostcardImageData(data: result, validatedContentHash: nil)
     }
 }
 
@@ -171,18 +191,29 @@ public enum PostcardImageCachePolicy {
         * maximumItemCount
 }
 
+struct PostcardLoadedImage: Sendable {
+    let image: CGImage
+    let contentHash: String
+}
+
 actor PostcardImageCache {
     static let shared = PostcardImageCache()
     private var values: [String: CGImage] = [:]
     private var order: [String] = []
 
     func image(relativePath: String, rootURL: URL) async throws -> CGImage {
-        let key = rootURL.standardizedFileURL.path + "\u{0}" + relativePath
-        if let value = values[key] { return value }
+        try await artwork(relativePath: relativePath, rootURL: rootURL).image
+    }
+
+    func artwork(relativePath: String, rootURL: URL) async throws -> PostcardLoadedImage {
+        let loaded = try PostcardImageLoader.loadArtworkData(relativePath: relativePath, rootURL: rootURL)
+        let data = loaded.data
+        let hash = loaded.validatedContentHash ?? SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let key = rootURL.standardizedFileURL.path + "\u{0}" + relativePath + "\u{0}" + hash
+        if let value = values[key] { return PostcardLoadedImage(image: value, contentHash: hash) }
         try Task.checkCancellation()
         let task = Task.detached {
             try Task.checkCancellation()
-            let data = try PostcardImageLoader.loadData(relativePath: relativePath, rootURL: rootURL)
             try Task.checkCancellation()
             return try PostcardImageDecoder.decodeThumbnail(data: data)
         }
@@ -198,7 +229,7 @@ actor PostcardImageCache {
         }
         values[key] = value
         order.append(key)
-        return value
+        return PostcardLoadedImage(image: value, contentHash: hash)
     }
 }
 
@@ -383,6 +414,14 @@ public struct PostcardView: View {
     private let workItem: PostcardWorkItem?
     private let travelDate: Date?
     private let back: PetPresentation
+    private let isFavourite: Bool
+    private let toggleFavourite: (() -> Void)?
+    private let isUnread: Bool
+    private let recipient: PostcardRecipientInfo
+    private let homeLocation: HomeLocation?
+    private let onSceneryDisplayed: ((String) -> Void)?
+    private let recipientModel: AppModel?
+    @State private var face: PostcardFace
 
     public init(
         event: TripEvent,
@@ -394,17 +433,31 @@ public struct PostcardView: View {
         retry: ((UUID) -> Void)? = nil,
         error: String? = nil,
         notice: String? = nil,
+        isFavourite: Bool = false,
+        toggleFavourite: (() -> Void)? = nil,
+        isUnread: Bool = true,
+        recipient: PostcardRecipientInfo = .empty,
+        onSceneryDisplayed: ((String) -> Void)? = nil,
+        recipientModel: AppModel? = nil,
         open: @escaping (PetPresentation) -> Void
     ) {
         self.event = event
         self.presentationReference = presentationReference
         self.rootURL = rootURL
+        self.homeLocation = PostcardPostage.homeLocation(rootURL: rootURL)
         self.workItem = workItem
         self.travelDate = travelDate ?? (workItem?.isSupplement == true ? TripAlbumChronology.unknownDate : nil)
         self.back = back
         self.retry = retry
         self.error = error
         self.notice = notice
+        self.isFavourite = isFavourite
+        self.toggleFavourite = toggleFavourite
+        self.isUnread = isUnread
+        self.recipient = recipient
+        self.onSceneryDisplayed = onSceneryDisplayed
+        self.recipientModel = recipientModel
+        _face = State(initialValue: PostcardFace.initial(isUnread: isUnread, hasScenery: PostcardFace.hasScenery(for: event)))
         self.open = open
     }
 
@@ -418,13 +471,29 @@ public struct PostcardView: View {
                 Button { open(back) } label: { Label("返回", systemImage: "chevron.left") }
                     .buttonStyle(.plain)
                 Spacer()
+                if let toggleFavourite, event.postcardStatus == .ready {
+                    Button(action: toggleFavourite) {
+                        Label(isFavourite ? "取消收藏" : "收藏", systemImage: isFavourite ? "star.fill" : "star")
+                    }.buttonStyle(.plain)
+                }
+                if let rootURL, presentationReference == nil {
+                    PostcardExportButton(event: event, rootURL: rootURL, recipient: recipient,
+                        travelDate: knownTravelDate, homeLocation: homeLocation)
+                }
                 Text("POSTCARD").font(.caption.monospaced()).foregroundStyle(.secondary)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    PostcardArtworkView(event: event, rootURL: rootURL, profile: .detail, presentationReference: presentationReference)
-                    .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    if let presentationReference {
+                        PostcardArtworkView(event: event, rootURL: rootURL, profile: .detail,
+                            presentationReference: presentationReference, onImageVisible: onSceneryDisplayed)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        PostcardTwoSidedView(event: event, rootURL: rootURL, recipient: recipient,
+                            travelDate: knownTravelDate, homeLocation: homeLocation, isUnread: isUnread,
+                            onSceneryDisplayed: onSceneryDisplayed, face: $face)
+                            .frame(maxWidth: .infinity)
+                    }
                     Text(PostcardDisplayLocation().resolveCompact(event.location))
                         .font(.title2.bold())
                         .accessibilityLabel(PostcardDisplayLocation().resolveSpoken(event.location))
@@ -446,13 +515,28 @@ public struct PostcardView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button("打开旅行册") { open(Self.albumDestination(tripID: event.tripID)) }
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+            HStack {
+                if let recipientModel { PostcardRecipientSettingsView(model: recipientModel).buttonStyle(.bordered) }
+                Spacer()
+                Button("打开旅行册") { open(Self.albumDestination(tripID: event.tripID)) }
+                    .buttonStyle(.borderedProminent)
+            }
         }
         .padding(20)
         .background(Color(nsColor: .textBackgroundColor).opacity(0.96), in: RoundedRectangle(cornerRadius: 16))
         .padding(12)
+        .onChange(of: event.id) { _, _ in
+            face = PostcardFace.initial(isUnread: isUnread, hasScenery: PostcardFace.hasScenery(for: event))
+        }
+        .onChange(of: rootURL) { _, _ in
+            face = PostcardFace.initial(isUnread: isUnread, hasScenery: PostcardFace.hasScenery(for: event))
+        }
+        .onChange(of: event.postcardStatus) { _, _ in if !PostcardFace.hasScenery(for: event) { face = .message } }
+        .onChange(of: event.postcardRelativePath) { _, _ in if !PostcardFace.hasScenery(for: event) { face = .message } }
+    }
+
+    private var knownTravelDate: Date? {
+        travelDate == TripAlbumChronology.unknownDate ? nil : travelDate ?? event.occurredAt
     }
 
 }
@@ -470,6 +554,12 @@ public struct TripAlbumView: View {
     private let error: String?
     private let notice: String?
     private let open: (PetPresentation) -> Void
+    private let unreadIDs: Set<UUID>
+    private let favouriteIDs: Set<UUID>
+    private let recipient: PostcardRecipientInfo
+    private let homeLocation: HomeLocation?
+    @State private var filter: PostcardLibraryFilter = .all
+    @State private var search = ""
 
     public init(
         tripID: UUID?,
@@ -482,18 +572,25 @@ public struct TripAlbumView: View {
         retry: ((UUID) -> Void)? = nil,
         error: String? = nil,
         notice: String? = nil,
+        unreadIDs: Set<UUID> = [],
+        favouriteIDs: Set<UUID> = [],
+        recipient: PostcardRecipientInfo = .empty,
         open: @escaping (PetPresentation) -> Void
     ) {
         self.tripID = tripID
         self.events = events
         self.presentationReferences = presentationReferences
         self.rootURL = rootURL
+        self.homeLocation = PostcardPostage.homeLocation(rootURL: rootURL)
         self.calendar = calendar
         self.now = now
         self.workItems = workItems
         self.retry = retry
         self.error = error
         self.notice = notice
+        self.unreadIDs = unreadIDs
+        self.favouriteIDs = favouriteIDs
+        self.recipient = recipient
         self.open = open
     }
 
@@ -535,17 +632,27 @@ public struct TripAlbumView: View {
                 Spacer()
                 Button("关闭") { open(.status) }.buttonStyle(.plain)
             }
+            HStack {
+                Picker("显示", selection: $filter) {
+                    ForEach(PostcardLibraryFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented).frame(maxWidth: 280)
+                TextField("搜索国家、城市或地点", text: $search).textFieldStyle(.roundedBorder)
+            }
             let ordered = Self.orderedEvents(tripID: tripID, events: events, now: now, workItems: workItems)
+                .filter { PostcardLibrary.matches($0, filter: filter, query: search, unreadIDs: unreadIDs, favouriteIDs: favouriteIDs) }
             let displayDates = TripAlbumChronology.dates(events: events, workItems: workItems)
-            let unpublished = workItems.filter { $0.eventID == nil && (tripID == nil || $0.tripID == tripID) }
+            let unpublished = workItems.filter { $0.eventID == nil && (tripID == nil || $0.tripID == tripID) && filter == .all && search.isEmpty }
             if let error { Text(error).font(.callout).foregroundStyle(.red) }
             if let notice { Text(notice).font(.callout).foregroundStyle(.secondary) }
             if ordered.isEmpty && unpublished.isEmpty && error == nil {
-                ContentUnavailableView("还没有明信片", systemImage: "photo.stack")
+                ContentUnavailableView(filter == .all && search.isEmpty ? "还没有明信片" : "没有符合条件的明信片", systemImage: "photo.stack")
             } else {
                 GeometryReader { proxy in
                     ScrollView {
-                        let messages = ordered.map { PostcardArtworkMetadata(event: $0).visualMessage }
+                        let messages = ordered.map {
+                            PostcardLibrary.isSealed($0, unreadIDs: unreadIDs) || !PostcardFace.hasScenery(for: $0)
+                                ? "" : PostcardArtworkMetadata(event: $0).visualMessage
+                        }
                         let groups = TripAlbumDateGrouping.groups(orderedEvents: ordered, calendar: calendar, displayDates: displayDates)
                         let showsYear = TripAlbumDateGrouping.spansMultipleYears(
                             days: groups.map(\.day),
@@ -600,9 +707,22 @@ public struct TripAlbumView: View {
                                         ForEach(group.events) { event in
                                             VStack(alignment: .leading, spacing: 6) {
                                                 Button { open(Self.postcardDestination(for: event)) } label: {
-                                                    AlbumCard(event: event, rootURL: rootURL, presentationReference: presentationReferences[event.id])
+                                                    if PostcardLibrary.isSealed(event, unreadIDs: unreadIDs) || !PostcardFace.hasScenery(for: event) {
+                                                        PostcardEnvelopeView(event: event, recipient: recipient,
+                                                            travelDate: displayDates[event.id] == TripAlbumChronology.unknownDate ? nil : displayDates[event.id],
+                                                            isUnread: unreadIDs.contains(event.id), homeLocation: homeLocation)
+                                                            .frame(width: geometry.artworkWidth,
+                                                                   height: geometry.artworkWidth / PostcardEnvelopeView.aspectRatio)
+                                                    } else {
+                                                        AlbumCard(event: event, rootURL: rootURL, presentationReference: presentationReferences[event.id])
+                                                    }
                                                 }
                                                 .buttonStyle(.plain)
+                                                HStack {
+                                                    Text(unreadIDs.contains(event.id) ? "未读" : "已读").font(.caption).foregroundStyle(.secondary)
+                                                    Spacer()
+                                                    if favouriteIDs.contains(event.id) { Image(systemName: "star.fill").foregroundStyle(.orange).accessibilityLabel("已收藏") }
+                                                }
                                                 if let item = workItems.first(where: { $0.eventID == event.id }) {
                                                     PostcardWorkStatusView(item: item, retry: retry)
                                                 }
@@ -681,7 +801,11 @@ private struct AlbumCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            PostcardArtworkView(event: event, rootURL: rootURL, profile: .compact, presentationReference: presentationReference)
+            if let presentationReference {
+                PostcardArtworkView(event: event, rootURL: rootURL, profile: .compact, presentationReference: presentationReference)
+            } else {
+                PostcardScenicFaceView(event: event, rootURL: rootURL, profile: .compact)
+            }
             Text(PostcardDisplayLocation().resolveCompact(event.location))
                 .font(.headline)
                 .lineLimit(1)
@@ -878,7 +1002,10 @@ public struct PetRootView: View {
                     workItem: model.postcardWorkItems.first(where: { $0.eventID == event.id }),
                     travelDate: TripAlbumChronology.dates(events: model.events, workItems: model.postcardWorkItems)[event.id],
                     retry: model.retryPostcard,
-                    error: model.postcardWorkError, notice: model.manualRetryMessage
+                    error: model.postcardWorkError, notice: model.manualRetryMessage,
+                    isFavourite: model.favouritePostcardIDs.contains(event.id), toggleFavourite: { model.toggleFavourite(event.id) },
+                    isUnread: model.unreadPostcardIDs.contains(event.id), recipient: model.postcardRecipient,
+                    onSceneryDisplayed: { model.postcardFrontDidDisplay(event.id, relativePath: $0) }, recipientModel: model
                 ) { destination in
                     if destination == .status { model.close() }
                     else { model.handle(destination) }
@@ -887,7 +1014,9 @@ public struct PetRootView: View {
                 Button("返回") { model.close() }
             }
         case .album:
-            TripAlbumView(tripID: nil, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences, workItems: model.postcardWorkItems, retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage) { destination in
+            TripAlbumView(tripID: nil, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences,
+                workItems: model.postcardWorkItems, retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage,
+                unreadIDs: Set(model.unreadPostcardIDs), favouriteIDs: model.favouritePostcardIDs, recipient: model.postcardRecipient) { destination in
                 if destination == .status { model.close() }
                 else { model.handle(destination) }
             }

@@ -23,21 +23,25 @@ struct TravelEventRequest: Codable, Sendable {
     let carriedSupply: Supply?
     let isSupplemental: Bool
     let homeLocation: HomeLocation?
+    let travelMemory: TravelStoryMemory
 
-    init(claim: DueClaim, recentEvents: [TripEvent], phase: TravelPhase, isSupplemental: Bool = false, homeLocation: HomeLocation? = nil) {
+    init(claim: DueClaim, recentEvents: [TripEvent], phase: TravelPhase, isSupplemental: Bool = false, homeLocation: HomeLocation? = nil,
+         historyEvents: [TripEvent]? = nil, now: Date = Date()) {
         self.claim = claim
         self.recentEvents = recentEvents
         self.phase = phase
         self.isSupplemental = isSupplemental
         self.homeLocation = homeLocation
         let startsNewTrip = phase == .preparing && claim.snapshot.phase == .resting
+        travelMemory = TravelStoryMemory(events: historyEvents ?? recentEvents,
+            excludingTripID: startsNewTrip ? nil : claim.snapshot.tripID, now: now)
         carriedSupply = SupplyCatalog.loadOrEmpty().first {
             $0.id == claim.snapshot.carriedItemID && (startsNewTrip || !claim.snapshot.usedItemIDs.contains($0.id))
         }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case claim, recentEvents, phase, carriedSupply, isSupplemental, homeLocation
+        case claim, recentEvents, phase, carriedSupply, isSupplemental, homeLocation, travelMemory
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -47,6 +51,8 @@ struct TravelEventRequest: Codable, Sendable {
         carriedSupply = try values.decodeIfPresent(Supply.self, forKey: .carriedSupply)
         isSupplemental = try values.decodeIfPresent(Bool.self, forKey: .isSupplemental) ?? false
         homeLocation = try values.decodeIfPresent(HomeLocation.self, forKey: .homeLocation)
+        travelMemory = try values.decodeIfPresent(TravelStoryMemory.self, forKey: .travelMemory)
+            ?? TravelStoryMemory(events: [], excludingTripID: nil, now: .distantPast)
     }
 }
 
@@ -280,7 +286,8 @@ final class AutomaticTravelWorker {
             let request = TravelEventRequest(
                 claim: DueClaim(due: true, snapshot: contents.snapshot, previousEvent: contents.events.last, characterProfile: contents.characterProfile),
                 recentEvents: Array(contents.events.suffix(12)),
-                phase: Self.nextPhase(contents: contents, now: now), homeLocation: homeLocation)
+                phase: Self.nextPhase(contents: contents, now: now), homeLocation: homeLocation,
+                historyEvents: contents.events, now: now)
             // Allocate the new itinerary before model work; failure and restart retain
             // its trip/slot identities. Existing trips have already reconciled above.
             if request.phase == .preparing {

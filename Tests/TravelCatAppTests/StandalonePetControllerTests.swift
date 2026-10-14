@@ -21,7 +21,7 @@ final class StandalonePetControllerTests: XCTestCase {
         let controller = StandalonePetController(model: model,
             openJourney: { routes.append("journey") }, openPostcard: { routes.append("postcard") },
             openAlbum: { routes.append("album") }, openSupplies: { routes.append("supplies") },
-            positionStore: WindowPositionStore(defaults: defaults))
+            positionStore: WindowPositionStore(defaults: defaults), openHouse: { routes.append("house") })
         XCTAssertEqual(controller.contextMenu.items.map(\.title), ["当前旅程", "最新明信片", "旅行册", "用品", "", "隐藏桌宠"])
         for index in 0..<4 { controller.contextMenu.performActionForItem(at: index) }
         XCTAssertEqual(routes, ["journey", "postcard", "album", "supplies"])
@@ -32,7 +32,7 @@ final class StandalonePetControllerTests: XCTestCase {
                 context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
             window.sendEvent(event)
         }
-        XCTAssertEqual(routes.last, "journey")
+        XCTAssertEqual(routes.last, "house")
         XCTAssertEqual(routes.count, 5)
         XCTAssertEqual(model.presentation, .pet)
         XCTAssertEqual(controller.window?.frame.size, CGSize(width: 240, height: 280))
@@ -69,9 +69,39 @@ final class StandalonePetControllerTests: XCTestCase {
         for index in [1, 2] { XCTAssertFalse(controller.contextMenu.items[index].isEnabled) }
     }
 
-    private func postcard() -> TripEvent {
+    func testDesktopHouseClickOpensReadyUnreadCardAheadOfOlderUnavailableCard() throws {
+        let suite = "StandalonePetUnreadPriorityTests-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let unavailable = postcard()
+        var ready = postcard(seconds: 10)
+        ready.postcardStatus = .ready
+        ready.postcardRelativePath = "postcards/\(ready.id).png"
+        let snapshot = TripSnapshot.empty(now: Date())
+        let events = [unavailable, ready]
+        let model = AppModel(snapshot: snapshot, events: events, defaults: defaults)
+        let controller = StandalonePetController(model: model,
+            openJourney: {}, openPostcard: {}, openAlbum: {}, openSupplies: {},
+            positionStore: WindowPositionStore(defaults: defaults), openHouse: { model.openHouseFromDesktop() })
+        defer { controller.hide() }
+        let window = try XCTUnwrap(controller.window)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: CGPoint(x: 120, y: 120),
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+            window.sendEvent(event)
+        }
+        XCTAssertEqual(model.presentation, .postcard(ready.id))
+        XCTAssertEqual(model.unreadPostcardIDs, [unavailable.id, ready.id])
+        XCTAssertTrue(model.readPostcardIDs.isEmpty)
+        XCTAssertEqual(model.events, events)
+        XCTAssertEqual(model.snapshot, snapshot)
+        XCTAssertFalse(window.isVisible, "The isolated test must not display a second desktop pet")
+    }
+
+    private func postcard(seconds: TimeInterval = 1) -> TripEvent {
         TripEvent(id: UUID(), tripID: UUID(), previousEventID: nil,
-            occurredAt: Date(timeIntervalSince1970: 1), phase: .postcardReady,
+            occurredAt: Date(timeIntervalSince1970: seconds), phase: .postcardReady,
             location: nil, transport: nil, summary: "来信", mood: Mood(level: 0, label: "开心", quote: "风景很好"),
             continuityReferences: [], openHook: nil, consumedItemID: nil,
             postcardStatus: .imageUnavailable, postcardRelativePath: nil)
@@ -83,7 +113,7 @@ final class StandalonePetControllerTests: XCTestCase {
         for phase in TravelPhase.allCases {
             let status = PetHouseStatus(phase: phase, hasUnreadPostcard: false)
             XCTAssertEqual(status.showsCat, phase == .resting || phase == .preparing)
-            XCTAssertEqual(status.showsLetter, phase == .postcardReady)
+            XCTAssertFalse(status.showsLetter)
             XCTAssertTrue(PetHouseStatus(phase: phase, hasUnreadPostcard: true).showsLetter)
         }
     }

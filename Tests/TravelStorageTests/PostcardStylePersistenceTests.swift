@@ -55,6 +55,6 @@ final class PostcardStylePersistenceTests: XCTestCase {
         let result = candidate.validationResult(previous: previous, mode: .fast,
             calendar: Calendar(identifier: .gregorian), now: event.occurredAt)
         XCTAssertTrue(result.valid, "\(result.violations)")
-        XCTAssertEqual(try XCTUnwrap(result.publishEnvelope).event.postcardStyleVersion, 1)
+        XCTAssertEqual(try XCTUnwrap(result.publishEnvelope).event.postcardStyleVersion, 4)
     }
 }

@@ -235,7 +235,7 @@ public struct AgentEventEnvelope: Codable, Sendable {
             consumedItemID: consumedItemId,
             postcardStatus: postcard.required ? .pendingImage : .none,
             postcardRelativePath: nil,
-            postcardStyleVersion: postcard.required ? 1 : nil
+            postcardStyleVersion: postcard.required ? 4 : nil
         )
         let startsNewTrip = previous.tripID == nil
             || (previous.phase == .resting && phase == .preparing && previous.tripID != tripId)

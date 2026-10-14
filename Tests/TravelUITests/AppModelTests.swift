@@ -5,55 +5,296 @@ import TravelCore
 
 @MainActor
 final class AppModelTests: XCTestCase {
-    func testAcceptedPresentationReferencesRefreshAtSameVersionAndPruneRemovedEvents() {
+    func testOpeningPostcardMessageSideDoesNotConsumeUnread() {
         let event = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let defaults = isolatedDefaults()
+        let snapshot = makeSnapshot(phase: .postcardReady)
+        let model = AppModel(snapshot: snapshot, events: [event], defaults: defaults)
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(firstID))
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        XCTAssertTrue(model.readPostcardIDs.isEmpty)
+        model.close()
+        XCTAssertEqual(AppModel(snapshot: snapshot, events: [event], defaults: defaults).unreadPostcardIDs, [firstID])
+    }
+
+    func testWaitingPostcardMessageSideStaysUnreadWhenOpened() {
+        let model = AppModel(snapshot: makeSnapshot(phase: .postcardReady),
+            events: [makeEvent(id: firstID, seconds: 10, status: .pendingImage)], defaults: isolatedDefaults())
+        model.openLatestPostcardFromMenu()
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        XCTAssertTrue(model.readPostcardIDs.isEmpty)
+    }
+
+    func testVisibleScenicFaceReadsCurrentReadyCardOnlyAndPersistsOnce() {
+        let defaults = isolatedDefaults()
+        let snapshot = makeSnapshot(phase: .postcardReady)
+        let events = [makeEvent(id: firstID, seconds: 10, status: .ready),
+                      makeEvent(id: secondID, seconds: 20, status: .ready)]
+        let model = AppModel(snapshot: snapshot, events: events, defaults: defaults)
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        XCTAssertTrue(model.readPostcardIDs.isEmpty)
+        model.openHouseFromDesktop()
+        model.postcardFrontDidDisplay(secondID, relativePath: "postcards/\(secondID).png")
+        XCTAssertTrue(model.readPostcardIDs.isEmpty)
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        XCTAssertEqual(model.readPostcardIDs, [firstID])
+        XCTAssertEqual(model.unreadPostcardIDs, [secondID])
+        XCTAssertEqual(AppModel(snapshot: snapshot, events: events, defaults: defaults).readPostcardIDs, [firstID])
+        XCTAssertEqual(model.events, events)
+        XCTAssertEqual(model.snapshot, snapshot)
+    }
+
+    func testScenicCallbackCannotReadWaitingOrMissingImagePath() {
+        for status in [PostcardStatus.pendingImage, .imageUnavailable, .ready] {
+            var event = makeEvent(id: firstID, seconds: 10, status: status)
+            event.postcardRelativePath = nil
+            let model = AppModel(snapshot: makeSnapshot(phase: .postcardReady), events: [event], defaults: isolatedDefaults())
+            model.openHouseFromDesktop()
+            model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+            XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        }
+    }
+
+    func testRecipientInfoPersistsPerDataRootWithoutChangingTravelOrReadState() {
+        let defaults = isolatedDefaults()
         let snapshot = makeSnapshot(phase: .resting)
-        let first = PostcardPresentationReference(relativePath: "first.json", sha256: "first")
-        let second = PostcardPresentationReference(relativePath: "second.json", sha256: "second")
-        let model = AppModel(snapshot: snapshot, events: [event], presentationReferences: [event.id: first], defaults: isolatedDefaults(), supplies: [])
-        XCTAssertEqual(model.presentationReferences[event.id], first)
-        model.apply(next: snapshot, events: [event], presentationReferences: [event.id: second])
-        XCTAssertEqual(model.presentationReferences[event.id], second)
-        model.apply(next: snapshot, events: [])
-        XCTAssertTrue(model.presentationReferences.isEmpty)
-        model.apply(next: snapshot, events: [event], presentationReferences: [event.id: first])
-        model.replaceAfterHistoryClear(next: snapshot, events: [])
-        XCTAssertTrue(model.presentationReferences.isEmpty)
+        let event = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let root = URL(fileURLWithPath: "/tmp/recipient-a")
+        let model = AppModel(snapshot: snapshot, events: [event], dataRoot: root, defaults: defaults)
+        let info = PostcardRecipientInfo(name: "  小林  ", address: "  晨风街 12 号\n小屋  ", postalCode: " SW1A 1AA ")
+        model.savePostcardRecipient(info)
+        let reopened = AppModel(snapshot: snapshot, events: [event], dataRoot: root, defaults: defaults)
+        XCTAssertEqual(reopened.postcardRecipient, info.normalized)
+        XCTAssertEqual(reopened.postcardRecipient.postalCode, "SW1A 1AA")
+        let other = AppModel(snapshot: snapshot, events: [event], dataRoot: URL(fileURLWithPath: "/tmp/recipient-b"), defaults: defaults)
+        XCTAssertEqual(other.postcardRecipient, .empty)
+        XCTAssertEqual(model.events, [event])
+        XCTAssertEqual(model.snapshot, snapshot)
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+    }
+
+    func testCorruptRecipientPreferenceFallsBackWithoutRemovingOriginalPreference() {
+        let defaults = isolatedDefaults()
+        let root = URL(fileURLWithPath: "/tmp/recipient-corrupt")
+        let key = AppModel.readDefaultsScopeKey(dataRoot: root) + ".recipient"
+        let original = Data("broken preference".utf8)
+        defaults.set(original, forKey: key)
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), dataRoot: root, defaults: defaults)
+        XCTAssertEqual(model.postcardRecipient, .empty)
+        XCTAssertEqual(defaults.data(forKey: key), original)
+    }
+
+    func testOldPhotoCallbackCannotConsumeReplacementPhotoUnread() {
+        let snapshot = makeSnapshot(phase: .postcardReady)
+        let original = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let model = AppModel(snapshot: snapshot, events: [original], defaults: isolatedDefaults())
+        model.openHouseFromDesktop()
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        var replacement = original
+        replacement.postcardRelativePath = "postcards/replacement.png"
+        model.apply(next: snapshot, events: [replacement])
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/replacement.png")
+        XCTAssertTrue(model.unreadPostcardIDs.isEmpty)
+    }
+
+    func testClosingPostcardRejectsDelayedPhotoCallback() {
+        let defaults = isolatedDefaults()
+        let snapshot = makeSnapshot(phase: .resting)
+        let event = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let model = AppModel(snapshot: snapshot, events: [event], defaults: defaults)
+        model.openHouseFromDesktop()
+        model.close()
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        let reopened = AppModel(snapshot: snapshot, events: [event], defaults: defaults)
+        XCTAssertEqual(reopened.unreadPostcardIDs, [firstID])
+    }
+
+    func testLegacyReadWaitingEntryIsMigratedWithoutResettingReadReadyPhoto() {
+        let defaults = isolatedDefaults()
+        let root = URL(fileURLWithPath: "/tmp/legacy-postcard-read")
+        var waiting = makeEvent(id: firstID, seconds: 100, status: .pendingImage)
+        let alreadyRead = makeEvent(id: secondID, seconds: 200, status: .ready)
+        let key = AppModel.readDefaultsScopeKey(dataRoot: root)
+        defaults.set([firstID.uuidString, secondID.uuidString], forKey: key)
+        _ = AppModel(snapshot: makeSnapshot(phase: .postcardReady), events: [waiting, alreadyRead], dataRoot: root, defaults: defaults)
+        waiting.postcardStatus = .ready
+        waiting.postcardRelativePath = "postcards/trip/new.png"
+        let restarted = AppModel(snapshot: makeSnapshot(phase: .postcardReady), events: [waiting, alreadyRead], dataRoot: root, defaults: defaults)
+        XCTAssertEqual(restarted.unreadPostcardIDs, [firstID])
+        XCTAssertEqual(restarted.readPostcardIDs, [secondID])
     }
     private let tripID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
     private let firstID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
     private let secondID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
 
-    func testCharacterProfileDefaultsAndChangesEvenWhenSnapshotVersionDoesNot() {
-        let snapshot = makeSnapshot(phase: .resting)
-        let custom = CharacterProfile(
-            id: "custom", displayName: "小橘", description: "", spriteVersionNumber: 2,
-            sprite: .dataRootRelative("characters/custom/revision/assets/pet.webp"),
-            referenceImages: [],
-            source: .importedManifest("characters/custom/revision/source-manifest.json")
-        )
-        let model = AppModel(snapshot: snapshot, defaults: isolatedDefaults(), supplies: [])
-
-        XCTAssertEqual(model.characterProfile, .defaultBlackCat)
-        model.apply(next: snapshot, events: [], characterProfile: custom)
-        XCTAssertEqual(model.characterProfile, custom)
-
-        model.apply(next: snapshot, events: [])
-        XCTAssertEqual(model.characterProfile, custom)
+    func testNewImageArrivesUnreadEvenIfWaitingEntryWasOpened() {
+        let defaults = isolatedDefaults()
+        let snapshot = makeSnapshot(phase: .postcardReady)
+        let pending = makeEvent(id: firstID, seconds: 10, status: .pendingImage)
+        let model = AppModel(snapshot: snapshot, events: [pending], defaults: defaults)
+        model.openLatestPostcardFromMenu()
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        let ready = makeEvent(id: firstID, seconds: 10, status: .ready)
+        model.apply(next: snapshot, events: [ready])
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        let restored = AppModel(snapshot: snapshot, events: [ready], defaults: defaults)
+        XCTAssertEqual(restored.unreadPostcardIDs, [firstID])
     }
 
-    func testHistoryReplacementCanCarryRepositoryEffectiveCharacter() {
-        let custom = CharacterProfile(
-            id: "custom", displayName: "小橘", description: "", spriteVersionNumber: 2,
-            sprite: .dataRootRelative("characters/custom/revision/assets/pet.webp"),
-            referenceImages: [],
-            source: .importedManifest("characters/custom/revision/source-manifest.json")
-        )
-        let model = AppModel(snapshot: makeSnapshot(phase: .resting), defaults: isolatedDefaults(), supplies: [])
+    func testWaitingReadSurvivesRestartAndDoesNotReadLaterReadyPhoto() {
+        let defaults = isolatedDefaults()
+        let snapshot = makeSnapshot(phase: .postcardReady)
+        let pending = makeEvent(id: firstID, seconds: 10, status: .pendingImage)
+        let original = AppModel(snapshot: snapshot, events: [pending], defaults: defaults)
+        original.openLatestPostcardFromMenu()
+        let ready = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let restarted = AppModel(snapshot: snapshot, events: [ready], defaults: defaults)
+        XCTAssertEqual(restarted.unreadPostcardIDs, [firstID])
+        restarted.openLatestPostcardFromMenu()
+        restarted.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        let reopened = AppModel(snapshot: snapshot, events: [ready], defaults: defaults)
+        XCTAssertTrue(reopened.unreadPostcardIDs.isEmpty)
+    }
 
-        model.replaceAfterHistoryClear(next: makeSnapshot(version: 2, phase: .resting), events: [], characterProfile: custom)
+    func testFavouriteAndAlbumBrowsingDoNotReadOrRewriteCardsAndPersistPerRoot() {
+        let defaults = isolatedDefaults()
+        let snapshot = makeSnapshot(phase: .resting)
+        let event = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let root = URL(fileURLWithPath: "/tmp/library-scope-a")
+        let model = AppModel(snapshot: snapshot, events: [event], dataRoot: root, defaults: defaults)
+        model.openLatestAlbumFromMenu()
+        model.toggleFavourite(firstID)
+        model.toggleFavourite(secondID)
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        XCTAssertEqual(model.events, [event])
+        XCTAssertEqual(model.favouritePostcardIDs, [firstID])
+        let reopened = AppModel(snapshot: snapshot, events: [event], dataRoot: root, defaults: defaults)
+        XCTAssertEqual(reopened.favouritePostcardIDs, [firstID])
+        let isolated = AppModel(snapshot: snapshot, events: [event], dataRoot: URL(fileURLWithPath: "/tmp/library-scope-b"), defaults: defaults)
+        XCTAssertTrue(isolated.favouritePostcardIDs.isEmpty)
+        model.handle(.postcard(firstID))
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        XCTAssertTrue(model.unreadPostcardIDs.isEmpty)
+        XCTAssertEqual(model.favouritePostcardIDs, [firstID])
+        model.toggleFavourite(firstID)
+        XCTAssertTrue(model.favouritePostcardIDs.isEmpty)
+    }
 
-        XCTAssertEqual(model.characterProfile, custom)
+    func testHouseReadsEachScenicFaceAndHidesLetterWithoutChangingTripPhase() {
+        let defaults = isolatedDefaults()
+        let snapshot = makeSnapshot(phase: .postcardReady)
+        let events = [makeEvent(id: secondID, seconds: 20, status: .ready),
+                      makeEvent(id: firstID, seconds: 10, status: .ready)]
+        let model = AppModel(snapshot: snapshot, events: events, defaults: defaults)
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(firstID))
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID, secondID])
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        XCTAssertEqual(model.unreadPostcardIDs, [secondID])
+        XCTAssertTrue(PetHouseStatus(phase: model.snapshot.phase, hasUnreadPostcard: !model.unreadPostcardIDs.isEmpty).showsLetter)
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(secondID))
+        model.postcardFrontDidDisplay(secondID, relativePath: "postcards/\(secondID).png")
+        XCTAssertEqual(model.snapshot, snapshot)
+        XCTAssertFalse(PetHouseStatus(phase: model.snapshot.phase, hasUnreadPostcard: !model.unreadPostcardIDs.isEmpty).showsLetter)
+        let reloaded = AppModel(snapshot: snapshot, events: events, defaults: defaults)
+        XCTAssertTrue(reloaded.unreadPostcardIDs.isEmpty)
+        reloaded.openHouseFromDesktop()
+        XCTAssertEqual(reloaded.presentation, .status)
+    }
+
+    func testHouseReadsAvailableCardsBeforeOlderWaitingCardsAndThenFallsBack() {
+        let defaults = isolatedDefaults()
+        let snapshot = makeSnapshot(phase: .resting)
+        let failed = makeEvent(id: UUID(), seconds: 10, status: .imageUnavailable)
+        let waiting = makeEvent(id: UUID(), seconds: 20, status: .pendingImage)
+        let firstReady = makeEvent(id: firstID, seconds: 30, status: .ready)
+        let secondReady = makeEvent(id: secondID, seconds: 40, status: .ready)
+        let events = [secondReady, waiting, firstReady, failed]
+        let model = AppModel(snapshot: snapshot, events: events, defaults: defaults)
+        let originalUnread = [failed.id, waiting.id, firstID, secondID]
+        XCTAssertEqual(model.unreadPostcardIDs, originalUnread)
+
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(firstID))
+        XCTAssertEqual(model.unreadPostcardIDs, originalUnread, "Choosing a card must not consume unread state")
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(secondID))
+        model.postcardFrontDidDisplay(secondID, relativePath: "postcards/\(secondID).png")
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(failed.id))
+        XCTAssertEqual(model.unreadPostcardIDs, [failed.id, waiting.id])
+        XCTAssertEqual(model.readPostcardIDs, [firstID, secondID])
+        XCTAssertTrue(PetHouseStatus(phase: snapshot.phase, hasUnreadPostcard: true).showsLetter)
+        let reloaded = AppModel(snapshot: snapshot, events: events, defaults: defaults)
+        XCTAssertEqual(reloaded.nextUnreadPostcardID, failed.id)
+        XCTAssertEqual(reloaded.unreadPostcardIDs, [failed.id, waiting.id])
+        XCTAssertEqual(model.events, events)
+        XCTAssertEqual(model.snapshot, snapshot)
+    }
+
+    func testHousePriorityRequiresAnArrivedReadyCardWithNonemptyImagePath() {
+        let waiting = makeEvent(id: UUID(), seconds: 10, status: .pendingImage)
+        var missingPath = makeEvent(id: UUID(), seconds: 20, status: .ready)
+        missingPath.postcardRelativePath = nil
+        var emptyPath = makeEvent(id: UUID(), seconds: 30, status: .ready)
+        emptyPath.postcardRelativePath = ""
+        let unavailable = makeEvent(id: UUID(), seconds: 40, status: .imageUnavailable)
+        let future = makeEvent(id: UUID(), seconds: 200, status: .ready)
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting),
+            events: [future, emptyPath, unavailable, missingPath, waiting], defaults: isolatedDefaults(),
+            clock: { Date(timeIntervalSince1970: 100) })
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(waiting.id))
+        XCTAssertEqual(model.unreadPostcardIDs, [waiting.id, missingPath.id, emptyPath.id, unavailable.id])
+        XCTAssertTrue(model.readPostcardIDs.isEmpty)
+    }
+
+    func testWaitingCardBecomesFirstAvailableAfterImageArrivesWithoutAutomaticNavigation() {
+        let waiting = makeEvent(id: firstID, seconds: 10, status: .pendingImage)
+        let ready = makeEvent(id: secondID, seconds: 20, status: .ready)
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), events: [waiting, ready], defaults: isolatedDefaults())
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(secondID))
+        let completed = makeEvent(id: firstID, seconds: 10, status: .ready)
+        model.apply(next: makeSnapshot(version: 2, phase: .resting), events: [completed, ready])
+        XCTAssertEqual(model.presentation, .postcard(secondID), "An arriving image must not interrupt the open card")
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(firstID))
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID, secondID])
+        XCTAssertTrue(model.readPostcardIDs.isEmpty)
+    }
+
+    func testHousePriorityKeepsEqualDateOrderAndDoesNotChangeLatestMenu() {
+        let first = makeEvent(id: firstID, seconds: 20, status: .ready)
+        let second = makeEvent(id: secondID, seconds: 20, status: .ready)
+        let latest = makeEvent(id: UUID(), seconds: 30, status: .imageUnavailable)
+        let older = makeEvent(id: UUID(), seconds: 10, status: .pendingImage)
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting),
+            events: [second, latest, older, first], defaults: isolatedDefaults())
+        model.openHouseFromDesktop()
+        XCTAssertEqual(model.presentation, .postcard(secondID))
+        model.openLatestPostcardFromMenu()
+        XCTAssertEqual(model.presentation, .postcard(latest.id))
+        XCTAssertTrue(model.readPostcardIDs.isEmpty)
+    }
+
+    func testPromptScenicDisplayClearsHouseLetterDuringPostcardPhase() {
+        let model = AppModel(snapshot: makeSnapshot(phase: .postcardReady),
+                             events: [makeEvent(id: firstID, seconds: 10, status: .ready)],
+                             defaults: isolatedDefaults())
+        XCTAssertTrue(model.openPostcardFromPrompt(eventID: firstID, tripID: tripID))
+        XCTAssertTrue(PetHouseStatus(phase: model.snapshot.phase, hasUnreadPostcard: !model.unreadPostcardIDs.isEmpty).showsLetter)
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
+        XCTAssertFalse(PetHouseStatus(phase: model.snapshot.phase, hasUnreadPostcard: !model.unreadPostcardIDs.isEmpty).showsLetter)
     }
 
     func testHomeCareReactsOnlyAfterPersistenceAndDoesNotMutateTrip() {
@@ -92,6 +333,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.presentation, .status)
         model.handle(.postcard(firstID))
         XCTAssertEqual(model.presentation, .postcard(firstID))
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
         XCTAssertEqual(model.readPostcardIDs, [firstID])
         model.handle(.album(tripID))
         XCTAssertEqual(model.presentation, .album(tripID))
@@ -123,6 +365,7 @@ final class AppModelTests: XCTestCase {
         model.handle(.postcard(firstID))
 
         XCTAssertEqual(model.presentation, .postcard(firstID))
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
         XCTAssertEqual(model.readPostcardIDs, [firstID])
         model.close()
         XCTAssertEqual(model.presentation, .album(tripID))
@@ -181,7 +424,7 @@ final class AppModelTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let rejected = makeEvent(id: UUID(), seconds: 0, status: .rejected)
-        let laterInJournal = makeEvent(id: secondID, seconds: 10, status: .imageUnavailable)
+        let laterInJournal = makeEvent(id: secondID, seconds: 10, status: .ready)
         let earlierInJournal = makeEvent(id: firstID, seconds: 10, status: .ready)
         let none = makeEvent(id: UUID(), seconds: 20, status: .none)
         let model = AppModel(
@@ -195,6 +438,7 @@ final class AppModelTests: XCTestCase {
         model.handle(.status)
         model.openNextPostcardOrBase()
         XCTAssertEqual(model.presentation, .postcard(secondID))
+        model.postcardFrontDidDisplay(secondID, relativePath: "postcards/\(secondID).png")
         XCTAssertEqual(model.unreadPostcardIDs, [firstID])
 
         let reloaded = AppModel(
@@ -366,7 +610,8 @@ final class AppModelTests: XCTestCase {
         model.openLatestPostcardFromMenu()
 
         XCTAssertEqual(model.presentation, .postcard(secondID))
-        XCTAssertTrue(model.readPostcardIDs.contains(secondID))
+        model.postcardFrontDidDisplay(secondID, relativePath: "postcards/\(secondID).png")
+        XCTAssertFalse(model.readPostcardIDs.contains(secondID))
         model.close()
         XCTAssertEqual(model.presentation, .status)
     }
@@ -506,8 +751,10 @@ final class AppModelTests: XCTestCase {
         )
         model.openLatestAlbumFromMenu()
         model.handle(.postcard(secondID))
+        model.postcardFrontDidDisplay(secondID, relativePath: "postcards/\(secondID).png")
 
         XCTAssertTrue(model.openPostcardFromPrompt(eventID: firstID, tripID: olderTripID))
+        model.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
         XCTAssertEqual(model.presentation, .postcard(firstID))
         XCTAssertEqual(model.readPostcardIDs, [secondID, firstID])
         XCTAssertEqual(model.unreadPostcardIDs, [])
@@ -649,6 +896,7 @@ final class AppModelTests: XCTestCase {
         let first = AppModel(snapshot: makeSnapshot(phase: .resting), events: [event], dataRoot: URL(fileURLWithPath: "/tmp/a"), defaults: defaults, supplies: [])
         first.handle(.status)
         first.openNextPostcardOrBase()
+        first.postcardFrontDidDisplay(firstID, relativePath: "postcards/\(firstID).png")
         let second = AppModel(snapshot: makeSnapshot(phase: .resting), events: [event], dataRoot: URL(fileURLWithPath: "/tmp/b"), defaults: defaults, supplies: [])
         XCTAssertEqual(second.unreadPostcardIDs, [firstID])
     }
@@ -693,30 +941,6 @@ final class AppModelTests: XCTestCase {
         }
     }
 
-    func testSupplementEventWithoutPresentationKeepsOrdinaryReferencesAndCharacter() {
-        let ordinary = makeEvent(id: firstID, seconds: 10, status: .ready)
-        let supplement = makeEvent(id: secondID, seconds: 20, status: .pendingImage)
-        let reference = PostcardPresentationReference(relativePath: "ordinary.json", sha256: "ordinary")
-        let character = CharacterProfile(
-            id: "custom", displayName: "小橘", description: "", spriteVersionNumber: 2,
-            sprite: .dataRootRelative("characters/custom/revision/assets/pet.webp"),
-            referenceImages: [],
-            source: .importedManifest("characters/custom/revision/source-manifest.json")
-        )
-        let snapshot = makeSnapshot(phase: .resting)
-        let model = AppModel(snapshot: snapshot, events: [ordinary], presentationReferences: [ordinary.id: reference], defaults: isolatedDefaults(), characterProfile: character)
-        model.updatePostcardWork([PostcardWorkItem(id: UUID(), tripID: tripID, eventID: supplement.id, isSupplement: true, generatedAt: supplement.occurredAt, status: .pending)])
-
-        model.apply(next: snapshot, events: [ordinary, supplement], presentationReferences: [ordinary.id: reference])
-
-        XCTAssertEqual(model.events.map(\.id), [ordinary.id, supplement.id])
-        XCTAssertEqual(model.presentationReferences, [ordinary.id: reference])
-        XCTAssertEqual(model.characterProfile, character)
-        model.openLatestAlbumFromMenu()
-        model.handle(.postcard(supplement.id))
-        XCTAssertEqual(model.presentation, .postcard(supplement.id))
-    }
-
     func testUnpublishedWorkOpensAlbumSurvivesRefreshAndNeverCreatesUnreadEvent() {
         let model = AppModel(snapshot: makeSnapshot(phase: .resting), defaults: isolatedDefaults())
         let slot = UUID()
@@ -735,11 +959,21 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(requests.isEmpty)
         model.updatePostcardWork([PostcardWorkItem(id: slot, tripID: tripID, eventID: nil, isSupplement: false, generatedAt: nil, status: .manualRequired)])
         model.retryPostcard(slot)
-        XCTAssertTrue(requests.isEmpty)
-        let legacyEventID = UUID()
-        model.updatePostcardWork([PostcardWorkItem(id: slot, tripID: tripID, eventID: legacyEventID, isSupplement: false, generatedAt: nil, status: .manualRequired)])
-        model.retryPostcard(slot)
-        XCTAssertEqual(requests, [legacyEventID])
+        XCTAssertTrue(requests.isEmpty, "an unpublished slot has no image to retry")
+    }
+
+    func testLegacySlotRetryTargetsBoundEventInsteadOfStableSlotID() {
+        let slotID = UUID()
+        let eventID = UUID()
+        let event = makeEvent(id: eventID, tripID: tripID, seconds: 10, status: .imageUnavailable)
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), events: [event], defaults: isolatedDefaults())
+        model.updatePostcardWork([PostcardWorkItem(id: slotID, tripID: tripID, eventID: eventID,
+            isSupplement: false, generatedAt: event.occurredAt, status: .manualRequired)])
+        var requests: [UUID] = []
+        model.retryPostcardAction = { requests.append($0) }
+        model.retryPostcard(slotID)
+        XCTAssertEqual(requests, [eventID])
+        XCTAssertNotEqual(slotID, eventID)
     }
 
     func testSupplementDoesNotMakeOlderTripTheLatestAlbum() {
@@ -791,4 +1025,76 @@ final class AppModelTests: XCTestCase {
             postcardRelativePath: status == .ready ? "postcards/\(id).png" : nil
         )
     }
+    func testAcceptedPresentationReferencesRefreshAtSameVersionAndPruneRemovedEvents() {
+        let event = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let snapshot = makeSnapshot(phase: .resting)
+        let first = PostcardPresentationReference(relativePath: "first.json", sha256: "first")
+        let second = PostcardPresentationReference(relativePath: "second.json", sha256: "second")
+        let model = AppModel(snapshot: snapshot, events: [event], presentationReferences: [event.id: first], defaults: isolatedDefaults(), supplies: [])
+        XCTAssertEqual(model.presentationReferences[event.id], first)
+        model.apply(next: snapshot, events: [event], presentationReferences: [event.id: second])
+        XCTAssertEqual(model.presentationReferences[event.id], second)
+        model.apply(next: snapshot, events: [])
+        XCTAssertTrue(model.presentationReferences.isEmpty)
+        model.apply(next: snapshot, events: [event], presentationReferences: [event.id: first])
+        model.replaceAfterHistoryClear(next: snapshot, events: [])
+        XCTAssertTrue(model.presentationReferences.isEmpty)
+    }
+    func testCharacterProfileDefaultsAndChangesEvenWhenSnapshotVersionDoesNot() {
+        let snapshot = makeSnapshot(phase: .resting)
+        let custom = CharacterProfile(
+            id: "custom", displayName: "小橘", description: "", spriteVersionNumber: 2,
+            sprite: .dataRootRelative("characters/custom/revision/assets/pet.webp"),
+            referenceImages: [],
+            source: .importedManifest("characters/custom/revision/source-manifest.json")
+        )
+        let model = AppModel(snapshot: snapshot, defaults: isolatedDefaults(), supplies: [])
+
+        XCTAssertEqual(model.characterProfile, .defaultBlackCat)
+        model.apply(next: snapshot, events: [], characterProfile: custom)
+        XCTAssertEqual(model.characterProfile, custom)
+
+        model.apply(next: snapshot, events: [])
+        XCTAssertEqual(model.characterProfile, custom)
+    }
+
+    func testHistoryReplacementCanCarryRepositoryEffectiveCharacter() {
+        let custom = CharacterProfile(
+            id: "custom", displayName: "小橘", description: "", spriteVersionNumber: 2,
+            sprite: .dataRootRelative("characters/custom/revision/assets/pet.webp"),
+            referenceImages: [],
+            source: .importedManifest("characters/custom/revision/source-manifest.json")
+        )
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), defaults: isolatedDefaults(), supplies: [])
+
+        model.replaceAfterHistoryClear(next: makeSnapshot(version: 2, phase: .resting), events: [], characterProfile: custom)
+
+        XCTAssertEqual(model.characterProfile, custom)
+    }
+
+    func testSupplementEventWithoutPresentationKeepsOrdinaryReferencesAndCharacter() {
+        let ordinary = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let supplement = makeEvent(id: secondID, seconds: 20, status: .pendingImage)
+        let reference = PostcardPresentationReference(relativePath: "ordinary.json", sha256: "ordinary")
+        let character = CharacterProfile(
+            id: "custom", displayName: "小橘", description: "", spriteVersionNumber: 2,
+            sprite: .dataRootRelative("characters/custom/revision/assets/pet.webp"),
+            referenceImages: [],
+            source: .importedManifest("characters/custom/revision/source-manifest.json")
+        )
+        let snapshot = makeSnapshot(phase: .resting)
+        let model = AppModel(snapshot: snapshot, events: [ordinary], presentationReferences: [ordinary.id: reference], defaults: isolatedDefaults(), characterProfile: character)
+        model.updatePostcardWork([PostcardWorkItem(id: UUID(), tripID: tripID, eventID: supplement.id, isSupplement: true, generatedAt: supplement.occurredAt, status: .pending)])
+
+        model.apply(next: snapshot, events: [ordinary, supplement], presentationReferences: [ordinary.id: reference])
+
+        XCTAssertEqual(model.events.map(\.id), [ordinary.id, supplement.id])
+        XCTAssertEqual(model.presentationReferences, [ordinary.id: reference])
+        XCTAssertEqual(model.characterProfile, character)
+        model.openLatestAlbumFromMenu()
+        model.handle(.postcard(supplement.id))
+        XCTAssertEqual(model.presentation, .postcard(supplement.id))
+    }
+
+
 }

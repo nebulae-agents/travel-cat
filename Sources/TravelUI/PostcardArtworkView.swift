@@ -2,6 +2,7 @@ import CoreGraphics
 import CryptoKit
 import SwiftUI
 import TravelCore
+import TravelStorage
 
 struct PostcardLocationLabelContent: View {
     let label: String
@@ -92,12 +93,13 @@ public enum PostcardAnalysisCachePolicy {
 }
 
 struct PostcardArtworkLoadIdentity {
-    static func requestID(event: TripEvent, rootURL: URL?, reference: PostcardPresentationReference?) -> String {
+    static func requestID(event: TripEvent, rootURL: URL?, reference: PostcardPresentationReference? = nil) -> String {
         let quoteDigest = SHA256.hash(data: Data(event.mood.quote.utf8)).map { String(format: "%02x", $0) }.joined()
+        let revisionToken = rootURL.map { (try? PostcardArtworkRevisionStore(root: $0))?.revisionChangeToken(for: event.postcardRelativePath ?? "") ?? "" } ?? ""
         return [
             rootURL?.standardizedFileURL.path ?? "", event.postcardRelativePath ?? "",
-            event.id.uuidString, event.tripID.uuidString, quoteDigest,
-            reference?.relativePath ?? "", reference?.sha256 ?? "",
+            event.id.uuidString, event.tripID.uuidString, event.postcardStatus.rawValue, quoteDigest,
+            reference?.relativePath ?? "", reference?.sha256 ?? "", revisionToken,
         ].joined(separator: "\u{0}")
     }
     static func shouldPublish(requestID: String, currentID: String) -> Bool {
@@ -157,11 +159,12 @@ struct PostcardAspectFillTransform: Equatable, Sendable {
 private struct PostcardAnalysisKey: Hashable, Sendable {
     let rootPath: String
     let relativePath: String
+    let contentHash: String?
     let pixelWidth: Int
     let pixelHeight: Int
 }
 
-private actor PostcardAnalysisCache {
+actor PostcardAnalysisCache {
     static let shared = PostcardAnalysisCache()
     private var values: [PostcardAnalysisKey: PostcardVisualAnalysis] = [:]
     private var order: [PostcardAnalysisKey] = []
@@ -169,11 +172,13 @@ private actor PostcardAnalysisCache {
     func analysis(
         for image: CGImage,
         rootURL: URL,
-        relativePath: String
+        relativePath: String,
+        contentHash: String? = nil
     ) async throws -> PostcardVisualAnalysis {
         let key = PostcardAnalysisKey(
             rootPath: rootURL.standardizedFileURL.path,
             relativePath: relativePath,
+            contentHash: contentHash,
             pixelWidth: image.width,
             pixelHeight: image.height
         )
@@ -240,6 +245,7 @@ public struct PostcardArtworkView: View {
     public let height: CGFloat?
     public let profile: PostcardOverlayProfile
     public let presentationReference: PostcardPresentationReference?
+    private let onImageVisible: ((String) -> Void)?
 
     @State private var image: CGImage?
     @State private var analysis: PostcardVisualAnalysis?
@@ -251,12 +257,13 @@ public struct PostcardArtworkView: View {
     @State private var showsFallbackIndicator = false
     @State private var canvasWidth: CGFloat = 0
 
-    public init(event: TripEvent, rootURL: URL?, height: CGFloat? = nil, profile: PostcardOverlayProfile, presentationReference: PostcardPresentationReference? = nil) {
+    public init(event: TripEvent, rootURL: URL?, height: CGFloat? = nil, profile: PostcardOverlayProfile, presentationReference: PostcardPresentationReference? = nil, onImageVisible: ((String) -> Void)? = nil) {
         self.event = event
         self.rootURL = rootURL
         self.height = height
         self.profile = profile
         self.presentationReference = presentationReference
+        self.onImageVisible = onImageVisible
     }
 
     public static func accessibilityText(event: TripEvent) -> String {
@@ -306,6 +313,15 @@ public struct PostcardArtworkView: View {
                 Color.blue.opacity(0.12)
                 if let image, let imageGeometry {
                     PostcardRenderedImage(image: image, geometry: imageGeometry)
+                        .background {
+                            if onImageVisible != nil {
+                                PostcardImageVisibilityObserver(requestID: taskID, imageRect: visibleCanvas) {
+                                    guard event.postcardStatus == .ready, currentRequestID == taskID,
+                                          let path = event.postcardRelativePath else { return }
+                                    onImageVisible?(path)
+                                }
+                            }
+                        }
                     if let previewCat {
                         PreviewBlackCatOverlay(
                             descriptor: previewCat,

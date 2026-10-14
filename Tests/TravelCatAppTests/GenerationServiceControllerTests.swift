@@ -16,6 +16,36 @@ private final class MemoryGenerationCredentials: TravelServiceCredentialStoring 
 }
 
 final class GenerationServiceControllerTests: XCTestCase {
+    @MainActor func testNoKeySetupPersistsBothServicesAndReopensReadyWithoutTouchingHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let history = root.appendingPathComponent("journal/events.jsonl")
+        try FileManager.default.createDirectory(at: history.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let original = Data("preserved history fixture\n".utf8)
+        try original.write(to: history)
+        let store = TravelGenerationConfigurationStore(root: root)
+        let keys = MemoryGenerationCredentials()
+        var appliedAfterPersistence = false
+        let controller = try GenerationServiceController(store: store, credentials: keys, hasExistingHistory: false,
+            didSave: { appliedAfterPersistence = (try? store.load(hasExistingHistory: false).onboardingCompleted) == true })
+        XCTAssertFalse(controller.isReady)
+        var candidate = controller.configuration
+        candidate.narrative = .init(kind: .openAICompatible, baseURL: "http://127.0.0.1:8181/v1", model: "text-fixture", jsonMode: false)
+        candidate.image = .init(kind: .openAICompatible, baseURL: "http://127.0.0.1:8182/v1", model: "image-fixture", useImageEdits: false)
+        try controller.save(candidate, narrativeSecret: nil, imageSecret: nil, narrativeNoKey: true, imageNoKey: true)
+        let reopened = try GenerationServiceController(store: store, credentials: keys, hasExistingHistory: false)
+        XCTAssertTrue(appliedAfterPersistence)
+        XCTAssertTrue(reopened.isReady)
+        XCTAssertEqual(reopened.configuration, controller.configuration)
+        XCTAssertEqual(reopened.configuration.narrative.baseURL, candidate.narrative.baseURL)
+        XCTAssertEqual(reopened.configuration.image.model, candidate.image.model)
+        XCTAssertFalse(reopened.configuration.narrative.jsonMode)
+        XCTAssertFalse(reopened.configuration.image.useImageEdits)
+        XCTAssertTrue(keys.values.isEmpty)
+        XCTAssertEqual(keys.reads, 0)
+        XCTAssertEqual(try Data(contentsOf: history), original)
+    }
+
     @MainActor func testFirstLaunchGateAndHistoryCompatibilityDoNotWrite() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = TravelGenerationConfigurationStore(root: root)

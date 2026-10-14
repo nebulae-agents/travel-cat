@@ -7,7 +7,7 @@ public struct PetHouseStatus: Equatable, Sendable {
     public let showsLetter: Bool
     public init(phase: TravelPhase, hasUnreadPostcard: Bool) {
         self.phase = phase
-        showsLetter = hasUnreadPostcard || phase == .postcardReady
+        showsLetter = hasUnreadPostcard
     }
     public var showsCat: Bool { phase == .resting || phase == .preparing }
     public var title: String {
@@ -94,7 +94,7 @@ public struct PetHouseView: View {
         .frame(width: 240, height: 280)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("小黑的家，\(status.phase == .resting || isReacting ? activity.title : status.title)\(status.showsLetter ? "，有来信" : "")")
-        .accessibilityHint("点击查看当前旅程，右键打开菜单")
+        .accessibilityHint(status.showsLetter ? "点击阅读下一张未读明信片，右键打开菜单" : "点击查看当前旅程，右键打开菜单")
         .task(id: "\(status.phase.rawValue)-\(isActive)-\(reduceMotion)-\(reaction?.id.uuidString ?? "none")") {
             strollOffset = 0
             isReacting = false
