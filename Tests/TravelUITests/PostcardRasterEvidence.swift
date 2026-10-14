@@ -2,9 +2,11 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 import XCTest
+@testable import TravelUI
 
 /// Diagnostics from synthetic fixtures only. The two crops deliberately exclude
 /// recipient/sender names, addresses, quotes and the rest of the application.
+@MainActor
 enum PostcardRasterEvidence {
     static func postmark(_ image: CGImage) throws -> CGImage {
         try crop(image, rectangle: CGRect(x: 0.63, y: 0.055, width: 0.335, height: 0.25))
@@ -18,6 +20,34 @@ enum PostcardRasterEvidence {
                                y: paper.minY + paper.height * 0.825,
                                width: paper.width * 0.47, height: paper.height * 0.115)
         return try XCTUnwrap(image.cropping(to: rectangle.integral))
+    }
+
+    static func pixels(_ image: CGImage) throws -> Data {
+        var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        try bytes.withUnsafeMutableBytes { buffer in
+            let context = try XCTUnwrap(CGContext(data: buffer.baseAddress,
+                width: image.width, height: image.height, bitsPerComponent: 8,
+                bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        }
+        return Data(bytes)
+    }
+
+    static func assertRecordedDay(_ image: CGImage, date: Date,
+                                  render: (Date?) throws -> CGImage,
+                                  file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(PostcardMessageFaceView.postmarkDate(date), "2026.10.01", file: file, line: line)
+        let original = try pixels(postmark(image))
+        XCTAssertEqual(original, try pixels(postmark(render(date))),
+                       "Repeated date rendering must be stable", file: file, line: line)
+        for days in [1, 3] {
+            let other = date.addingTimeInterval(TimeInterval(days * 86_400))
+            XCTAssertNotEqual(original, try pixels(postmark(render(other))),
+                              "Recorded day glyphs must differ from 10.02/10.04", file: file, line: line)
+        }
+        XCTAssertNotEqual(original, try pixels(postmark(render(nil))),
+                          "A recorded date must differ from an absent postmark", file: file, line: line)
     }
 
     static func write(_ crop: CGImage, tag: String) throws {

@@ -29,28 +29,51 @@ final class PostcardLibraryTests: XCTestCase {
         event.postcardRelativePath = nil
         let work = PostcardWorkItem(id: event.id, tripID: event.tripID, eventID: event.id,
             isSupplement: false, generatedAt: event.occurredAt, status: .pending)
-        let view = NSHostingView(rootView: TripAlbumView(tripID: nil, events: [event], workItems: [work],
-            unreadIDs: [event.id], open: { _ in }))
-        view.frame = CGRect(x: 0, y: 0, width: 760, height: 700)
-        let window = NSWindow(contentRect: view.frame, styleMask: [], backing: .buffered, defer: false)
-        window.contentView = view
-        defer { withExtendedLifetime(window) {} }
-        view.layoutSubtreeIfNeeded()
-        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        let image = try XCTUnwrap(bitmap.cgImage)
+        func raster(_ value: TripEvent) throws -> CGImage {
+            let view = NSHostingView(rootView: TripAlbumView(tripID: nil, events: [value], workItems: [work],
+                unreadIDs: [value.id], open: { _ in }))
+            view.frame = CGRect(x: 0, y: 0, width: 760, height: 700)
+            let window = NSWindow(contentRect: view.frame, styleMask: [], backing: .buffered, defer: false)
+            window.contentView = view
+            defer { withExtendedLifetime(window) {} }
+            view.layoutSubtreeIfNeeded()
+            let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            return try XCTUnwrap(bitmap.cgImage)
+        }
+        let image = try raster(event)
         let bounds = try envelopePaperBounds(image)
         XCTAssertEqual(bounds.width / bounds.height, 1.5, accuracy: 0.03)
         try png(image).write(to: URL(fileURLWithPath: "/tmp/travelcat-album-envelope-grid.png"))
         try PostcardRasterEvidence.write(PostcardRasterEvidence.publicPlace(image, paperBounds: bounds),
                                          tag: "public-kyoto-place")
+        let placePixels = try PostcardRasterEvidence.pixels(
+            PostcardRasterEvidence.publicPlace(image, paperBounds: bounds))
+        let repeated = try raster(event)
+        XCTAssertEqual(placePixels, try PostcardRasterEvidence.pixels(
+            PostcardRasterEvidence.publicPlace(repeated, paperBounds: envelopePaperBounds(repeated))))
+        for wrongPlace in ["務川河畔", "川河畔"] {
+            let alternate = TripEvent(id: event.id, tripID: event.tripID,
+                previousEventID: event.previousEventID, occurredAt: event.occurredAt, phase: event.phase,
+                location: .init(country: "日本", city: "京都", place: wrongPlace),
+                transport: event.transport, summary: event.summary, mood: event.mood,
+                continuityReferences: event.continuityReferences, openHook: event.openHook,
+                consumedItemID: event.consumedItemID, postcardStatus: event.postcardStatus,
+                postcardRelativePath: event.postcardRelativePath, postcardStyleVersion: event.postcardStyleVersion)
+            let rendered = try raster(alternate)
+            XCTAssertNotEqual(placePixels, try PostcardRasterEvidence.pixels(
+                PostcardRasterEvidence.publicPlace(rendered, paperBounds: envelopePaperBounds(rendered))),
+                "Actual public-place glyphs must differ from a near-shape or missing-character substitution")
+        }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["zh-Hans", "en-US"]
         try VNImageRequestHandler(cgImage: image).perform([request])
         let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined()
         XCTAssertTrue(text.contains("未读"), text)
-        for content in ["小黑", "亲爱", "京都", "鸭川河畔"] {
+        // Non-Retina CI OCR may read 鸭 as 務. The crop controls above reject
+        // that substitution or a missing character without coaching recognition.
+        for content in ["小黑", "亲爱", "京都", "河畔"] {
             XCTAssertTrue(text.contains(content), text)
         }
         XCTAssertTrue(text.contains("From"), text)
