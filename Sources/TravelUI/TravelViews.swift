@@ -494,7 +494,7 @@ public struct PostcardView: View {
                             onSceneryDisplayed: onSceneryDisplayed, face: $face)
                             .frame(maxWidth: .infinity)
                     }
-                    Text(PostcardDisplayLocation().resolveSpoken(event.location))
+                    Text(PostcardDisplayLocation().resolveCompact(event.location))
                         .font(.title2.bold())
                         .accessibilityLabel(PostcardDisplayLocation().resolveSpoken(event.location))
                     Text(event.summary)
