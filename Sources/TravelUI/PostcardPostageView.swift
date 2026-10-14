@@ -143,9 +143,10 @@ private struct PostcardCancellationWaves: Shape {
     func path(in rect: CGRect) -> Path {
         let scale = rect.width / 120
         return Path { path in
-            for y in [12.0, 22.0, 32.0] {
+            let radius = postmark.width / 2
+            for y in [CGFloat(12), 22, 32] {
                 let delta = y - postmark.midY
-                let halfChord = sqrt(max(0, pow(postmark.width / 2, 2) - delta * delta))
+                let halfChord = max(0, radius * radius - delta * delta).squareRoot()
                 // Leave the dated centre clear. The waves continue over the other stamps.
                 let left = max(0, postmark.midX - halfChord - 1.5)
                 let right = min(120, postmark.midX + halfChord + 1.5)
