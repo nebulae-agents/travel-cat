@@ -108,7 +108,7 @@ private struct PostageCities: Sendable {
     }
 
     private init() {
-        guard let url = Bundle.module.url(forResource: "cities", withExtension: "tsv"),
+        guard let url = TravelUIResources.bundle.url(forResource: "cities", withExtension: "tsv"),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return }
         var codes: Set<String> = []
         for row in text.split(separator: "\n") {
