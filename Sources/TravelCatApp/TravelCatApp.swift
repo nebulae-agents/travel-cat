@@ -741,8 +741,8 @@ struct MenuServiceRootView: View {
             } else {
                 statusView
             }
-        case let .album(tripID):
-            TripAlbumView(tripID: tripID, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences,
+        case .album:
+            TripAlbumView(tripID: nil, events: model.events, rootURL: model.dataRoot, presentationReferences: model.presentationReferences,
                 workItems: model.postcardWorkItems, retry: model.retryPostcard,
                 error: model.postcardWorkError, notice: model.manualRetryMessage,
                 unreadIDs: Set(model.unreadPostcardIDs), favouriteIDs: model.favouritePostcardIDs, recipient: model.postcardRecipient) { destination in
