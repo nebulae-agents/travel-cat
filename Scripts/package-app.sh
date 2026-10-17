@@ -115,6 +115,7 @@ install -m 555 "$BUNDLED_LAUNCHER" "$STAGING/Contents/Resources/run-travelcatctl
 install -m 555 "$PINNED_CLI" "$STAGING/Contents/Helpers/travelcatctl"
 install -m 444 "$PROVENANCE" "$STAGING/Contents/Resources/travelcatctl-release.provenance"
 install -m 644 "$PLIST" "$STAGING/Contents/Info.plist"
+/usr/bin/plutil -insert TravelCatBuildTimestamp -string "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" "$STAGING/Contents/Info.plist"
 if [ -n "$DATA_ROOT" ]; then
     /usr/bin/plutil -insert TravelCatDataRoot -string "$DATA_ROOT" "$STAGING/Contents/Info.plist"
 fi

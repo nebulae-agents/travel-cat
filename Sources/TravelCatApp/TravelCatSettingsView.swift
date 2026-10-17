@@ -481,6 +481,10 @@ struct TravelCatSettingsView: View {
             if let message = environment.errorMessage {
                 Text(message).foregroundStyle(.red).textSelection(.enabled)
             }
+            Section("版本") {
+                LabeledContent("版本", value: AppBuildInformation.current.versionDescription)
+                LabeledContent("构建时间", value: AppBuildInformation.current.buildDateDescription())
+            }
         }
         .formStyle(.grouped)
         .padding(20)
