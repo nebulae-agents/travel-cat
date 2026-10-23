@@ -33,6 +33,9 @@ struct AgentWorkbenchView: View {
                 } else { newConversation }
             }.frame(minWidth: 450, maxWidth: .infinity, maxHeight: .infinity)
         }
+        .disabled(!model.isStorageReady)
+        .accessibilityHidden(!model.isStorageReady)
+        .overlay { if !model.isStorageReady { storageRecovery } }
         .frame(minWidth: 760, minHeight: 600).workbenchSurface()
         .background(WorkbenchReadReceipt(taskID: showingSettings || taskSheet != nil ? nil : model.selectedTaskID,
             unread: selectedTask?.unread ?? false, acknowledge: { model.markRead($0) }).frame(width: 0, height: 0))
@@ -47,10 +50,26 @@ struct AgentWorkbenchView: View {
             case .audit: AgentCallInspector(model: model, taskID: sheet.id)
             }
         }
-        .alert("Agent 工作台", isPresented: Binding(get: { model.error != nil && !showingSettings && taskSheet == nil }, set: { if !$0 { model.error = nil } })) {
+        .alert("Agent 工作台", isPresented: Binding(get: { model.isStorageReady && model.error != nil && !showingSettings && taskSheet == nil }, set: { if !$0 { model.error = nil } })) {
             Button("知道了") { model.error = nil }
         } message: { Text(model.error ?? "") }
     }
+    private var storageRecovery: some View {
+        VStack(spacing: 18) {
+            if model.storageStatus == .loading {
+                ProgressView().controlSize(.large)
+                Text("正在安全加载 Agent 数据").font(.title3.weight(.semibold))
+                Text("如果系统显示钥匙串提示，请解锁并允许 Travel Cat 访问。等待期间可以继续使用桌面小猫。").font(.callout).foregroundStyle(WorkbenchTheme.muted)
+            } else {
+                Image(systemName: "lock.shield").font(.system(size: 32)).foregroundStyle(CottageTheme.terracotta)
+                Text("安全存储尚未就绪").font(.title3.weight(.semibold))
+                Text(model.storageStatus.message ?? "请完成钥匙串授权后重试。").font(.callout).foregroundStyle(WorkbenchTheme.muted).textSelection(.enabled)
+                Button("重试") { model.retryStorage() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                Text("原有对话、审计记录和密钥会保留。").font(.caption).foregroundStyle(WorkbenchTheme.muted)
+            }
+        }.multilineTextAlignment(.center).padding(36).frame(maxWidth: .infinity, maxHeight: .infinity).background(WorkbenchTheme.canvas)
+    }
+
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 9) {
@@ -113,7 +132,7 @@ struct AgentWorkbenchView: View {
                         ForEach(model.state.instances) { Text($0.name).tag(Optional($0.id)) }
                     }.frame(maxWidth: 320).controlSize(.small)
                 }
-                let canSend = !model.isStarting && selectedInstance != nil && !newDraft.wrappedValue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let canSend = model.isStorageReady && !model.isStarting && selectedInstance != nil && !newDraft.wrappedValue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 AgentComposerView(draft: newDraft, instance: selectedInstance, isNew: true, canSend: canSend, focusRequest: focusRequest,
                     hint: model.isStarting ? "正在建立新对话，输入中的新内容会保留为草稿。" : nil, allowModelAccess: modelConsent, onFailure: { model.error = $0 }, send: start)
             }.padding(24).frame(maxWidth: 780)

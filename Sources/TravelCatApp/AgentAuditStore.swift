@@ -68,6 +68,31 @@ final class AgentAuditStore: AgentAuditStoring {
     }
 
     @MainActor
+    static func open(root: URL, credentials: any AsyncTravelServiceCredentialStoring) async throws -> AgentAuditStore {
+        let id = "audit-journal-v1"
+        let encoded = try await credentials.read(id: id)
+        try Task.checkCancellation()
+        let data: Data
+        if let encoded {
+            guard let decoded = Data(base64Encoded: encoded), decoded.count == 32 else { throw WorkbenchFailure("审计密钥无效，原密钥未替换。") }
+            data = decoded
+        } else {
+            let existing: [URL]
+            do { existing = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile { existing = [] }
+            catch { throw WorkbenchFailure("审计目录无法检查，密钥未变更；调用已阻止。") }
+            guard existing.isEmpty else { throw WorkbenchFailure("审计密钥缺失，原记录未覆盖，调用已阻止。") }
+            try Task.checkCancellation()
+            data = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+            try await credentials.save(data.base64EncodedString(), id: id)
+            try Task.checkCancellation()
+            guard try await credentials.read(id: id) == data.base64EncodedString() else { throw WorkbenchFailure("审计密钥保存未确认，禁止创建日志。") }
+            try Task.checkCancellation()
+        }
+        return try AgentAuditStore(root: root, keyData: data)
+    }
+
+    @MainActor
     static func open(root: URL, credentials: any TravelServiceCredentialStoring) throws -> AgentAuditStore {
         let id = "audit-journal-v1"
         let data: Data

@@ -5,7 +5,7 @@ import Darwin
 @MainActor
 extension AgentWorkbenchModel {
     private func readableArtifactTask(_ id: UUID) throws -> WorkbenchTask {
-        guard !loadFailed, let task = state.tasks.first(where: { $0.id == id }), liveTasks.contains(id),
+        guard isStorageReady, let task = state.tasks.first(where: { $0.id == id }), liveTasks.contains(id),
               task.nativeState == nil || task.nativeState?.connection == .connected,
               !nativeDetaching.contains(id), !nativeRecovering.contains(id) else {
             throw WorkbenchFailure("此任务尚未连接，请先恢复会话，再读取制品。")
@@ -73,7 +73,7 @@ extension AgentWorkbenchModel {
         state.tasks.first(where: { $0.id == taskID })?.artifactReviews?.contains(where: { $0.path == preview.artifact.path && $0.sha256 == preview.sha256 }) == true
     }
     func downloadArtifactPreview(taskID: UUID, preview: WorkbenchArtifactPreview, to destination: URL) throws {
-        guard state.tasks.contains(where: { $0.id == taskID }), !loadFailed else { throw WorkbenchFailure("任务已不存在或存储不可用。") }
+        guard state.tasks.contains(where: { $0.id == taskID }), isStorageReady else { throw WorkbenchFailure("任务已不存在或存储不可用。") }
         try WorkbenchArtifactLimits.validate(preview)
         guard destination.isFileURL else { throw WorkbenchFailure("请选择本机保存位置。") }
         let output = try ArtifactDownloadDestination(destination:destination, protectedRoot:store.root)
