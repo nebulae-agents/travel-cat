@@ -164,21 +164,11 @@ extension AgentWorkbenchTests {
     func testWorkbenchRenderWithPendingPermission() async throws {
         // Initialize this fixture's AppKit dependency explicitly.
         _ = NSApplication.shared
-        func mark(_ phase: StaticString) {
-            FileHandle.standardError.write(Data("agent-render-phase: \(phase)\n".utf8))
-            // Runner stores at most ten notices per step; reserve them for the remaining boundary.
-            let noticePhases: Set<String> = ["display-ready", "bitmap-size-valid", "bitmap-size-invalid", "render-body-returning", "window-cleanup-entered", "window-cleanup-visible", "window-cleanup-hidden", "window-orderout-returned", "window-detach-close-returned", "model-shutdown-returned", "temp-cleanup-returned"]
-            if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true", noticePhases.contains("\(phase)") {
-                // Only source-defined phase constants enter the check annotation (nine on any path).
-                FileHandle.standardOutput.write(Data("::notice title=Agent render phase::\(phase)\n".utf8))
-            }
-        }
-        mark("application-ready")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root); mark("temp-cleanup-returned") }
+        defer { try? FileManager.default.removeItem(at: root) }
         let client = WorkbenchTestRuntime()
         let model = AgentWorkbenchModel(root: root, credentials: WorkbenchTestCredentials(), client: client)
-        defer { client.onPrompt = nil; model.shutdown(); mark("model-shutdown-returned") }
+        defer { client.onPrompt = nil; model.shutdown() }
         var agent = instance(); agent.provider.model = "test"; agent.name = "项目开发助手"
         try model.save(instance: agent, newKey: "canary")
         client.onPrompt = {
@@ -186,50 +176,34 @@ extension AgentWorkbenchTests {
             client.emit("permission", ["requestId": "preview", "options": [["optionId": "allow", "name": "允许本次", "kind": "allow_once"], ["optionId": "deny", "name": "拒绝", "kind": "reject_once"]], "toolCall": ["title": "在隔离工作区运行检查", "rawInput": ["command": "python3 check.py"]]])
         }
         await model.start(instanceID: agent.id, text: "检查项目并生成改进报告")
-        mark("before-hosting")
         let view = NSHostingView(rootView: AgentWorkbenchView(model: model).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light))
         // Match the fixed-size hosting used by TravelUtilityWindowController.
         view.sizingOptions = []
-        mark("hosting-ready")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 740), styleMask: [.titled], backing: .buffered, defer: false)
-        mark("window-ready")
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .aqua)
         view.appearance = NSAppearance(named: .aqua)
         window.contentView = view
-        mark("content-attached")
         if ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] != nil { window.orderFrontRegardless() }
         defer {
-            mark("window-cleanup-entered")
-            if window.isVisible { mark("window-cleanup-visible") }
-            else { mark("window-cleanup-hidden") }
             window.orderOut(nil)
-            mark("window-orderout-returned")
             // Detach the test host before model shutdown publishes final state.
             window.contentView = nil
             window.close()
             XCTAssertNil(window.contentView)
             XCTAssertFalse(window.isVisible)
-            mark("window-detach-close-returned")
         }
         view.frame = NSRect(x: 0, y: 0, width: 1000, height: 740)
         view.layoutSubtreeIfNeeded()
-        mark("initial-layout-ready")
         try await Task.sleep(for: .milliseconds(300))
         view.layoutSubtreeIfNeeded()
-        mark("settled-layout-ready")
         let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-        mark("bitmap-ready")
         view.cacheDisplay(in: view.bounds, to: bitmap)
-        mark("display-ready")
-        if bitmap.pixelsWide > 700 && bitmap.pixelsHigh > 500 { mark("bitmap-size-valid") }
-        else { mark("bitmap-size-invalid") }
         XCTAssertGreaterThan(bitmap.pixelsWide, 700)
         XCTAssertGreaterThan(bitmap.pixelsHigh, 500)
         if let path = ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] {
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: path))
         }
-        mark("render-body-returning")
     }
 }
 

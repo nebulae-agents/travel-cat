@@ -40,14 +40,6 @@ jobs:
         run: Scripts/verify-travel-cat-skill.sh
       - name: Agent contracts
         run: Scripts/verify-agent-contract.sh
-      - name: Workbench render in isolation
-        env:
-          TZ: UTC
-        run: Scripts/travel-cat-swift.sh test --filter AgentWorkbenchTests/testWorkbenchRenderWithPendingPermission
-      - name: Workbench render with navigation fixtures
-        env:
-          TZ: UTC
-        run: Scripts/travel-cat-swift.sh test --filter 'AgentWorkbenchNavigationTests|AgentWorkbenchTests/testWorkbenchRenderWithPendingPermission'
       - name: Swift tests (UTC)
         env:
           TZ: UTC
