@@ -179,6 +179,8 @@ extension AgentWorkbenchTests {
         await model.start(instanceID: agent.id, text: "检查项目并生成改进报告")
         mark("before-hosting")
         let view = NSHostingView(rootView: AgentWorkbenchView(model: model).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light))
+        // Match the fixed-size hosting used by TravelUtilityWindowController.
+        view.sizingOptions = []
         mark("hosting-ready")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 740), styleMask: [.titled], backing: .buffered, defer: false)
         mark("window-ready")
