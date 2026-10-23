@@ -53,6 +53,8 @@ final class AgentWorkbenchModel: ObservableObject {
     @Published var nativeBackgroundStopping: Set<UUID> = []
     @Published var nativeBackgroundObservations: [UUID: NativeBackgroundObservation] = [:]
     @Published var nativeBackgroundRequests: [UUID: NativeBackgroundRequest] = [:]
+    @Published var nativeReconciliationRequests: [UUID: NativeBackgroundRequest] = [:]
+    @Published var nativeReconciliationNotices: [UUID: String] = [:]
     var nativeBackgroundPendingRefreshes: [UUID: NativeBackgroundPendingRefresh] = [:]
     var nativeBackgroundRevisions: [UUID: UUID] = [:]
     var nativeConnectionGenerations: [UUID: UUID] = [:]

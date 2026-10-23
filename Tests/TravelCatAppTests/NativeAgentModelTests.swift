@@ -319,6 +319,393 @@ final class NativeAgentModelTests: XCTestCase {
         XCTAssertNil(model.state.tasks.first?.nativeState?.historyNotice,"a previous stop check must not describe a new turn")
     }
 
+    @MainActor func testLateKnownOldTurnCompletionUpdatesOnlyItsProcess() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/started",params:["threadId":"native-thread","turnId":"native-turn","item":["id":"old-tool","type":"commandExecution","status":"inProgress"]])
+        model.mutate(id) { $0.nativeState?.turnID = "next-turn"; $0.status = .running }
+        for (itemID,turn) in [("old-tool","wrong-turn"),("unknown","native-turn"),("old-tool","native-turn")] {
+            runtime.emit(taskID:id,instanceID:instance.id,method:"item/completed",params:["threadId":"native-thread","turnId":turn,"item":["id":itemID,"type":"commandExecution","status":"completed"]])
+        }
+        let task = try XCTUnwrap(model.state.tasks.first)
+        emitPermission(runtime,task:task)
+        XCTAssertTrue(model.permissions.isEmpty,"old approvals remain rejected")
+        XCTAssertEqual(task.nativeState?.items.count,1)
+        XCTAssertEqual(task.nativeState?.items.first?.status,"completed")
+        XCTAssertEqual(task.nativeState?.turnID,"next-turn")
+        XCTAssertEqual(task.status,.running)
+    }
+
+    @MainActor func testFinalItemSurvivesOldStartedSnapshotAndDelta() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/completed",params:["threadId":"native-thread","turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"completed","aggregatedOutput":"final"]])
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/started",params:["threadId":"native-thread","turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"inProgress","aggregatedOutput":"old"]])
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/commandExecution/outputDelta",params:["threadId":"native-thread","turnId":"native-turn","itemId":"tool","delta":"old-delta"])
+        model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","status":"inProgress"],turnID:"native-turn")
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items.first?.status,"completed")
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items.first?.detail,"final")
+    }
+
+    @MainActor func testHistoryWithoutValidStatusNeverDefaultsToCompleted() async throws {
+        let (model,_,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mergeNativeItem(id,item:["id":"missing","type":"commandExecution"],turnID:"native-turn")
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items.first?.status,"unknown")
+    }
+
+    @MainActor func testCompletionReconcilesOnlyProcessEvidenceWithoutMessagesOrAuditRewrite() async throws {
+        let (model,runtime,_,audit,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","command":"original command","status":"inProgress"],turnID:"native-turn")
+        model.mergeNativeItem(id,item:["id":"reply","type":"agentMessage","text":"original reply"],turnID:"native-turn")
+        runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[["id":"native-turn","status":"completed"]],"items":[
+            ["turnId":"native-turn","item":["id":"tool","type":"commandExecution","command":"replacement command","status":"completed"]],
+            ["turnId":"native-turn","item":["id":"reply","type":"agentMessage","text":"replacement reply"]]]]
+        runtime.emit(taskID:id,instanceID:instance.id,method:"turn/completed",params:["threadId":"native-thread","turn":["id":"native-turn","status":"completed"]])
+        let messages = model.state.tasks[0].messages
+        let auditBytes = try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(runtime.requests.contains { $0.0 == "native_reconcile" },"completion schedules one bounded official read")
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items.first?.status,"inProgress")
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items.first?.reconciledStatus,"completed")
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items.first?.detail,"original command")
+        XCTAssertEqual(model.state.tasks[0].messages,messages)
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys),auditBytes)
+        XCTAssertEqual(model.state.tasks[0].status,.completed)
+    }
+
+    @MainActor func testTurnFinalDoesNotRegressOnLateStarted() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.emit(taskID:id,instanceID:instance.id,method:"turn/completed",params:["threadId":"native-thread","turn":["id":"native-turn","status":"completed"]])
+        runtime.emit(taskID:id,instanceID:instance.id,method:"turn/started",params:["threadId":"native-thread","turn":["id":"native-turn","status":"inProgress"]])
+        XCTAssertEqual(model.state.tasks[0].status,.completed)
+    }
+
+    @MainActor func testHistoryReadPreservesRawProcessAndShowsFinalOnlyWithOfficialStatus() async throws {
+        let (model,runtime,_,audit,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","status":"inProgress","command":"original"],turnID:"native-turn")
+        model.mutate(id) { $0.status = .completed }
+        let originalMessages = model.state.tasks[0].messages
+        let originalAudit = try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys)
+        for status in [nil,"bogus","error","cancelled","completed"] as [String?] {
+            var official: [String:Any] = ["id":"tool","type":"commandExecution"]
+            official["status"] = status
+            runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[["id":"native-turn","status":"completed"]],"items":[["turnId":"native-turn","item":official]]]
+            await model.reconcileNativeHistory(id)
+            let item = try XCTUnwrap(model.state.tasks[0].nativeState?.items.first)
+            XCTAssertEqual(item.status,"inProgress","history queries keep the original process field")
+            XCTAssertEqual(model.nativeProcessStatusTitle(id,item:item),status == "completed" ? "已完成" : "待核对（最后记录：执行中）")
+        }
+        XCTAssertEqual(model.state.tasks[0].messages,originalMessages)
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys),originalAudit)
+        XCTAssertEqual(model.state.tasks[0].status,.completed)
+        let request = try XCTUnwrap(runtime.requests.last)
+        XCTAssertEqual(request.0,"native_reconcile"); XCTAssertEqual(Set(request.1.keys),["taskId"])
+    }
+
+    @MainActor func testZeroBackgroundAndExpiredObservationNeverCompleteHistoricalItem() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","status":"inProgress"],turnID:"native-turn")
+        model.mutate(id) { $0.status = .completed }
+        let item = try XCTUnwrap(model.state.tasks[0].nativeState?.items.first)
+        XCTAssertEqual(model.nativeProcessStatusTitle(id,item:item),"待核对（最后记录：执行中）")
+        runtime.results["native_background_status"] = ["threadId":"native-thread","count":1,"itemIds":["tool"]]
+        await model.refreshNativeBackgroundStatus(id)
+        let checked = try XCTUnwrap(model.freshNativeBackgroundObservation(id)?.checkedAt)
+        XCTAssertEqual(model.nativeProcessStatusTitle(id,item:item,now:checked),"后台运行")
+        XCTAssertEqual(model.nativeProcessStatusTitle(id,item:item,now:checked.addingTimeInterval(11)),"待核对（最后记录：执行中）")
+        runtime.results["native_background_status"] = ["threadId":"native-thread","count":0,"itemIds":[]]
+        await model.refreshNativeBackgroundStatus(id)
+        XCTAssertEqual(model.nativeProcessStatusTitle(id,item:item),"待核对（最后记录：执行中）")
+        XCTAssertFalse(item.hasTerminalEvidence)
+    }
+
+    @MainActor func testFreshBackgroundEvidenceOverridesFinalDisplayWithoutChangingTerminalEvidence() async throws {
+        for (status, title) in [("completed", "已完成"), ("failed", "失败")] {
+            let (model,runtime,_,_,root,instance) = try fixture()
+            defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+            await model.start(instanceID:instance.id,text:"hello")
+            let id = try XCTUnwrap(model.state.tasks.first?.id)
+            model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","status":status,"aggregatedOutput":"original final"],turnID:"native-turn")
+            model.mutate(id) { $0.status = .completed }
+            let final = try XCTUnwrap(model.state.tasks[0].nativeState?.items.first)
+            XCTAssertTrue(final.hasTerminalEvidence)
+            XCTAssertEqual(model.nativeProcessStatusTitle(id,item:final),title,"unknown background preserves the final display")
+            runtime.results["native_background_status"] = ["threadId":"native-thread","count":1,"itemIds":["tool"]]
+            await model.refreshNativeBackgroundStatus(id)
+            let checked = try XCTUnwrap(model.freshNativeBackgroundObservation(id)?.checkedAt)
+            XCTAssertEqual(model.nativeProcessStatusTitle(id,item:final,now:checked),"后台运行",status)
+            XCTAssertEqual(model.nativeProcessStatusTitle(id,item:final,now:checked.addingTimeInterval(11)),title,"expired observation preserves final evidence")
+            runtime.failMethod = "native_background_status"
+            await model.refreshNativeBackgroundStatus(id)
+            XCTAssertEqual(model.nativeProcessStatusTitle(id,item:final),title,"failed read is unknown, not a reason to remove final evidence")
+            runtime.failMethod = nil
+            runtime.results["native_background_status"] = ["threadId":"native-thread","count":0,"itemIds":[]]
+            await model.refreshNativeBackgroundStatus(id)
+            XCTAssertEqual(model.nativeProcessStatusTitle(id,item:final),title,"zero background processes cannot rewrite final evidence")
+            runtime.results["native_background_status"] = ["threadId":"native-thread","count":1,"itemIds":["tool"]]
+            await model.refreshNativeBackgroundStatus(id)
+            model.mutate(id) { $0.nativeState?.executionID = UUID() }
+            XCTAssertEqual(model.nativeProcessStatusTitle(id,item:final),title,"a different binding cannot override final evidence")
+            XCTAssertEqual(model.state.tasks[0].nativeState?.items.first,final)
+            XCTAssertEqual(model.state.tasks[0].status,.completed)
+        }
+    }
+
+    @MainActor func testStaleReconciliationCannotPolluteNewBindingOrNewFinal() async throws {
+        for change in ["execution","turn","thread","connection","operation","final"] {
+            let (model,runtime,_,_,root,instance) = try fixture()
+            defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+            await model.start(instanceID:instance.id,text:"hello")
+            let id = try XCTUnwrap(model.state.tasks.first?.id)
+            model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","status":"inProgress"],turnID:"native-turn")
+            runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[["id":"native-turn","status":"inProgress"]],"items":[["turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"completed"]]]]
+            runtime.duringRequest = { method,_ in
+                guard method == "native_reconcile" else { return }
+                if change == "final" {
+                    runtime.emit(taskID:id,instanceID:instance.id,method:"item/completed",params:["threadId":"native-thread","turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"failed","aggregatedOutput":"final error"]])
+                } else if change == "connection" { model.nativeConnectionGenerations[instance.id] = UUID() }
+                else { model.mutate(id) { task in
+                    switch change {
+                    case "execution": task.nativeState?.executionID = UUID()
+                    case "turn": task.nativeState?.turnID = "new-turn"
+                    case "thread": task.nativeState?.threadID = "new-thread"
+                    default: task.nativeState?.pendingOperation = .init(kind:.prompt,targetID:"new-operation")
+                    }
+                } }
+            }
+            await model.reconcileNativeHistory(id)
+            let saved = try XCTUnwrap(model.state.tasks[0].nativeState)
+            XCTAssertEqual(saved.items[0].status,change == "final" ? "failed" : "inProgress",change)
+            if change == "final" { XCTAssertEqual(model.nativeProcessStatusTitle(id,item:saved.items[0]),"失败"); XCTAssertEqual(saved.items[0].detail,"final error") }
+            else { XCTAssertNil(saved.lastReconciledAt,change) }
+        }
+    }
+
+    @MainActor func testFailedAndMalformedReconciliationLeaveTaskAndAuditUnchanged() async throws {
+        let (model,runtime,_,audit,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mutate(id) { $0.status = .completed }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let original = try encoder.encode(model.state.tasks[0])
+        let auditBytes = try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys)
+        for response: [String:Any] in [[:],["threadId":"foreign","turns":[],"items":[]],["threadId":"native-thread","turns":[["id":"same"],["id":"same"]],"items":[]],["threadId":"native-thread","turns":[],"items":[["turnId":"old","item":["id":"same","type":"commandExecution"]],["turnId":"old","item":["id":"same","type":"commandExecution"]]]]] {
+            runtime.results["native_reconcile"] = response
+            await model.reconcileNativeHistory(id)
+            XCTAssertEqual(try encoder.encode(model.state.tasks[0]),original)
+        }
+        runtime.failMethod = "native_reconcile"
+        await model.reconcileNativeHistory(id)
+        XCTAssertEqual(try encoder.encode(model.state.tasks[0]),original)
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys),auditBytes)
+        XCTAssertNil(model.error)
+    }
+
+    @MainActor func testLateKnownCompletionDuringPromptAcceptanceGapRemainsProcessOnly() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mergeNativeItem(id,item:["id":"old","type":"commandExecution","status":"inProgress"],turnID:"native-turn")
+        model.mutate(id) { $0.nativeState?.turnID = nil; $0.nativeState?.pendingOperation = .init(kind:.prompt,targetID:"native-thread") }
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/completed",params:["threadId":"native-thread","turnId":"native-turn","item":["id":"old","type":"commandExecution","status":"completed"]])
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items[0].status,"completed")
+        XCTAssertNil(model.state.tasks[0].nativeState?.turnID)
+        XCTAssertEqual(model.state.tasks[0].nativeState?.pendingOperation?.status,.requested)
+    }
+
+    @MainActor func testCompletionTimestampEvidenceIsStrictAndDoesNotInventTypedStatus() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mutate(id) {
+            $0.status = .completed
+            $0.nativeState?.upsert(.init(id:"search",turnID:"native-turn",kind:"webSearch",title:"search",detail:"raw",status:"completed"))
+            $0.nativeState?.upsert(.init(id:"tool",turnID:"native-turn",kind:"commandExecution",title:"command",detail:"raw",status:"inProgress"))
+        }
+        let invalid: [Any?] = [nil,true,-1,1.5,Double.nan,Double.infinity,Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000,"123"]
+        for value in invalid {
+            var entry: [String:Any] = ["turnId":"native-turn","item":["id":"search","type":"webSearch"]]
+            entry["completedAtMs"] = value
+            runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[],"items":[entry]]
+            await model.reconcileNativeHistory(id)
+            XCTAssertFalse(try XCTUnwrap(model.state.tasks[0].nativeState?.items.first).hasTerminalEvidence)
+        }
+        runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[],"items":[
+            ["turnId":"native-turn","completedAtMs":1000,"item":["id":"search","type":"webSearch"]],
+            ["turnId":"native-turn","completedAtMs":1000,"item":["id":"tool","type":"commandExecution"]]]]
+        await model.reconcileNativeHistory(id)
+        let items = try XCTUnwrap(model.state.tasks[0].nativeState?.items)
+        XCTAssertEqual(items[0].status,"completed","legacy raw status stays intact")
+        XCTAssertEqual(model.nativeProcessStatusTitle(id,item:items[0]),"已完成","valid official completion time supplies evidence for a statusless kind")
+        XCTAssertEqual(model.nativeProcessStatusTitle(id,item:items[1]),"待核对（最后记录：执行中）","typed commands still require a valid official status")
+    }
+
+    @MainActor func testRecoverySnapshotCannotReviveAnObservedFinalTurn() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mutate(id) { $0.status = .completed; $0.nativeState?.recordTurnStatus("native-turn",status:"completed") }
+        runtime.onExit?()
+        runtime.results["native_resume"] = ["threadId":"native-thread","turnId":"native-turn","turns":[["id":"native-turn","status":"inProgress"]],"items":[]]
+        await model.recoverNative(taskID:id)
+        XCTAssertEqual(model.state.tasks[0].status,.completed)
+        XCTAssertEqual(model.state.tasks[0].nativeState?.turnStatuses?["native-turn"],"completed")
+    }
+
+    @MainActor func testRecoveryWithoutOfficialTurnStatusDoesNotInventSuccess() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.onExit?()
+        runtime.results["native_resume"] = ["threadId":"native-thread","turns":[],"items":[]]
+        await model.recoverNative(taskID:id)
+        XCTAssertEqual(model.state.tasks[0].status,.unknown)
+    }
+
+    @MainActor func testReconciledFailureAppearsInProcessSummaryWithoutChangingRawStatus() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","status":"inProgress"],turnID:"native-turn")
+        runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[],"items":[["turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"failed"]]]]
+        await model.reconcileNativeHistory(id)
+        XCTAssertTrue(WorkbenchConversationPresentation.hasProcessFailure(model.state.tasks[0]))
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items.first?.status,"inProgress")
+    }
+
+    @MainActor func testOldStartedCannotBindTheGapBeforeNewPromptResponse() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mutate(id) {
+            $0.nativeState?.recordTurnStatus("native-turn",status:"completed")
+            $0.nativeState?.turnID = nil
+            $0.nativeState?.pendingOperation = .init(kind:.prompt,targetID:"native-thread")
+        }
+        runtime.emit(taskID:id,instanceID:instance.id,method:"turn/started",params:["threadId":"native-thread","turn":["id":"native-turn","status":"inProgress"]])
+        XCTAssertNil(model.state.tasks[0].nativeState?.turnID)
+        XCTAssertEqual(model.state.tasks[0].nativeState?.pendingOperation?.status,.requested)
+    }
+
+    @MainActor func testInvalidTurnCompletionLeavesApprovalAndControlIntactButIsAudited() async throws {
+        for status: Any in ["bogus", true, 1, ["type":"completed"], NSNull()] {
+            let (model,runtime,_,audit,root,instance) = try fixture()
+            defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+            await model.start(instanceID:instance.id,text:"hello")
+            let task = try XCTUnwrap(model.state.tasks.first)
+            emitPermission(runtime,task:task)
+            let original = model.state.tasks[0].nativeState
+            let auditCount = audit.saved.count
+            runtime.emit(taskID:task.id,instanceID:instance.id,method:"turn/completed",params:["threadId":"native-thread","turn":["id":"native-turn","status":status]])
+            XCTAssertEqual(model.state.tasks[0].status,.awaitingPermission)
+            XCTAssertEqual(model.state.tasks[0].nativeState,original)
+            XCTAssertEqual(model.permissions.count,1)
+            XCTAssertEqual(audit.saved.count,auditCount+1,"raw invalid notification remains observable")
+            XCTAssertEqual(audit.saved.last?["method"] as? String,"turn/completed")
+            XCTAssertFalse(runtime.requests.contains { $0.0 == "native_reconcile" })
+        }
+    }
+
+    @MainActor func testLiveFinalCanCompleteQueryProvenProcessExactlyOnceWithoutRegression() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","status":"inProgress","command":"printf full","aggregatedOutput":"partial"],turnID:"native-turn")
+        runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[],"items":[["turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"completed","aggregatedOutput":"query body must not replace raw body"]]]]
+        await model.reconcileNativeHistory(id)
+        let queryProven = try XCTUnwrap(model.state.tasks[0].nativeState?.items.first)
+        XCTAssertTrue(queryProven.hasTerminalEvidence)
+        XCTAssertEqual(queryProven.detail,"printf full\npartial")
+        for (turn,kind,status) in [("wrong-turn","commandExecution","completed"),("native-turn","fileChange","completed"),("native-turn","commandExecution","failed")] {
+            runtime.emit(taskID:id,instanceID:instance.id,method:"item/completed",params:["threadId":"native-thread","turnId":turn,"item":["id":"tool","type":kind,"status":status,"aggregatedOutput":"must reject"]])
+            XCTAssertEqual(model.state.tasks[0].nativeState?.items.first?.detail,queryProven.detail)
+        }
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/completed",params:["threadId":"native-thread","turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"completed","command":"printf full","aggregatedOutput":"full output"]])
+        let final = try XCTUnwrap(model.state.tasks[0].nativeState?.items.first)
+        XCTAssertEqual(final.detail,"printf full\nfull output","real final event may finish the body after query supplied status evidence")
+        XCTAssertTrue(final.hasTerminalEvidence)
+        XCTAssertEqual(final.evidenceStatus,queryProven.evidenceStatus)
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/started",params:["threadId":"native-thread","turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"inProgress","aggregatedOutput":"stale"]])
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/commandExecution/outputDelta",params:["threadId":"native-thread","turnId":"native-turn","itemId":"tool","delta":"stale"])
+        runtime.emit(taskID:id,instanceID:instance.id,method:"item/completed",params:["threadId":"native-thread","turnId":"native-turn","item":["id":"tool","type":"commandExecution","status":"completed","aggregatedOutput":"short duplicate"]])
+        model.mergeNativeItem(id,item:["id":"tool","type":"commandExecution","status":"inProgress","aggregatedOutput":"snapshot"],turnID:"native-turn")
+        await model.reconcileNativeHistory(id)
+        XCTAssertEqual(model.state.tasks[0].nativeState?.items.first,final,"duplicates, old started/delta and snapshots cannot truncate the accepted final")
+    }
+
+    @MainActor func testReconciledTerminalProofRejectsLatePermissionButAllowsNewActiveTurn() async throws {
+        let (model,runtime,_,audit,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let task = try XCTUnwrap(model.state.tasks.first)
+        runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[["id":"native-turn","status":"completed"]],"items":[]]
+        await model.reconcileNativeHistory(task.id)
+        XCTAssertEqual(model.state.tasks[0].status,.running)
+        XCTAssertEqual(model.state.tasks[0].nativeState?.turnID,"native-turn")
+        emitPermission(runtime,task:task)
+        XCTAssertTrue(model.permissions.isEmpty)
+        XCTAssertEqual(model.state.tasks[0].status,.running)
+        XCTAssertEqual(audit.saved.last?["method"] as? String,"permission","the incoming notification is still auditable")
+        model.mutate(task.id) { $0.nativeState?.turnID = "next-turn"; $0.status = .running }
+        emitPermission(runtime,task:task,turnID:"next-turn")
+        let current = try XCTUnwrap(model.permissions.first)
+        await model.respond(current,option:current.options[0])
+        XCTAssertEqual(runtime.requests.filter { $0.0 == "native_permission" }.count,1,"a new active turn retains normal approval control")
+    }
+
+    @MainActor func testReconciledTerminalProofBlocksSavedApprovalClicksWithoutQueryMutations() async throws {
+        let (model,runtime,_,audit,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let task = try XCTUnwrap(model.state.tasks.first)
+        emitPermission(runtime,task:task)
+        let request = try XCTUnwrap(model.permissions.first)
+        let originalPending = model.state.tasks[0].nativeState?.pendingOperation
+        let originalMessages = model.state.tasks[0].messages
+        let auditBytes = try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys)
+        runtime.results["native_reconcile"] = ["threadId":"native-thread","turns":[["id":"native-turn","status":"completed"]],"items":[]]
+        await model.reconcileNativeHistory(task.id)
+        XCTAssertEqual(model.permissions.map(\.id),[request.id],"query preserves the original approval card")
+        XCTAssertEqual(model.state.tasks[0].status,.awaitingPermission)
+        XCTAssertEqual(model.state.tasks[0].nativeState?.pendingOperation,originalPending)
+        XCTAssertEqual(model.state.tasks[0].messages,originalMessages)
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys),auditBytes)
+        for option in request.options { await model.respond(request,option:option) }
+        XCTAssertFalse(runtime.requests.contains { ["native_permission","native_cancel"].contains($0.0) })
+        XCTAssertEqual(model.permissions.map(\.id),[request.id],"proof checking cannot delete the preserved approval")
+        XCTAssertEqual(model.state.tasks[0].status,.awaitingPermission)
+        XCTAssertEqual(model.state.tasks[0].nativeState?.pendingOperation,originalPending)
+        XCTAssertEqual(model.state.tasks[0].messages,originalMessages)
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject:audit.saved,options:.sortedKeys),auditBytes)
+    }
+
     @MainActor func testEventWithForeignThreadDoesNotModifyTask() async throws {
         let (model,runtime,_,_,root,instance) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
@@ -362,9 +749,9 @@ final class NativeAgentModelTests: XCTestCase {
         XCTAssertTrue(model.canReply(id))
     }
 
-    @MainActor private func emitPermission(_ runtime: NativeTestRuntime, task: WorkbenchTask, expiry: Date = Date().addingTimeInterval(300)) {
+    @MainActor private func emitPermission(_ runtime: NativeTestRuntime, task: WorkbenchTask, turnID: String = "native-turn", expiry: Date = Date().addingTimeInterval(300)) {
         runtime.emit(taskID:task.id,instanceID:task.instanceID,method:"permission",params:[
-            "threadId":"native-thread","turnId":"native-turn","itemId":"tool","requestId":"permission-id",
+            "threadId":"native-thread","turnId":turnID,"itemId":"tool","requestId":"permission-id",
             "requestHash":"bound-hash","expiresAt":expiry.timeIntervalSince1970,"title":"Command","detail":"printf ok",
             "options":[["id":"accept","title":"Once","kind":"allow_once"],["id":"decline","title":"No","kind":"reject_once"],["id":"cancel","title":"Cancel turn","kind":"cancel"]]])
     }

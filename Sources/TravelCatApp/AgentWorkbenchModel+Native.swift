@@ -182,6 +182,8 @@ extension AgentWorkbenchModel {
             guard nativeControlIsCurrent(id, operationID: controlID) else { return }
             nativeFailure(id, error)
         }
+        nativeBackgroundStopping.remove(id)
+        await reconcileNativeHistory(id)
     }
 
     func detachNative(_ id: UUID) async {
@@ -224,6 +226,7 @@ extension AgentWorkbenchModel {
               let task = state.tasks.first(where: { $0.id == request.taskID }), task.status == .awaitingPermission,
               !nativeInterruptPending.contains(task.id), !nativeInterruptUnverified.contains(task.id), !nativeRecovering.contains(task.id), !nativeDetaching.contains(task.id),
               task.nativeState?.threadID == binding.threadID, task.nativeState?.turnID == binding.turnID,
+              !NativeTaskState.terminalTurnStatuses.contains(task.nativeState?.turnStatuses?[binding.turnID] ?? ""),
               task.nativeState?.connection == .connected, liveTasks.contains(task.id) else { return }
         nativeDeciding.insert(request.id); defer { nativeDeciding.remove(request.id) }
         do {
@@ -268,7 +271,12 @@ extension AgentWorkbenchModel {
             let turns = result["turns"] as? [[String: Any]] ?? []
             let entries = result["items"] as? [[String: Any]] ?? []
             for entry in entries {
-                if let item = entry["item"] as? [String: Any] { mergeNativeItem(id, item: item, turnID: entry["turnId"] as? String) }
+                if let item = entry["item"] as? [String: Any] { mergeNativeItem(id, item: item, turnID: entry["turnId"] as? String, completedEvent: validNativeCompletionTime(entry["completedAtMs"])) }
+            }
+            mutate(id) { task in
+                for turn in turns {
+                    if let turnID = turn["id"] as? String { task.nativeState?.recordTurnStatus(turnID, status: turn["status"] as? String) }
+                }
             }
             mutate(id) {
                 $0.nativeState?.connection = .connected; $0.nativeState?.lastReconciledAt = Date()
@@ -276,11 +284,13 @@ extension AgentWorkbenchModel {
                 $0.nativeState?.historyNotice = "已从官方记录核对。断开期间的实时审计可能有缺口；恢复交界处的流式文本以项目完成后的记录为准，旧审批不自动重放。"
                 if let count = backgroundCount { $0.nativeState?.historyNotice? += " 恢复时核对到后台命令：\(count) 个。" }
                 if let turn = result["turnId"] as? String {
-                    $0.nativeState?.turnID = turn; $0.status = .running
+                    $0.nativeState?.turnID = turn
+                    $0.status = nativeStatus($0.nativeState?.turnStatuses?[turn] ?? "inProgress")
                 } else if let last = turns.last {
                     $0.nativeState?.turnID = last["id"] as? String
-                    $0.status = nativeStatus(last["status"] as? String)
-                } else { $0.status = .completed; $0.nativeState?.turnID = nil }
+                    let savedStatus = $0.nativeState?.turnStatuses?[last["id"] as? String ?? ""]
+                    $0.status = nativeStatus(savedStatus ?? last["status"] as? String)
+                } else { $0.status = .unknown; $0.nativeState?.turnID = nil }
             }
             let buffered = nativeEventBuffers.removeValue(forKey: id) ?? []
             nativeRecovering.remove(id)
@@ -297,6 +307,7 @@ extension AgentWorkbenchModel {
             }
             try nativeRecord(id, kind: "native.resume.confirmed", fields: ["threadId": thread, "itemCount": entries.count, "observationGap": true])
             try persistNative()
+            await reconcileNativeHistory(id)
         } catch {
             mutate(id) { $0.nativeState?.connection = .disconnected }
             liveTasks.remove(id); nativeFailure(id, error)
@@ -344,10 +355,37 @@ extension AgentWorkbenchModel {
         let turnObject = params["turn"] as? [String: Any]
         let turn = params["turnId"] as? String ?? turnObject?["id"] as? String
         if let turn {
-            if let known = task.nativeState?.turnID { guard known == turn else { return } }
-            else {
+            if method == "turn/started", NativeTaskState.terminalTurnStatuses.contains(task.nativeState?.turnStatuses?[turn] ?? "") {
+                do { try nativeRecord(id, kind: "native.event", fields: ["method": method, "params": params]) }
+                catch { self.error = error.localizedDescription }
+                return
+            }
+            if task.nativeState?.turnID != turn, method == "item/completed" {
+                // Only an already bound process may finish after a newer turn starts.
+                guard let item = params["item"] as? [String: Any],
+                      let itemID = item["id"] as? String,
+                      let saved = task.nativeState?.items.first(where: { $0.id == itemID }),
+                      saved.turnID == turn, saved.kind == item["type"] as? String,
+                      !["agentMessage", "userMessage"].contains(saved.kind) else { return }
+                do {
+                    try nativeRecord(id, kind: "native.event", fields: ["method": method, "params": params])
+                    mergeNativeItem(id, item: item, turnID: turn, completedEvent: true, isLiveCompletion: true)
+                    try persistNative()
+                } catch { self.error = error.localizedDescription }
+                return
+            } else if let known = task.nativeState?.turnID {
+                guard known == turn else { return }
+            } else {
                 guard method == "turn/started", task.nativeState?.pendingOperation?.kind == .prompt else { return }
                 mutate(id) { $0.nativeState?.turnID = turn }
+            }
+        }
+        if method == "turn/completed" {
+            guard let turn, turn == task.nativeState?.turnID, turnObject?["id"] as? String == turn,
+                  let status = turnObject?["status"] as? String, NativeTaskState.terminalTurnStatuses.contains(status) else {
+                do { try nativeRecord(id, kind: "native.event", fields: ["method": method, "params": params]) }
+                catch { self.error = error.localizedDescription }
+                return
             }
         }
         if method == "turn/completed", nativeInterruptPending.contains(id) || nativeInterruptUnverified.contains(id) {
@@ -359,15 +397,25 @@ extension AgentWorkbenchModel {
             if !method.hasSuffix("/delta") { try nativeRecord(id, kind: "native.event", fields: ["method": method, "params": params]) }
             switch method {
             case "turn/started":
-                mutate(id) { if $0.status != .cancelling { $0.status = .running }; $0.nativeState?.connection = .connected }
+                mutate(id) {
+                    if let turn { $0.nativeState?.recordTurnStatus(turn, status: "inProgress") }
+                    if $0.status != .cancelling, !NativeTaskState.terminalTurnStatuses.contains($0.nativeState?.turnStatuses?[turn ?? ""] ?? "") { $0.status = .running }
+                    $0.nativeState?.connection = .connected
+                }
             case "turn/completed":
                 guard let turn, turn == state.tasks.first(where: { $0.id == id })?.nativeState?.turnID else { return }
-                mutate(id) { $0.status = nativeStatus(turnObject?["status"] as? String); $0.unread = true; $0.nativeState?.pendingOperation?.status = .confirmed }
+                mutate(id) {
+                    $0.nativeState?.recordTurnStatus(turn, status: turnObject?["status"] as? String)
+                    $0.status = nativeStatus($0.nativeState?.turnStatuses?[turn] ?? turnObject?["status"] as? String)
+                    $0.unread = true; $0.nativeState?.pendingOperation?.status = .confirmed
+                }
                 permissions.removeAll { $0.taskID == id }
                 invalidateNativeBackgroundStatus(id)
+                Task { [weak self] in await self?.reconcileNativeHistory(id) }
             case "permission":
                 guard let requestID = params["requestId"] as? String, let hash = params["requestHash"] as? String,
                       let turn, let item = params["itemId"] as? String, let expiry = params["expiresAt"] as? Double,
+                      !NativeTaskState.terminalTurnStatuses.contains(task.nativeState?.turnStatuses?[turn] ?? ""),
                       Date(timeIntervalSince1970: expiry) > Date() else { return }
                 let options = (params["options"] as? [[String: Any]] ?? []).compactMap { value -> WorkbenchPermission.Option? in
                     guard let option = value["id"] as? String, ["accept", "decline", "cancel"].contains(option) else { return nil }
@@ -385,7 +433,7 @@ extension AgentWorkbenchModel {
                 mutate(id) { if $0.status == .awaitingPermission && !permissions.contains(where: { $0.taskID == id }) { $0.status = .running } }
             case "item/started", "item/completed":
                 if let item = params["item"] as? [String: Any] {
-                    mergeNativeItem(id, item: item, turnID: turn)
+                    mergeNativeItem(id, item: item, turnID: turn, completedEvent: method == "item/completed", isLiveCompletion: method == "item/completed")
                     if method == "item/completed", let itemID = item["id"] as? String {
                         permissions.removeAll { $0.taskID == id && $0.nativeBinding?.itemID == itemID }
                         mutate(id) {
@@ -398,6 +446,7 @@ extension AgentWorkbenchModel {
                 guard let itemID = params["itemId"] as? String, let delta = params["delta"] as? String else { return }
                 mutate(id) { task in
                     if let index = task.nativeState?.items.firstIndex(where: { $0.id == itemID }) {
+                        guard task.nativeState?.items[index].hasTerminalEvidence != true else { return }
                         task.nativeState?.items[index].detail += delta
                         let bounded = String((task.nativeState?.items[index].detail ?? "").suffix(500_000))
                         task.nativeState?.items[index].detail = bounded
@@ -417,15 +466,24 @@ extension AgentWorkbenchModel {
         else { task.messages.append(.init(role: role, text: text, runtimeItemID: itemID)) }
     }
 
-    func mergeNativeItem(_ id: UUID, item: [String: Any], turnID: String?) {
+    func mergeNativeItem(_ id: UUID, item: [String: Any], turnID: String?, completedEvent: Bool = false, isLiveCompletion: Bool = false) {
         guard let itemID = item["id"] as? String, let kind = item["type"] as? String else { return }
         let detail: String
         if let text = item["text"] as? String { detail = text }
         else if kind == "commandExecution" { detail = [item["command"] as? String, item["aggregatedOutput"] as? String].compactMap { $0 }.joined(separator: "\n") }
         else if let raw = try? JSONSerialization.data(withJSONObject: item, options: [.prettyPrinted, .sortedKeys]), let text = String(data: raw, encoding: .utf8) { detail = text }
         else { detail = "" }
+        var incoming = NativeTimelineItem(id: itemID, turnID: turnID, kind: kind,
+            title: item["command"] as? String ?? kind, detail: String(detail.prefix(500_000)),
+            status: item["status"] as? String ?? "unknown",
+            completionObserved: NativeTimelineItem.terminalStatuses(for: kind).contains(item["status"] as? String ?? "") || completedEvent && NativeTimelineItem.statuslessKinds.contains(kind))
+        incoming.liveCompletionObserved = isLiveCompletion && incoming.hasTerminalEvidence ? true : nil
         mutate(id) { task in
-            task.nativeState?.upsert(.init(id: itemID, turnID: turnID, kind: kind, title: item["command"] as? String ?? kind, detail: String(detail.prefix(500_000)), status: item["status"] as? String ?? "completed"))
+            if let saved = task.nativeState?.items.first(where: { $0.id == itemID }) {
+                guard saved.accepts(incoming) else { return }
+                if saved.hasTerminalEvidence { incoming.reconciledStatus = saved.reconciledStatus }
+            }
+            task.nativeState?.upsert(incoming)
             if kind == "agentMessage" { upsertNativeMessage(&task, itemID: itemID, role: "assistant", text: detail) }
         }
     }

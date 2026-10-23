@@ -53,6 +53,11 @@ extension Bundle { static var module: Bundle { .main } }
             FileHandle.standardOutput.write(Data("fixture.backgroundStatus.read\n".utf8))
             if backgroundStatusFails { throw WorkbenchFailure("离线夹具：后台命令状态暂时无法核对。") }
             return ["threadId":threads[id] ?? "","count":backgroundCount,"itemIds":(0..<backgroundCount).map { "fixture-background-\($0)" }]
+        case "native_reconcile":
+            FileHandle.standardOutput.write(Data("fixture.processReconcile.read\n".utf8))
+            return ["threadId":threads[id] ?? "","turns":[["id":"fixture-turn","status":"completed"]],"items":[
+                ["turnId":"fixture-turn","item":["id":"tool","type":"commandExecution","status":"completed"]],
+                ["turnId":"fixture-turn","item":["id":"fixture-background-0","type":"commandExecution"]]]]
         case "native_background_stop":
             let stopped = backgroundCount; backgroundCount = 0
             return ["stopped":true,"terminatedCount":stopped]
@@ -132,7 +137,7 @@ extension Bundle { static var module: Bundle { .main } }
         var task=WorkbenchTask(instanceID:native.id,title:"整理一份具体、简单的 AI 工作分享提纲")
         task.status = .completed;task.sessionID="fixture-thread";task.nativeState = NativeTaskState();task.nativeState?.threadID="fixture-thread";task.nativeState?.turnID="fixture-turn";task.nativeState?.connection = .connected
         task.messages=[.init(role:"user",text:"帮我整理一份 15 分钟的内部分享提纲，主题是让 AI 进入日常工作。内容具体一点，少讲概念。"),.init(role:"assistant",text:"可以把这 15 分钟串成一条清楚的线：找到一个重复任务，把它做顺，再判断是否值得推广。\n\n1. 从一个真实场景开始 · 3 分钟\n用整理会议纪要开场，看看哪些步骤最耗时间，哪些信息最容易漏。\n\n2. 展示三个能复用的小做法 · 8 分钟\n资料整理：先给来源，再提取可核对的要点。\n文档起草：提供结构和例子，保留人的判断。\n流程协作：让结果进入原来的工作流程。\n\n3. 留下一个容易行动的起点 · 4 分钟\n每个人选一个下周会重复三次的任务，做一次小实验，记录节省的时间和仍需人工检查的部分。\n\n分享提纲.md 已作为离线示例制品提供，可从下方入口查看。")]
-        task.nativeState?.items=[.init(id:"tool",kind:"commandExecution",title:"整理分享材料",detail:"离线示例命令与输出\n未执行真实工具。",status:"completed"),.init(id:"reason",kind:"reasoning",title:"reasoning",detail:"{\"content\":[],\"summary\":[]}",status:"completed")]
+        task.nativeState?.items=[.init(id:"tool",turnID:"fixture-turn",kind:"commandExecution",title:"整理分享材料",detail:"离线示例命令与输出\n未执行真实工具。",status:"completed"),.init(id:"fixture-background-0",turnID:"fixture-turn",kind:"commandExecution",title:"离线后台命令",detail:"最后只收到开始记录；不执行真实命令。",status:"inProgress"),.init(id:"reason",kind:"reasoning",title:"reasoning",detail:"{\"content\":[],\"summary\":[]}",status:"completed")]
         var other=WorkbenchTask(instanceID:acp.id,title:"检查登录页交互");other.status = .completed;other.sessionID="fixture-acp-session";other.messages=[.init(role:"user",text:"检查登录页的错误提示和加载状态。"),.init(role:"assistant",text:"先核对三个地方：错误提示贴近字段、提交期间避免重复点击、失败后保留原来的输入。")]
         model.state.tasks=[task,other];model.selectedTaskID=task.id;model.preferredInstanceID=native.id;model.liveTasks=[task.id,other.id]
         model.nativeConnections[native.id] = .init(authenticated:true,version:"离线 UI 夹具",models:[.init(id:"fixture-only",model:"fixture-only",name:"离线模型",isDefault:true)],capabilities:["history":true,"resume":true,"approval":true,"interrupt":true,"artifacts":true])
