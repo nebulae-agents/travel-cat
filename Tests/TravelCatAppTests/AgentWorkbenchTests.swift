@@ -173,10 +173,10 @@ extension AgentWorkbenchTests {
         }
         mark("application-ready")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root); mark("temp-cleanup-returned") }
         let client = WorkbenchTestRuntime()
         let model = AgentWorkbenchModel(root: root, credentials: WorkbenchTestCredentials(), client: client)
-        defer { client.onPrompt = nil; model.shutdown() }
+        defer { client.onPrompt = nil; model.shutdown(); mark("model-shutdown-returned") }
         var agent = instance(); agent.provider.model = "test"; agent.name = "项目开发助手"
         try model.save(instance: agent, newKey: "canary")
         client.onPrompt = {
@@ -196,7 +196,7 @@ extension AgentWorkbenchTests {
         window.contentView = view
         mark("content-attached")
         if ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] != nil { window.orderFrontRegardless() }
-        defer { window.orderOut(nil) }
+        defer { window.orderOut(nil); mark("window-orderout-returned") }
         view.frame = NSRect(x: 0, y: 0, width: 1000, height: 740)
         view.layoutSubtreeIfNeeded()
         mark("initial-layout-ready")
@@ -207,6 +207,8 @@ extension AgentWorkbenchTests {
         mark("bitmap-ready")
         view.cacheDisplay(in: view.bounds, to: bitmap)
         mark("display-ready")
+        if bitmap.pixelsWide > 700 && bitmap.pixelsHigh > 500 { mark("bitmap-size-valid") }
+        else { mark("bitmap-size-invalid") }
         XCTAssertGreaterThan(bitmap.pixelsWide, 700)
         XCTAssertGreaterThan(bitmap.pixelsHigh, 500)
         if let path = ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] {
