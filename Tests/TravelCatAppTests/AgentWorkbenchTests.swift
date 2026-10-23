@@ -162,8 +162,10 @@ extension AgentWorkbenchTests {
 extension AgentWorkbenchTests {
     @MainActor
     func testWorkbenchRenderWithPendingPermission() async throws {
-        // This may be the first AppKit test in the CI process.
+        // Initialize this fixture's AppKit dependency explicitly.
         _ = NSApplication.shared
+        func mark(_ phase: StaticString) { FileHandle.standardError.write(Data("agent-render-phase: \(phase)\n".utf8)) }
+        mark("application-ready")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let client = WorkbenchTestRuntime()
@@ -175,19 +177,27 @@ extension AgentWorkbenchTests {
             client.emit("permission", ["requestId": "preview", "options": [["optionId": "allow", "name": "允许本次", "kind": "allow_once"], ["optionId": "deny", "name": "拒绝", "kind": "reject_once"]], "toolCall": ["title": "在隔离工作区运行检查", "rawInput": ["command": "python3 check.py"]]])
         }
         await model.start(instanceID: agent.id, text: "检查项目并生成改进报告")
+        mark("before-hosting")
         let view = NSHostingView(rootView: AgentWorkbenchView(model: model).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light))
+        mark("hosting-ready")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 740), styleMask: [.titled], backing: .buffered, defer: false)
+        mark("window-ready")
         window.appearance = NSAppearance(named: .aqua)
         view.appearance = NSAppearance(named: .aqua)
         window.contentView = view
+        mark("content-attached")
         if ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] != nil { window.orderFrontRegardless() }
         defer { window.orderOut(nil) }
         view.frame = NSRect(x: 0, y: 0, width: 1000, height: 740)
         view.layoutSubtreeIfNeeded()
+        mark("layout-ready")
         try await Task.sleep(for: .milliseconds(300))
         view.layoutSubtreeIfNeeded()
+        mark("layout-ready")
         let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        mark("bitmap-ready")
         view.cacheDisplay(in: view.bounds, to: bitmap)
+        mark("display-ready")
         XCTAssertGreaterThan(bitmap.pixelsWide, 700)
         XCTAssertGreaterThan(bitmap.pixelsHigh, 500)
         if let path = ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] {
