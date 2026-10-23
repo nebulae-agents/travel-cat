@@ -6,6 +6,8 @@ extension AgentWorkbenchModel {
         guard let configuration = instance.native, isStorageReady else { throw WorkbenchFailure("原生实例配置无效。") }
         try configuration.validate(requireModel: false)
         guard !nativeBusy.contains(instance.id) else { throw WorkbenchFailure("正在连接，请稍候。") }
+        nativeConnectionGenerations[instance.id] = UUID()
+        for task in state.tasks where task.instanceID == instance.id { invalidateNativeBackgroundStatus(task.id) }
         nativeBusy.insert(instance.id); defer { nativeBusy.remove(instance.id) }
         try managementRecord("native.connect", fields: ["instanceId": instance.id.uuidString, "phase": "requested"])
         try client.launch(python: state.pythonPath)
@@ -55,6 +57,7 @@ extension AgentWorkbenchModel {
     }
 
     func nativeIntent(_ id: UUID, kind: NativeOperation.Kind, target: String, fields: [String: Any] = [:]) throws {
+        invalidateNativeBackgroundStatus(id)
         let operation = NativeOperation(kind: kind, targetID: target)
         var details = fields; details["operationId"] = operation.id.uuidString; details["targetId"] = target
         try nativeRecord(id, kind: "native.\(kind.rawValue).requested", fields: details)
@@ -155,10 +158,8 @@ extension AgentWorkbenchModel {
 
     func stopNativeBackgroundTasks(_ id: UUID) async {
         guard isStorageReady else { return }
-        guard !nativeBackgroundStopping.contains(id), !nativeRecovering.contains(id), !nativeDetaching.contains(id), liveTasks.contains(id),
-              let task = state.tasks.first(where: { $0.id == id }),
-              [.completed, .cancelled, .failed].contains(task.status),
-              task.nativeState?.connection == .connected, let thread = task.nativeState?.threadID else { return }
+        guard canStopNativeBackgroundTasks(id),
+              let thread = state.tasks.first(where: { $0.id == id })?.nativeState?.threadID else { return }
         var controlID: UUID?
         nativeBackgroundStopping.insert(id)
         defer { if nativeControlIsCurrent(id, operationID: controlID) { nativeBackgroundStopping.remove(id) } }
@@ -172,7 +173,7 @@ extension AgentWorkbenchModel {
             try nativeRecord(id, kind: "native.backgroundStop.confirmed", fields: ["threadId": thread, "terminatedCount": count])
             mutate(id) {
                 $0.nativeState?.pendingOperation?.status = .confirmed
-                $0.nativeState?.historyNotice = "已停止 \(count) 个后台命令，并确认该会话当前无运行中的后台命令。"
+                $0.nativeState?.historyNotice = "本次已停止 \(count) 个后台命令；停止操作完成时已确认该会话无运行中的后台命令。"
             }
             nativeInterruptUnverified.remove(id)
             if let completed = nativeInterruptEvents.removeValue(forKey: id) { receiveNative(completed) }
@@ -273,7 +274,7 @@ extension AgentWorkbenchModel {
                 $0.nativeState?.connection = .connected; $0.nativeState?.lastReconciledAt = Date()
                 $0.nativeState?.pendingOperation?.status = .confirmed
                 $0.nativeState?.historyNotice = "已从官方记录核对。断开期间的实时审计可能有缺口；恢复交界处的流式文本以项目完成后的记录为准，旧审批不自动重放。"
-                if let count = backgroundCount { $0.nativeState?.historyNotice? += " 当前后台命令：\(count) 个。" }
+                if let count = backgroundCount { $0.nativeState?.historyNotice? += " 恢复时核对到后台命令：\(count) 个。" }
                 if let turn = result["turnId"] as? String {
                     $0.nativeState?.turnID = turn; $0.status = .running
                 } else if let last = turns.last {
@@ -328,6 +329,8 @@ extension AgentWorkbenchModel {
             nativeEventBuffers[id, default: []].append(event); return
         }
         if method == "connection/lost" {
+            invalidateNativeBackgroundStatus(id)
+            nativeConnectionGenerations[instanceID] = UUID()
             permissions.removeAll { $0.taskID == id }; liveTasks.remove(id)
             mutate(id) { $0.nativeState?.connection = .disconnected; if $0.status.active { $0.status = .unknown }; $0.unread = true }
             persist(); return
@@ -361,6 +364,7 @@ extension AgentWorkbenchModel {
                 guard let turn, turn == state.tasks.first(where: { $0.id == id })?.nativeState?.turnID else { return }
                 mutate(id) { $0.status = nativeStatus(turnObject?["status"] as? String); $0.unread = true; $0.nativeState?.pendingOperation?.status = .confirmed }
                 permissions.removeAll { $0.taskID == id }
+                invalidateNativeBackgroundStatus(id)
             case "permission":
                 guard let requestID = params["requestId"] as? String, let hash = params["requestHash"] as? String,
                       let turn, let item = params["itemId"] as? String, let expiry = params["expiresAt"] as? Double,
