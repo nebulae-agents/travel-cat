@@ -6,6 +6,14 @@ PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 SWIFT_WRAPPER="$PROJECT_ROOT/Scripts/travel-cat-swift.sh"
 PROVENANCE="$PROJECT_ROOT/Automation/provenance/travelcatctl-release.provenance"
 
+swift_build() {
+    if [ -n "${TRAVEL_CAT_PACKAGE_SDK:-}" ]; then
+        "$SWIFT_WRAPPER" build --sdk "$TRAVEL_CAT_PACKAGE_SDK" "$@"
+    else
+        "$SWIFT_WRAPPER" build "$@"
+    fi
+}
+
 if [ ! -x "$SWIFT_WRAPPER" ] || [ -L "$SWIFT_WRAPPER" ]; then
     echo "build-scheduled-cli: Swift wrapper is missing or unsafe" >&2
     exit 65
@@ -13,8 +21,8 @@ fi
 SCRATCH_PATH=$("$SWIFT_WRAPPER" scratch-path)
 PINNED_ROOT="$SCRATCH_PATH/travelcatctl-pinned"
 
-"$SWIFT_WRAPPER" build --disable-sandbox -c release --product travelcatctl
-BIN_DIR=$("$SWIFT_WRAPPER" build --disable-sandbox -c release --show-bin-path)
+swift_build --disable-sandbox -c release --product travelcatctl
+BIN_DIR=$(swift_build --disable-sandbox -c release --show-bin-path)
 if [ ! -d "$BIN_DIR" ] || [ -L "$BIN_DIR" ]; then
     echo "build-scheduled-cli: release bin directory is missing or unsafe" >&2
     exit 65

@@ -291,16 +291,26 @@ final class TravelCatAppSourceContractTests: XCTestCase {
     func testMenuActionsUseDedicatedJourneySettingsAndAlbumPreviewWindows() throws {
         let source = try appSource()
 
-        XCTAssertEqual(source.components(separatedBy: "TravelUtilityWindowController()").count - 1, 5)
+        XCTAssertEqual(source.components(separatedBy: "TravelUtilityWindowController()").count - 1, 6)
         XCTAssertTrue(source.contains("private lazy var utilityWindowController"))
         XCTAssertTrue(source.contains("private lazy var settingsWindowController"))
         XCTAssertTrue(source.contains("private lazy var generationWindowController"))
         XCTAssertTrue(source.contains("private lazy var albumPreviewWindowController"))
         XCTAssertTrue(source.contains("private lazy var journeyTestWindowController"))
+        XCTAssertTrue(source.contains("private lazy var agentWindowController"))
+        XCTAssertTrue(source.contains("AgentWorkbenchView(model: agentWorkbench)"))
         XCTAssertTrue(source.contains("model.openStatusFromMenu()"))
         XCTAssertTrue(source.contains("model.openLatestPostcardFromMenu()"))
         XCTAssertTrue(source.contains("model.openLatestAlbumFromMenu()"))
         XCTAssertTrue(source.contains("StartupErrorView(message:"))
+    }
+
+    func testInstalledDesktopPetWiresMailboxAlongsideExistingScene() throws {
+        let source = try appSource()
+        XCTAssertTrue(source.contains("mailboxCoordinator = DesktopMailboxCoordinator(desktop: controller"))
+        XCTAssertTrue(source.contains("PetHouseView(phase: model.snapshot.phase, hasUnreadPostcard: false"))
+        XCTAssertTrue(source.contains("openPostcard: { [weak self] id in self?.showMailboxPostcard(id) }"))
+        XCTAssertTrue(source.contains("model.openPostcardFromMailbox(eventID: id)"))
     }
 
     func testApplicationTerminationWaitsForOwnedTestProcessToDrain() throws {
