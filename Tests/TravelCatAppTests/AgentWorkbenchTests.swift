@@ -196,7 +196,13 @@ extension AgentWorkbenchTests {
         window.contentView = view
         mark("content-attached")
         if ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] != nil { window.orderFrontRegardless() }
-        defer { window.orderOut(nil); mark("window-orderout-returned") }
+        defer {
+            mark("window-cleanup-entered")
+            if window.isVisible { mark("window-cleanup-visible") }
+            else { mark("window-cleanup-hidden") }
+            window.orderOut(nil)
+            mark("window-orderout-returned")
+        }
         view.frame = NSRect(x: 0, y: 0, width: 1000, height: 740)
         view.layoutSubtreeIfNeeded()
         mark("initial-layout-ready")
@@ -214,6 +220,7 @@ extension AgentWorkbenchTests {
         if let path = ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] {
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: path))
         }
+        mark("render-body-returning")
     }
 }
 
