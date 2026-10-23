@@ -164,12 +164,19 @@ extension AgentWorkbenchTests {
     func testWorkbenchRenderWithPendingPermission() async throws {
         // Initialize this fixture's AppKit dependency explicitly.
         _ = NSApplication.shared
-        func mark(_ phase: StaticString) { FileHandle.standardError.write(Data("agent-render-phase: \(phase)\n".utf8)) }
+        func mark(_ phase: StaticString) {
+            FileHandle.standardError.write(Data("agent-render-phase: \(phase)\n".utf8))
+            if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true" {
+                // Only source-defined phase constants enter the check annotation.
+                FileHandle.standardOutput.write(Data("::notice title=Agent render phase::\(phase)\n".utf8))
+            }
+        }
         mark("application-ready")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let client = WorkbenchTestRuntime()
         let model = AgentWorkbenchModel(root: root, credentials: WorkbenchTestCredentials(), client: client)
+        defer { client.onPrompt = nil; model.shutdown() }
         var agent = instance(); agent.provider.model = "test"; agent.name = "项目开发助手"
         try model.save(instance: agent, newKey: "canary")
         client.onPrompt = {
@@ -192,10 +199,10 @@ extension AgentWorkbenchTests {
         defer { window.orderOut(nil) }
         view.frame = NSRect(x: 0, y: 0, width: 1000, height: 740)
         view.layoutSubtreeIfNeeded()
-        mark("layout-ready")
+        mark("initial-layout-ready")
         try await Task.sleep(for: .milliseconds(300))
         view.layoutSubtreeIfNeeded()
-        mark("layout-ready")
+        mark("settled-layout-ready")
         let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         mark("bitmap-ready")
         view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -205,7 +212,6 @@ extension AgentWorkbenchTests {
         if let path = ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] {
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: path))
         }
-        model.shutdown()
     }
 }
 
