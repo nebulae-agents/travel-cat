@@ -167,9 +167,9 @@ extension AgentWorkbenchTests {
         func mark(_ phase: StaticString) {
             FileHandle.standardError.write(Data("agent-render-phase: \(phase)\n".utf8))
             // Runner stores at most ten notices per step; reserve them for the remaining boundary.
-            let noticePhases: Set<String> = ["display-ready", "bitmap-size-valid", "bitmap-size-invalid", "render-body-returning", "window-cleanup-entered", "window-cleanup-visible", "window-cleanup-hidden", "window-orderout-returned", "model-shutdown-returned", "temp-cleanup-returned"]
+            let noticePhases: Set<String> = ["display-ready", "bitmap-size-valid", "bitmap-size-invalid", "render-body-returning", "window-cleanup-entered", "window-cleanup-visible", "window-cleanup-hidden", "window-orderout-returned", "window-detach-close-returned", "model-shutdown-returned", "temp-cleanup-returned"]
             if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true", noticePhases.contains("\(phase)") {
-                // Only source-defined phase constants enter the check annotation (eight on any path).
+                // Only source-defined phase constants enter the check annotation (nine on any path).
                 FileHandle.standardOutput.write(Data("::notice title=Agent render phase::\(phase)\n".utf8))
             }
         }
@@ -193,6 +193,7 @@ extension AgentWorkbenchTests {
         mark("hosting-ready")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 740), styleMask: [.titled], backing: .buffered, defer: false)
         mark("window-ready")
+        window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .aqua)
         view.appearance = NSAppearance(named: .aqua)
         window.contentView = view
@@ -204,6 +205,12 @@ extension AgentWorkbenchTests {
             else { mark("window-cleanup-hidden") }
             window.orderOut(nil)
             mark("window-orderout-returned")
+            // Detach the test host before model shutdown publishes final state.
+            window.contentView = nil
+            window.close()
+            XCTAssertNil(window.contentView)
+            XCTAssertFalse(window.isVisible)
+            mark("window-detach-close-returned")
         }
         view.frame = NSRect(x: 0, y: 0, width: 1000, height: 740)
         view.layoutSubtreeIfNeeded()
