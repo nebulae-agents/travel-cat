@@ -20,6 +20,7 @@ private final class SubmissionRuntime: AgentRuntimeClient {
     var startResult: [String: Any] = ["sessionId": "session"]
     var startFailure: Error?
     var launchFailure: Error?
+    var promptFailure: Error?
     var beforeStart: (() async -> Void)?
     var duringPrompt: (() -> Void)?
     func launch(python: String) throws { launches += 1; if let launchFailure { throw launchFailure } }
@@ -30,7 +31,7 @@ private final class SubmissionRuntime: AgentRuntimeClient {
             if let startFailure { throw startFailure }
             return startResult
         }
-        if method == "prompt" { promptTexts.append(params["text"] as? String ?? ""); duringPrompt?() }
+        if method == "prompt" { promptTexts.append(params["text"] as? String ?? ""); duringPrompt?(); if let promptFailure { throw promptFailure } }
         return [:]
     }
     func shutdown() { onExit?() }
@@ -102,7 +103,7 @@ extension AgentWorkbenchSubmissionTests {
         XCTAssertEqual(runtime.calls, ["start", "start", "start"])
     }
     @MainActor
-    func testAcknowledgementClearsSnapshotBeforePromptAndUnlocksNewTasks() async throws {
+    func testAcknowledgementWaitsForPromptConfirmationAndUnlocksNewTasks() async throws {
         let (model, runtime, _, root, id) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         var draft = WorkbenchSubmissionDraft()
@@ -115,15 +116,14 @@ extension AgentWorkbenchSubmissionTests {
         }
         runtime.duringPrompt = {
             XCTAssertFalse(model.isStarting, "Do not lock the composer for the hour-long prompt")
-            XCTAssertEqual(draft.text, "")
-            XCTAssertTrue(draft.files.isEmpty)
-            XCTAssertNil(draft.parentTaskID)
+            XCTAssertEqual(draft, snapshot, "Creating a session does not confirm the prompt was submitted")
         }
         var acknowledged = 0
         await model.start(instanceID: id, text: snapshot.text, files: snapshot.files, parentTaskID: snapshot.parentTaskID) {
             acknowledged += 1; draft.clear(ifUnchangedSince: snapshot.revision)
         }
         XCTAssertEqual(acknowledged, 1)
+        XCTAssertTrue(draft.text.isEmpty)
         XCTAssertEqual(runtime.calls, ["start", "prompt"])
     }
     func testNewEditsIncludingRevertedTextSurviveOldAcknowledgement() {
@@ -224,5 +224,18 @@ extension AgentWorkbenchSubmissionTests {
         XCTAssertEqual(model.state.tasks.first?.messages.count, task.messages.count)
         XCTAssertEqual(model.state.tasks.first?.status, task.status)
         XCTAssertNotNil(model.error)
+    }
+}
+
+extension AgentWorkbenchSubmissionTests {
+    @MainActor
+    func testPromptTransportFailureNeverAcknowledgesDraft() async throws {
+        let (model, runtime, _, root, id) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        runtime.promptFailure = WorkbenchFailure("transport result unknown")
+        var acknowledged = false
+        await model.start(instanceID: id, text: "preserve") { acknowledged = true }
+        XCTAssertFalse(acknowledged)
+        XCTAssertEqual(model.state.tasks.first?.status, .unknown)
     }
 }

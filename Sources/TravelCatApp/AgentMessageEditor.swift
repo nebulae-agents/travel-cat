@@ -81,6 +81,8 @@ struct AgentMessageEditor: NSViewRepresentable {
 struct AgentComposerView: View {
     @Binding var draft: WorkbenchSubmissionDraft
     let instance: WorkbenchInstance?
+    let parentTitle: String?
+    let removeParent: () -> Void
     let isNew: Bool
     let canSend: Bool
     let focusRequest: UUID
@@ -111,6 +113,16 @@ struct AgentComposerView: View {
                 Text(allowModelAccess ? "包含本任务的后续追问，每次调用仍保留审计。" : "默认逐次确认模型请求；文件读取不等于允许上传。")
                     .font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted)
             }
+            if let parentID = draft.parentTaskID {
+                HStack(spacing: 8) {
+                    Label("承接来源：" + (parentTitle.map(WorkbenchConversationPresentation.shortTitle) ?? "原对话 \(parentID.uuidString.prefix(8))"), systemImage: "arrow.turn.down.right")
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Button("移除承接来源", action: removeParent).buttonStyle(.borderless)
+                        .help("仅移除来源关联，保留正文和文件。")
+                }.font(.system(size: 12)).padding(8)
+                    .background(WorkbenchTheme.sidebar, in: RoundedRectangle(cornerRadius: 8))
+            }
             VStack(spacing: 5) {
                 ZStack(alignment: .topLeading) {
                     if draft.text.isEmpty { Text(isNew ? "想让 Agent 帮你做什么？" : "继续说说你的想法…").font(.system(size: 14)).foregroundStyle(WorkbenchTheme.muted.opacity(0.75)).padding(.leading, 9).padding(.top, 7).allowsHitTesting(false) }
@@ -119,12 +131,12 @@ struct AgentComposerView: View {
                 HStack(spacing: 8) {
                     if isNew, instance?.native == nil, instance != nil {
                         Button { chooseFiles() } label: { Image(systemName: "paperclip") }.buttonStyle(.plain).help("添加输入文件").accessibilityLabel("添加输入文件")
-                        if !draft.files.isEmpty {
-                            Menu("文件 · \(draft.files.count)") {
-                                ForEach(Array(draft.files.enumerated()), id: \.offset) { _, file in Text(file["name"] ?? "文件") }
-                                Button("清除输入文件") { draft.files = [] }
-                            }.font(.caption).fixedSize()
-                        }
+                    }
+                    if !draft.files.isEmpty {
+                        Menu("文件 · \(draft.files.count)") {
+                            ForEach(Array(draft.files.enumerated()), id: \.offset) { _, file in Text(file["name"] ?? "文件") }
+                            Button("清除输入文件") { draft.files = [] }
+                        }.font(.caption).fixedSize()
                     }
                     Text(modelLabel).font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted).lineLimit(1)
                     Spacer(minLength: 8)
@@ -158,6 +170,7 @@ struct AgentComposerView: View {
                 guard total <= 4 * 1024 * 1024 else { throw WorkbenchFailure("输入文件合计不能超过 4 MiB。") }
                 files.append(["name": url.lastPathComponent, "base64": bytes.base64EncodedString()])
             }
+            try WorkbenchSubmissionDraft.validateFiles(files)
             draft.files = files
         } catch { onFailure(error.localizedDescription) }
     }

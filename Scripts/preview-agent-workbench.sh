@@ -44,6 +44,7 @@ xcrun swiftc -target "$(uname -m)-apple-macos14.0" -swift-version 6 -parse-as-li
   "$project_root/Sources/TravelCatApp/MailboxViews.swift" \
   "$project_root/Sources/TravelCatApp/AgentLauncherController.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchData.swift" \
+  "$project_root/Sources/TravelCatApp/AgentDraftData.swift" \
   "$project_root/Sources/TravelCatApp/NativeAgentData.swift" \
   "$project_root/Sources/TravelCatApp/NativeAgentSetupView.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchModel+Native.swift" \
@@ -56,6 +57,7 @@ xcrun swiftc -target "$(uname -m)-apple-macos14.0" -swift-version 6 -parse-as-li
   "$project_root/Sources/TravelCatApp/AgentCallInspector.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchModel.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchModel+Storage.swift" \
+  "$project_root/Sources/TravelCatApp/AgentWorkbenchModel+Drafts.swift" \
   "$project_root/Sources/TravelCatApp/AgentRuntimeDiscovery.swift" \
   "$project_root/Sources/TravelCatApp/AgentQuickCreateView.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchPresentation.swift" \
