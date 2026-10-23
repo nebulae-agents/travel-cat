@@ -162,6 +162,8 @@ extension AgentWorkbenchTests {
 extension AgentWorkbenchTests {
     @MainActor
     func testWorkbenchRenderWithPendingPermission() async throws {
+        // This may be the first AppKit test in the CI process.
+        _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let client = WorkbenchTestRuntime()
