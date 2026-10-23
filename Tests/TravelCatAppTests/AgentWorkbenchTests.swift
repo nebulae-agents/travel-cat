@@ -166,8 +166,10 @@ extension AgentWorkbenchTests {
         _ = NSApplication.shared
         func mark(_ phase: StaticString) {
             FileHandle.standardError.write(Data("agent-render-phase: \(phase)\n".utf8))
-            if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true" {
-                // Only source-defined phase constants enter the check annotation.
+            // Runner stores at most ten notices per step; reserve them for the remaining boundary.
+            let noticePhases: Set<String> = ["display-ready", "bitmap-size-valid", "bitmap-size-invalid", "render-body-returning", "window-cleanup-entered", "window-cleanup-visible", "window-cleanup-hidden", "window-orderout-returned", "model-shutdown-returned", "temp-cleanup-returned"]
+            if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true", noticePhases.contains("\(phase)") {
+                // Only source-defined phase constants enter the check annotation (eight on any path).
                 FileHandle.standardOutput.write(Data("::notice title=Agent render phase::\(phase)\n".utf8))
             }
         }
