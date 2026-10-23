@@ -201,6 +201,8 @@ class Task:
         self.request_slots=threading.BoundedSemaphore(4)
         self.request_count=0
         self.created=False
+        self.binding_id=str(uuid.uuid4());self.execution_id=None;self.artifact_baseline=None
+        self.artifact_read_slot=threading.Lock();self.workspace_identity=None
     def event(self,event,data):
         with self.lock:
             if event=='state':
@@ -334,6 +336,14 @@ class Task:
         if not isinstance(text,str) or not text or len(text.encode())>512*1024: raise RuntimeFailure('invalid prompt')
         if not self.turn.acquire(False): raise RuntimeFailure('task already has an active turn')
         try:
+            with self.lock:
+                self.execution_id=str(uuid.uuid4());self.artifact_baseline=None
+            baseline=self.workspace('manifest')
+            with self.lock:
+                self.artifact_baseline=baseline
+                if self.workspace_identity is not None and self.workspace_identity!=baseline.get('rootIdentity'):raise RuntimeFailure('workspace root changed')
+                self.workspace_identity=baseline.get('rootIdentity')
+            self.audit.record(self.task_id,'operation.artifactBaseline',bindingId=self.binding_id,executionId=self.execution_id,fileCount=len(baseline['files']),inventoryComplete=baseline['inventoryComplete'],hashComplete=baseline['hashComplete'],reason=baseline.get('reason'))
             self.event('state',{'status':'running'})
             result=self.rpc('session/prompt',{'sessionId':self.session,'prompt':[{'type':'text','text':text}]},TASK_SECONDS)
             if result.get('stopReason') not in ('end_turn','max_tokens','max_turn_requests','refusal','cancelled'): raise RuntimeFailure('invalid adapter completion')
@@ -374,9 +384,9 @@ class Task:
                 manifest.append({'name':file['name'],'bytes':len(content),'sha256':hashlib.sha256(content).hexdigest()})
             self.audit.record(self.task_id,'operation.import',phase='requested',fileCount=len(files),files=manifest)
         script=Path(__file__).with_name('workspace_io.py').read_text()
-        data=json.dumps({'method':method,**params},separators=(',',':')).encode()
+        data=json.dumps({'method':method,**params,'expectedRootIdentity':self.workspace_identity,'includeIdentity':True},separators=(',',':')).encode()
         if len(data)>workspace_io.CONTROL_LIMIT: raise RuntimeFailure('workspace input too large')
-        result=json.loads(run_docker(['exec','-i',self.name,'python3','-I','-S','-c',script],self.host,30,input_data=data,output_limit=workspace_io.CONTROL_LIMIT,context=self.context))
+        result=json.loads(run_docker(['exec','-i',self.name,'python3','-I','-S','-c',script],self.host,5 if method in ('manifest','artifacts','export') else 30,input_data=data,output_limit=workspace_io.CONTROL_LIMIT,context=self.context))
         if self.stopped.is_set() or not isinstance(result,dict) or 'error' in result: raise RuntimeFailure('workspace operation failed')
         if method=='export':
             try:
@@ -384,7 +394,28 @@ class Task:
                 encoded=result['base64']
                 if not isinstance(encoded,str) or len(encoded)>workspace_io.TOTAL_LIMIT*4//3+4 or len(base64.b64decode(encoded,validate=True))>workspace_io.TOTAL_LIMIT: raise ValueError()
             except Exception: raise RuntimeFailure('invalid artifact response') from None
+        identity=result.get('rootIdentity')
+        if not isinstance(identity,list) or len(identity)!=2 or self.workspace_identity is not None and identity!=self.workspace_identity:raise RuntimeFailure('workspace root changed or identity missing')
+        self.workspace_identity=identity
         return result
+    def artifact_read(self,method,expected=None,**params):
+        if not self.artifact_read_slot.acquire(False):raise RuntimeFailure('artifact observation already pending')
+        try:
+            with self.lock:
+                scope=(self.binding_id,self.execution_id);baseline=self.artifact_baseline
+                if expected is not None and scope!=expected:raise RuntimeFailure('artifact caller binding is stale')
+            result=self.workspace(method,**params)
+            with self.lock:
+                if self.stopped.is_set() or scope!=(self.binding_id,self.execution_id):raise RuntimeFailure('artifact binding changed')
+            if method=='manifest':
+                identity=result.get('rootIdentity')
+                if not isinstance(identity,list) or len(identity)!=2:raise RuntimeFailure('workspace identity missing')
+                if self.workspace_identity is not None and self.workspace_identity!=identity:raise RuntimeFailure('workspace root changed')
+                self.workspace_identity=identity
+                return workspace_io.changes(result,baseline,*scope)
+            return {**result,'bindingId':scope[0],'executionId':scope[1]}
+        finally:self.artifact_read_slot.release()
+    def artifact_changes(self):return self.artifact_read('manifest')
     def model_permission(self,call_id,request_hash,allow):
         with self.lock:
             entry=self.model_permissions.get(call_id)
@@ -485,7 +516,7 @@ class Controller:
     def __init__(self):
         self.tasks={};self.probes={};self.lock=threading.Lock();self.output_lock=threading.Lock();self.shutting_down=False;self.output_broken=False
         self.audit=audit_runtime.AuditBroker(self.emit)
-        self.native=codex_native.CodexNativeController(self.emit)
+        self.native=codex_native.CodexNativeController(self.emit, audit=self.audit)
     def emit(self,obj):
         with self.output_lock:
             if self.output_broken: return
@@ -589,8 +620,9 @@ class Controller:
                         raise
                 if method=='model_permission': result=task.model_permission(p.get('callId'),p.get('requestHash'),p.get('allow'))
                 elif method=='prompt': result=task.prompt(p.get('text'))
-                elif method=='artifacts': result=task.workspace('artifacts')
-                elif method=='export': result=task.workspace('export',path=p.get('path'))
+                elif method=='artifact_changes':result=task.artifact_changes()
+                elif method=='artifacts': result=task.artifact_read('artifacts')
+                elif method=='export': result=task.artifact_read('export',expected=(p.get('bindingId'),p.get('executionId')) if 'bindingId' in p else None,path=p.get('path'))
                 elif method=='cancel': result=task.cancel()
                 elif method=='permission': result=task.permission(p.get('requestId'),p.get('optionId'))
                 elif method=='stop':

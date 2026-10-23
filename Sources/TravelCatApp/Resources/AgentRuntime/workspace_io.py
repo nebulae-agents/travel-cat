@@ -1,6 +1,8 @@
 """Trusted code passed to container python via argv; never loaded from writable /tmp."""
 import base64
 import json
+import hashlib
+import time
 import os
 import stat
 import sys
@@ -8,6 +10,9 @@ import sys
 FILE_LIMIT=1024*1024
 TOTAL_LIMIT=4*1024*1024
 CONTROL_LIMIT=6*1024*1024
+MANIFEST_TOTAL_LIMIT=8*1024*1024
+MANIFEST_FILE_LIMIT=200
+MANIFEST_ENTRY_LIMIT=1000
 
 def safe_name(name):
     if not isinstance(name,str) or not name or len(name.encode())>200 or name.startswith('.') or any(c in name for c in '/\\\x00') or any(ord(c)<32 for c in name):
@@ -32,9 +37,101 @@ def validate_files(files):
 def open_directory(parent,name):
     return os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
 
-def perform(request,root='/tmp/workspace'):
+
+def identity(info):
+    return [info.st_dev,info.st_ino]
+
+def stable(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+def manifest(fd):
+    """A partial inventory keeps path presence; missing hashes never imply new files."""
+    files=[];visited=0;remaining=MANIFEST_TOTAL_LIMIT
+    result={'files':files,'inventoryComplete':True,'hashComplete':True,'checkedAt':time.time(),'rootIdentity':identity(os.fstat(fd))}
+    deadline=time.monotonic()+5
+    reasons=set()
+    def incomplete(reason,inventory=False):
+        result['hashComplete']=False
+        if inventory:result['inventoryComplete']=False
+        reasons.add(reason)
+    def walk(directory,prefix,depth):
+        nonlocal visited,remaining
+        directory_before=os.fstat(directory)
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited+=1
+                    if visited>MANIFEST_ENTRY_LIMIT or len(files)>=MANIFEST_FILE_LIMIT or time.monotonic()>=deadline:
+                        incomplete('inventory_limit',True);return
+                    try:safe_name(entry.name)
+                    except ValueError:continue
+                    path=prefix+entry.name
+                    try:info=entry.stat(follow_symlinks=False)
+                    except OSError:incomplete('stat_failed',True);continue
+                    if stat.S_ISDIR(info.st_mode):
+                        if depth>=8:incomplete('depth_limit',True);continue
+                        try:child=open_directory(directory,entry.name)
+                        except OSError:incomplete('directory_changed',True);continue
+                        try:
+                            if identity(os.fstat(child))!=identity(info):incomplete('directory_changed',True);continue
+                            walk(child,path+'/',depth+1)
+                            if identity(os.stat(entry.name,dir_fd=directory,follow_symlinks=False))!=identity(info):incomplete('directory_changed',True)
+                        except OSError:incomplete('directory_changed',True)
+                        finally:os.close(child)
+                        continue
+                    item={'path':path,'size':info.st_size};files.append(item)
+                    reason=None
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:reason='unsafe_file'
+                    elif info.st_size>TOTAL_LIMIT:reason='file_limit'
+                    elif info.st_size>remaining:reason='hash_budget'
+                    else:
+                        target=None
+                        try:
+                            target=os.open(entry.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+                            before=os.fstat(target)
+                            if stable(before)!=stable(info):raise ValueError()
+                            digest=hashlib.sha256();count=0
+                            while count<info.st_size:
+                                if time.monotonic()>=deadline:raise TimeoutError()
+                                chunk=os.read(target,min(65536,info.st_size-count))
+                                if not chunk:break
+                                count+=len(chunk);remaining-=len(chunk)
+                                if count>info.st_size or remaining<0:raise ValueError()
+                                digest.update(chunk)
+                            after=os.fstat(target)
+                            named=os.stat(entry.name,dir_fd=directory,follow_symlinks=False)
+                            if count!=info.st_size or stable(before)!=stable(after) or stable(after)!=stable(named):raise ValueError()
+                            item['sha256']=digest.hexdigest()
+                        except (OSError,ValueError):reason='hash_race'
+                        finally:
+                            if target is not None:os.close(target)
+                    if reason:item['reason']=reason;incomplete(reason)
+        except OSError:incomplete('inventory_failed',True)
+        if stable(directory_before)!=stable(os.fstat(directory)):incomplete('directory_changed',True)
+    walk(fd,'',0)
+    files.sort(key=lambda item:item['path'])
+    if reasons:result['reason']=','.join(sorted(reasons))
+    return result
+
+def changes(current,baseline,binding_id,execution_id,turn_id=None):
+    previous={item['path']:item for item in baseline['files']} if baseline else {}
+    files=[]
+    for item in current['files']:
+        prior=previous.get(item['path']);change='unknown'
+        if baseline and baseline['inventoryComplete'] and current['inventoryComplete'] and item.get('sha256'):
+            if prior and prior.get('sha256'):change='unchanged' if prior['sha256']==item['sha256'] else 'modified'
+            elif prior is None and baseline['inventoryComplete']:change='new'
+        files.append({**item,'change':change})
+    return {**current,'files':files,'bindingId':binding_id,'executionId':execution_id,'turnId':turn_id,
+            'baselineCapturedAt':baseline.get('checkedAt') if baseline else None,
+            'baselineInventoryComplete':baseline.get('inventoryComplete',False) if baseline else False,
+            'baselineHashComplete':baseline.get('hashComplete',False) if baseline else False,
+            'baselineReason':baseline.get('reason') if baseline else 'no_runtime_baseline'}
+
+def _perform(request,root):
     method=request.get('method');fd=os.dup(root) if isinstance(root,int) else os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try:
+        if method=='manifest':return manifest(fd)
         if method=='import':
             files=validate_files(request.get('files'))
             for name,data in files:
@@ -56,7 +153,15 @@ def perform(request,root='/tmp/workspace'):
                     info=os.fstat(stream.fileno())
                     if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>TOTAL_LIMIT:raise ValueError('invalid artifact')
                     data=stream.read(TOTAL_LIMIT+1)
-                    if len(data)>TOTAL_LIMIT:raise ValueError('artifact limit exceeded')
+                    if len(data)>TOTAL_LIMIT or len(data)!=info.st_size or stable(info)!=stable(os.fstat(stream.fileno())) or stable(info)!=stable(os.stat(parts[-1],dir_fd=current,follow_symlinks=False)):raise ValueError('artifact changed during read')
+                # Rewalk the requested relative path from the pinned root. A
+                # renamed child descriptor must not confirm bytes for a new child.
+                verify=os.dup(fd)
+                try:
+                    for part in parts[:-1]:
+                        next_fd=open_directory(verify,part);os.close(verify);verify=next_fd
+                    if stable(info)!=stable(os.stat(parts[-1],dir_fd=verify,follow_symlinks=False)):raise ValueError('artifact path changed during read')
+                finally:os.close(verify)
                 return {'name':parts[-1],'base64':base64.b64encode(data).decode()}
             finally:os.close(current)
         if method=='artifacts':
@@ -80,6 +185,21 @@ def perform(request,root='/tmp/workspace'):
             walk(fd,'',0)
             return {'files':sorted(files,key=lambda f:f['path'])}
         raise ValueError('unknown workspace operation')
+    finally:os.close(fd)
+
+def perform(request,root='/tmp/workspace'):
+    fd=os.dup(root) if isinstance(root,int) else os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        pinned=identity(os.fstat(fd))
+        expected=request.get('expectedRootIdentity')
+        if expected is not None and expected!=pinned:raise ValueError('workspace root changed')
+        result=_perform(request,fd)
+        current=os.dup(root) if isinstance(root,int) else os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            if identity(os.fstat(current))!=pinned:raise ValueError('workspace root changed during read')
+        finally:os.close(current)
+        if request.get('includeIdentity') is True:result['rootIdentity']=pinned
+        return result
     finally:os.close(fd)
 
 if __name__=='__main__':

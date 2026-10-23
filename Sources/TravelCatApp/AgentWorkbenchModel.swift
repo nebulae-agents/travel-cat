@@ -80,6 +80,10 @@ final class AgentWorkbenchModel: ObservableObject {
     var draftsDirty = false
     @Published var draftSaveNotice: String?
     @Published var submittingDrafts: [WorkbenchDraftTarget: Set<UUID>] = [:]
+    var artifactReadRevisions: [UUID:UUID] = [:]
+    var artifactReadRequests: Set<UUID> = []
+    @Published var artifactInventories: [UUID:WorkbenchArtifactInventory] = [:]
+    @Published var artifactHistoryNotice: [UUID:String] = [:]
     var liveTasks: Set<UUID> = []
     var loadFailed = false
     @Published private var startingSubmissionID: UUID?
@@ -138,6 +142,7 @@ final class AgentWorkbenchModel: ObservableObject {
                 self.state.tasks[index].nativeState?.connection = .disconnected
                 if self.state.tasks[index].nativeState?.pendingOperation?.status == .requested { self.state.tasks[index].nativeState?.pendingOperation?.status = .unknown }
             }
+            self.invalidateAllArtifactReads()
             self.invalidateAllNativeBackgroundStatus()
             self.nativeConnectionGenerations.removeAll()
             self.nativeConnections.removeAll()
@@ -393,6 +398,7 @@ final class AgentWorkbenchModel: ObservableObject {
         catch { fail(taskID, error); return false }
     }
     private func sendPrompt(_ id: UUID, _ text: String) async throws {
+        invalidateArtifactReads(id)
         _ = try await client.request("prompt", ["taskId": id.uuidString, "text": text], timeout: 3600)
         mutate(id) { if $0.status == .running { $0.status = .completed }; $0.unread = true }
         persist()
@@ -427,6 +433,7 @@ final class AgentWorkbenchModel: ObservableObject {
     }
     func stop(_ id: UUID) async {
         guard isStorageReady else { return }
+        invalidateArtifactReads(id)
         if state.tasks.first(where: { $0.id == id })?.nativeState != nil { await detachNative(id); return }
         do {
             let result = try await client.request("stop", ["taskId": id.uuidString])
@@ -448,6 +455,7 @@ final class AgentWorkbenchModel: ObservableObject {
     }
     func shutdown() {
         saveTask?.cancel(); draftSaveTask?.cancel(); persist()
+        invalidateAllArtifactReads()
         hasShutdown = true; storageGeneration = UUID(); storageTask?.cancel()
         invalidateAllNativeBackgroundStatus(); nativeBackgroundVisibility.removeAll()
         client.shutdown()

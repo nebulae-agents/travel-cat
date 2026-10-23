@@ -57,6 +57,7 @@ extension AgentWorkbenchModel {
     }
 
     func nativeIntent(_ id: UUID, kind: NativeOperation.Kind, target: String, fields: [String: Any] = [:]) throws {
+        invalidateArtifactReads(id)
         invalidateNativeBackgroundStatus(id)
         let operation = NativeOperation(kind: kind, targetID: target)
         var details = fields; details["operationId"] = operation.id.uuidString; details["targetId"] = target
@@ -105,7 +106,7 @@ extension AgentWorkbenchModel {
         guard let turn = result["turnId"] as? String, !turn.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw WorkbenchFailure("本轮提交结果未知，不会自动重发。") }
         mutate(id) {
             // Completion notifications may arrive before the start response.
-            if $0.nativeState?.turnID == nil { $0.nativeState?.turnID = turn }
+            if $0.nativeState?.turnID == nil && !NativeTaskState.terminalTurnStatuses.contains($0.nativeState?.turnStatuses?[turn] ?? "") { $0.nativeState?.turnID = turn }
             if $0.nativeState?.pendingOperation?.kind == .prompt && $0.nativeState?.pendingOperation?.status == .requested {
                 $0.nativeState?.pendingOperation?.status = .accepted
             }
@@ -340,6 +341,7 @@ extension AgentWorkbenchModel {
             nativeEventBuffers[id, default: []].append(event); return
         }
         if method == "connection/lost" {
+            invalidateArtifactReads(id)
             invalidateNativeBackgroundStatus(id)
             nativeConnectionGenerations[instanceID] = UUID()
             permissions.removeAll { $0.taskID == id }; liveTasks.remove(id)
