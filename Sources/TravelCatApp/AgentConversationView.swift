@@ -262,20 +262,19 @@ private struct ConversationVisibility: NSViewRepresentable {
 
     @MainActor final class VisibilityView: NSView {
         var changed: ((Bool) -> Void)?
-        private var observations: [NSObjectProtocol] = []
+        private let observations = WorkbenchReceiptObservers()
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            observations.forEach(NotificationCenter.default.removeObserver)
-            observations = []
+            observations.removeAll()
             if let window {
-                observations = [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+                observations.replace([NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
                                 NSWindow.didDeminiaturizeNotification, NSWindow.didBecomeKeyNotification,
                                 NSWindow.willCloseNotification].map { name in
                     NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] notification in
                         let closing = notification.name == NSWindow.willCloseNotification
                         Task { @MainActor in self?.scheduleVisibility(closing: closing) }
                     }
-                }
+                })
             }
             scheduleVisibility()
         }
@@ -288,6 +287,7 @@ private struct ConversationVisibility: NSViewRepresentable {
                 self.changed?(visible)
             }
         }
-        isolated deinit { observations.forEach(NotificationCenter.default.removeObserver) }
+        // Foundation token cleanup is owned separately from the view executor.
+        nonisolated deinit {}
     }
 }
