@@ -3,7 +3,7 @@ import Foundation
 @MainActor
 extension AgentWorkbenchModel {
     func connectNative(instance: WorkbenchInstance) async throws -> NativeConnectionInfo {
-        guard let configuration = instance.native, !loadFailed else { throw WorkbenchFailure("原生实例配置无效。") }
+        guard let configuration = instance.native, isStorageReady else { throw WorkbenchFailure("原生实例配置无效。") }
         try configuration.validate(requireModel: false)
         guard !nativeBusy.contains(instance.id) else { throw WorkbenchFailure("正在连接，请稍候。") }
         nativeBusy.insert(instance.id); defer { nativeBusy.remove(instance.id) }
@@ -32,6 +32,7 @@ extension AgentWorkbenchModel {
     }
 
     func cancelNativeLogin(instanceID: UUID) async {
+        guard isStorageReady else { return }
         guard let id = nativeLoginIDs[instanceID] else { return }
         do {
             _ = try await client.request("native_login_cancel", ["instanceId": instanceID.uuidString, "loginId": id])
@@ -40,7 +41,7 @@ extension AgentWorkbenchModel {
     }
 
     func nativeRecord(_ id: UUID, kind: String, fields: [String: Any] = [:]) throws {
-        guard auditError == nil, let auditStore, !loadFailed else { throw WorkbenchFailure("安全审计不可用，操作未发送。") }
+        guard auditError == nil, let auditStore, isStorageReady else { throw WorkbenchFailure("安全审计不可用，操作未发送。") }
         var record = fields
         record["eventId"] = UUID().uuidString; record["taskId"] = id.uuidString
         record["kind"] = kind; record["timestamp"] = ISO8601DateFormatter().string(from: Date())
@@ -49,7 +50,7 @@ extension AgentWorkbenchModel {
     }
 
     func persistNative() throws {
-        guard !loadFailed else { throw WorkbenchFailure("原数据未能读取，禁止覆盖。") }
+        guard isStorageReady else { throw WorkbenchFailure("原数据未能读取，禁止覆盖。") }
         try store.save(state)
     }
 
@@ -124,6 +125,7 @@ extension AgentWorkbenchModel {
     }
 
     func cancelNative(_ id: UUID) async {
+        guard isStorageReady else { return }
         guard !nativeInterruptPending.contains(id), !nativeRecovering.contains(id), !nativeDetaching.contains(id), let task = state.tasks.first(where: { $0.id == id }), task.status.active,
               let turn = task.nativeState?.turnID, liveTasks.contains(id) else { return }
         var controlID: UUID?
@@ -152,6 +154,7 @@ extension AgentWorkbenchModel {
     }
 
     func stopNativeBackgroundTasks(_ id: UUID) async {
+        guard isStorageReady else { return }
         guard !nativeBackgroundStopping.contains(id), !nativeRecovering.contains(id), !nativeDetaching.contains(id), liveTasks.contains(id),
               let task = state.tasks.first(where: { $0.id == id }),
               [.completed, .cancelled, .failed].contains(task.status),
@@ -181,6 +184,7 @@ extension AgentWorkbenchModel {
     }
 
     func detachNative(_ id: UUID) async {
+        guard isStorageReady else { return }
         guard !nativeDetaching.contains(id), !nativeRecovering.contains(id), !nativeInterruptPending.contains(id), !nativeBackgroundStopping.contains(id) else { return }
         nativeDetaching.insert(id); defer { nativeDetaching.remove(id) }
         var controlID: UUID?
@@ -211,6 +215,7 @@ extension AgentWorkbenchModel {
     }
 
     func respondNative(_ request: WorkbenchPermission, option: WorkbenchPermission.Option) async {
+        guard isStorageReady else { return }
         guard let current = permissions.first(where: { $0.id == request.id && $0.taskID == request.taskID }),
               let binding = current.nativeBinding, binding == request.nativeBinding,
               binding.expiresAt > Date(), current.options.contains(where: { $0.id == option.id }),
@@ -241,6 +246,7 @@ extension AgentWorkbenchModel {
     }
 
     func recoverNative(taskID id: UUID) async {
+        guard isStorageReady else { return }
         guard !nativeRecovering.contains(id), !nativeDetaching.contains(id), let task = state.tasks.first(where: { $0.id == id }),
               let thread = task.nativeState?.threadID,
               let instance = state.instances.first(where: { $0.id == task.instanceID }) else { return }
@@ -301,6 +307,7 @@ extension AgentWorkbenchModel {
     }
 
     func receiveNative(_ event: [String: Any]) {
+        guard isStorageReady else { return }
         guard let instanceText = event["instanceId"] as? String, let instanceID = UUID(uuidString: instanceText),
               let data = event["data"] as? [String: Any], let method = data["method"] as? String,
               let params = data["params"] as? [String: Any] else { return }

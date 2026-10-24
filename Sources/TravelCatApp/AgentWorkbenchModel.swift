@@ -70,8 +70,15 @@ final class AgentWorkbenchModel: ObservableObject {
     @Published private(set) var probeVerification: RuntimeProbeVerification?
     @Published private(set) var probeNotice: String?
     @Published private(set) var retainedProbe: (id: UUID, containerName: String?)?
-    let store: WorkbenchStore
-    private let credentials: any TravelServiceCredentialStoring
+    var store: WorkbenchStore
+    let synchronousCredentials: (any TravelServiceCredentialStoring)?
+    let credentialStores: AgentWorkbenchCredentialStores?
+    @Published var storageStatus: AgentWorkbenchStorageStatus = .loading
+    @Published var savingInstance = false
+    var storageTask: Task<Void, Never>?
+    var storageGeneration = UUID()
+    var hasShutdown = false
+    var isStorageReady: Bool { !loadFailed && storageStatus == .ready && !hasShutdown }
     let client: any AgentRuntimeClient
     private var saveTask: Task<Void, Never>?
     var liveTasks: Set<UUID> = []
@@ -80,13 +87,14 @@ final class AgentWorkbenchModel: ObservableObject {
     var isStarting: Bool { startingSubmissionID != nil }
     var attentionCount: Int { permissions.count + modelApprovals.count + state.tasks.filter(\.unread).count }
 
-    init(root: URL, credentials: (any TravelServiceCredentialStoring)? = nil, client: (any AgentRuntimeClient)? = nil, auditStore: (any AgentAuditStoring)? = nil) {
+    init(root: URL, credentials: any TravelServiceCredentialStoring, client: (any AgentRuntimeClient)? = nil, auditStore: (any AgentAuditStoring)? = nil) {
         let contentStore: WorkbenchStore
         var contentError: Error?
-        do { contentStore = try WorkbenchStore.encrypted(root: root, credentials: credentials ?? KeychainTravelServiceCredentialStore(service: "com.nebulae.travelcat.agent-content")) }
+        do { contentStore = try WorkbenchStore.encrypted(root: root, credentials: credentials) }
         catch { contentStore = WorkbenchStore(root: root, keyData: Data()); contentError = error }
         store = contentStore
-        self.credentials = credentials ?? KeychainTravelServiceCredentialStore(service: "com.nebulae.travelcat.agent-models")
+        self.synchronousCredentials = credentials
+        self.credentialStores = nil
         self.client = client ?? AgentSidecarClient()
         do { if let contentError { throw contentError }; state = try store.load() }
         catch {
@@ -96,15 +104,34 @@ final class AgentWorkbenchModel: ObservableObject {
             Logger(subsystem: "com.nebulae.travelcat", category: "AgentStorage").error("Content storage open failed: \(reason, privacy: .public)")
         }
         do {
-            self.auditStore = try auditStore ?? AgentAuditStore.open(root: root.appendingPathComponent("audit-v1"), credentials: credentials ?? KeychainTravelServiceCredentialStore(service: "com.nebulae.travelcat.agent-audit"))
+            self.auditStore = try auditStore ?? AgentAuditStore.open(root: root.appendingPathComponent("audit-v1"), credentials: credentials)
         } catch {
             let reason = Self.storageFailureDescription(error)
             auditError = "审计存储无法打开，受控调用已阻止。\n" + reason
             Logger(subsystem: "com.nebulae.travelcat", category: "AgentStorage").error("Audit storage open failed: \(reason, privacy: .public)")
         }
+        if loadFailed || auditError != nil {
+            loadFailed = true
+            storageStatus = .blocked(self.error ?? auditError ?? "安全存储不可用，请重试。")
+        } else { storageStatus = .ready }
+        configureClient()
+        Task { [weak self] in self?.applyScheduledRetention() }
+    }
+
+    init(root: URL, credentialStores: AgentWorkbenchCredentialStores = .system(), client: (any AgentRuntimeClient)? = nil) {
+        store = WorkbenchStore(root: root, keyData: Data())
+        state = WorkbenchSnapshot()
+        synchronousCredentials = nil
+        self.credentialStores = credentialStores
+        self.client = client ?? AgentSidecarClient()
+        loadFailed = true
+        configureClient()
+    }
+
+    private func configureClient() {
         self.client.onEvent = { [weak self] event in self?.receive(event) }
         self.client.onExit = { [weak self] in
-            guard let self else { return }
+            guard let self, self.isStorageReady else { return }
             for index in self.state.tasks.indices where self.liveTasks.contains(self.state.tasks[index].id) {
                 if self.state.tasks[index].status.active { self.state.tasks[index].status = .unknown; self.state.tasks[index].unread = true }
             }
@@ -117,12 +144,12 @@ final class AgentWorkbenchModel: ObservableObject {
             self.probeVerification = nil
             self.persist(); self.applyScheduledRetention()
         }
-        Task { [weak self] in self?.applyScheduledRetention() }
+
     }
 
-    private static func storageFailureDescription(_ error: Error) -> String {
+    static func storageFailureDescription(_ error: Error) -> String {
         if case let TravelServiceCredentialError.keychain(status) = error {
-            return "系统钥匙串访问失败（\(status)）。请解锁钥匙串并允许 Travel Cat 访问后重新打开应用。"
+            return "系统钥匙串访问失败（\(status)）。请解锁钥匙串并允许 Travel Cat 访问，然后点击工作台中的“重试”。"
         }
         if error is WorkbenchFailure || error is TravelServiceCredentialError { return error.localizedDescription }
         if error is DecodingError { return "保存的 Agent 数据格式无法读取；原文件已保留。" }
@@ -143,20 +170,15 @@ final class AgentWorkbenchModel: ObservableObject {
     }
 
     func save(instance: WorkbenchInstance, newKey: String) throws {
-        guard !loadFailed else { throw WorkbenchFailure("原数据读取失败，禁止覆盖。") }
-        if let previous = state.instances.first(where: { $0.id == instance.id }), let native = previous.native {
-            guard instance.native?.executable == native.executable, instance.native?.workspace == native.workspace else {
-                throw WorkbenchFailure("已保存的原生实例须保留程序和目录，以便恢复原会话；请新建实例。")
-            }
-        }
-        try instance.validate(); if instance.native == nil { try instance.provider.validate() }
-        var next = state
-        if let index = next.instances.firstIndex(where: { $0.id == instance.id }) { next.instances[index] = instance }
-        else { next.instances.append(instance) }
+        guard let credentials = synchronousCredentials else { throw WorkbenchFailure("请使用异步保存，安全存储未确认。") }
+        guard isStorageReady else { throw WorkbenchFailure("原数据读取失败，禁止覆盖。") }
+        guard !savingInstance else { throw WorkbenchFailure("正在保存 Agent，请稍候。") }
+        let next = try snapshotSaving(instance)
         if instance.native == nil && !newKey.isEmpty { try credentials.save(newKey, id: instance.provider.credentialID) }
         try store.save(next); state = next
     }
     func remove(instanceID: UUID) {
+        guard isStorageReady, let credentials = synchronousCredentials else { error = "安全存储尚未就绪，删除已阻止。"; return }
         guard !state.tasks.contains(where: { $0.instanceID == instanceID && liveTasks.contains($0.id) }) else {
             error = "请先结束该实例的会话。"; return
         }
@@ -175,10 +197,12 @@ final class AgentWorkbenchModel: ObservableObject {
         } catch { self.error = "删除实例或清理凭据失败，请重试。" }
     }
     func setPythonPath(_ path: String) {
+        guard isStorageReady else { return }
         guard path.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: path) else { error = "请选择可执行的 Python 3.11+ 绝对路径。"; return }
         state.pythonPath = path; persist()
     }
     func discover(host: String, context: String = "") async {
+        guard isStorageReady else { return }
         guard !discovering else { return }
         discovering = true; defer { discovering = false }
         do {
@@ -189,6 +213,7 @@ final class AgentWorkbenchModel: ObservableObject {
         } catch { discovery = error.localizedDescription }
     }
     func scanLocal() async {
+        guard isStorageReady else { return }
         guard !scanningLocal else { return }
         scanningLocal = true; defer { scanningLocal = false }
         localInventory = nil; localScanError = nil; probeVerification = nil
@@ -202,6 +227,7 @@ final class AgentWorkbenchModel: ObservableObject {
     }
 
     func probe(image: LocalRuntimeInventory.Image, preset: ACPAdapterPreset) async {
+        guard isStorageReady else { return }
         guard !probingLocal, retainedProbe == nil else { return }
         guard let inventory = localInventory,
               inventory.images.contains(image),
@@ -261,6 +287,7 @@ final class AgentWorkbenchModel: ObservableObject {
     }
 
     func retryProbeCleanup() async {
+        guard isStorageReady else { return }
         guard let retainedProbe, !probingLocal else { return }
         do {
             try managementRecord("runtime.probe.cleanup", fields: [
@@ -294,6 +321,7 @@ final class AgentWorkbenchModel: ObservableObject {
     }
 
     func start(instanceID: UUID, text: String, files: [[String: String]] = [], parentTaskID: UUID? = nil, modelPolicy: String = "review", onStarted: (@MainActor () -> Void)? = nil) async {
+        guard isStorageReady else { return }
         guard !isStarting else { return }
         guard auditStore != nil, auditError == nil else { error = "审计存储不可用，禁止启动任务。"; return }
         guard ["review", "task"].contains(modelPolicy) else { error = "模型授权策略无效。"; return }
@@ -313,8 +341,13 @@ final class AgentWorkbenchModel: ObservableObject {
                 return
             }
             try instance.validate(); try instance.provider.validate()
-            guard let key = try credentials.read(id: instance.provider.credentialID), !key.isEmpty else {
+            guard let key = try await readModelCredential(id: instance.provider.credentialID), !key.isEmpty else {
                 throw WorkbenchFailure("该实例尚未配置模型凭据，请编辑实例。")
+            }
+            try Task.checkCancellation()
+            try requireStorageReady()
+            guard state.instances.first(where: { $0.id == instanceID }) == instance else {
+                throw WorkbenchFailure("Agent 配置已变更或已删除，请确认当前配置后重试；草稿已保留。")
             }
             try client.launch(python: state.pythonPath)
             var task = WorkbenchTask(instanceID: instanceID, title: String(text.prefix(64)))
@@ -360,16 +393,18 @@ final class AgentWorkbenchModel: ObservableObject {
         persist()
     }
     func canReply(_ id: UUID) -> Bool {
-        !nativeBackgroundStopping.contains(id) && !nativeRecovering.contains(id) && !nativeDetaching.contains(id) && liveTasks.contains(id) && state.tasks.first(where: { $0.id == id }).map {
+        isStorageReady && !nativeBackgroundStopping.contains(id) && !nativeRecovering.contains(id) && !nativeDetaching.contains(id) && liveTasks.contains(id) && state.tasks.first(where: { $0.id == id }).map {
             ($0.nativeState == nil || $0.nativeState?.connection == .connected) &&
             ($0.status == .completed || $0.status == .cancelled || ($0.nativeState != nil && $0.status == .failed)) && !($0.sessionID ?? "").isEmpty
         } == true
     }
     func isLive(_ id: UUID) -> Bool { liveTasks.contains(id) }
     func markRead(_ id: UUID?) {
+        guard isStorageReady else { return }
         guard let id, state.tasks.contains(where: { $0.id == id && $0.unread }) else { return }; mutate(id) { $0.unread = false }
     }
     func respond(_ request: WorkbenchPermission, option: WorkbenchPermission.Option) async {
+        guard isStorageReady else { return }
         if request.nativeBinding != nil { await respondNative(request, option: option); return }
         guard permissions.contains(where: { $0.id == request.id && $0.taskID == request.taskID }) else { return }
         permissions.removeAll { $0.id == request.id && $0.taskID == request.taskID }
@@ -379,12 +414,14 @@ final class AgentWorkbenchModel: ObservableObject {
         } catch { fail(request.taskID, error) }
     }
     func cancel(_ id: UUID) async {
+        guard isStorageReady else { return }
         if state.tasks.first(where: { $0.id == id })?.nativeState != nil { await cancelNative(id); return }
         mutate(id) { $0.status = .cancelling }
         do { _ = try await client.request("cancel", ["taskId": id.uuidString]) }
         catch { fail(id, error) }
     }
     func stop(_ id: UUID) async {
+        guard isStorageReady else { return }
         if state.tasks.first(where: { $0.id == id })?.nativeState != nil { await detachNative(id); return }
         do {
             let result = try await client.request("stop", ["taskId": id.uuidString])
@@ -404,12 +441,16 @@ final class AgentWorkbenchModel: ObservableObject {
     func export(_ id: UUID, path: String) async throws -> Data {
         try await readArtifactBytes(taskID: id, path: path, expectedSize: nil)
     }
-    func shutdown() { saveTask?.cancel(); persist(); client.shutdown() }
+    func shutdown() {
+        saveTask?.cancel(); persist()
+        hasShutdown = true; storageGeneration = UUID(); storageTask?.cancel()
+        client.shutdown()
+    }
 
-    var canManageRetention: Bool { !loadFailed && liveTasks.isEmpty && !isStarting }
+    var canManageRetention: Bool { isStorageReady && liveTasks.isEmpty && !isStarting }
     private static let managementTaskID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     func managementRecord(_ kind: String, fields: [String: Any]) throws {
-        guard let auditStore, !loadFailed else { throw WorkbenchFailure("安全存储不可用。") }
+        guard let auditStore, isStorageReady else { throw WorkbenchFailure("安全存储不可用。") }
         var record = fields
         record["eventId"] = UUID().uuidString; record["taskId"] = Self.managementTaskID.uuidString
         record["kind"] = kind; record["timestamp"] = ISO8601DateFormatter().string(from: Date())
@@ -436,7 +477,7 @@ final class AgentWorkbenchModel: ObservableObject {
         let removed = try auditStore.prune(before: cutoff, expectedHead: expectedHead)
         auditRevision += 1; storageNotice = "已清理 \(removed) 条到期日志；保留检查点已保存。" + (auditError == nil ? "" : "请重启应用以重新建立受控调用服务。")
     }
-    private func applyScheduledRetention() {
+    func applyScheduledRetention() {
         guard canManageRetention, let days = state.auditRetentionDays, [7, 30, 90].contains(days) else { return }
         do {
             let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
@@ -445,7 +486,7 @@ final class AgentWorkbenchModel: ObservableObject {
         } catch { storageNotice = "到期清理未完成：" + error.localizedDescription }
     }
     func exportAudit(taskID: UUID?, includeContents: Bool, to destination: URL) throws {
-        guard let auditStore, !loadFailed else { throw WorkbenchFailure("安全审计不可用，禁止导出。") }
+        guard let auditStore, isStorageReady else { throw WorkbenchFailure("安全审计不可用，禁止导出。") }
         let internalRoot = store.root.resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
         let output = destination.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(destination.lastPathComponent).path.lowercased()
         guard destination.isFileURL, output != internalRoot, !output.hasPrefix(internalRoot + "/") else {
@@ -473,6 +514,7 @@ final class AgentWorkbenchModel: ObservableObject {
     }
 
     func respondModel(_ request: WorkbenchModelApproval, allow: Bool) async {
+        guard isStorageReady else { return }
         guard modelApprovals.contains(where: { $0.id == request.id && $0.requestHash == request.requestHash }),
               liveTasks.contains(request.taskID), !decidingCalls.contains(request.id), auditError == nil else { return }
         decidingCalls.insert(request.id)
@@ -510,6 +552,7 @@ final class AgentWorkbenchModel: ObservableObject {
     }
 
     private func receive(_ event: [String: Any]) {
+        guard isStorageReady else { return }
         if event["event"] as? String == "native" { receiveNative(event); return }
         if event["event"] as? String == "audit" { receiveAudit(event); return }
         guard let value = event["taskId"] as? String, let id = UUID(uuidString: value), liveTasks.contains(id),
@@ -563,6 +606,7 @@ final class AgentWorkbenchModel: ObservableObject {
         }
     }
     func mutate(_ id: UUID, _ change: (inout WorkbenchTask) -> Void) {
+        guard isStorageReady else { return }
         guard let index = state.tasks.firstIndex(where: { $0.id == id }) else { return }
         change(&state.tasks[index])
         // Session output is bounded by the runtime; preserve the full accepted event history.
@@ -578,7 +622,7 @@ final class AgentWorkbenchModel: ObservableObject {
         permissions.removeAll { $0.taskID == id }; modelApprovals.removeAll { $0.taskID == id }; persist()
     }
     func persist() {
-        guard !loadFailed else { return }
+        guard isStorageReady else { return }
         do { try store.save(state) } catch { self.error = "Agent 记录保存失败，请检查存储目录。" }
     }
 }

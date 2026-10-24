@@ -203,9 +203,14 @@ struct NativeAgentSetupView: View {
     }
     private func save() {
         guard ready else { return }
-        do {
-            try model.save(instance: instance, newKey: "")
-            didSave(instance.id); dismiss()
-        } catch { self.error = error.localizedDescription }
+        guard !working else { return }
+        working = true
+        Task {
+            defer { working = false }
+            do {
+                try await model.saveInstance(instance: instance, newKey: "")
+                didSave(instance.id); dismiss()
+            } catch { self.error = error.localizedDescription }
+        }
     }
 }

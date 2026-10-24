@@ -53,6 +53,7 @@ xcrun swiftc -target "$(uname -m)-apple-macos14.0" -swift-version 6 -parse-as-li
   "$project_root/Sources/TravelCatApp/AgentAuditStore.swift" \
   "$project_root/Sources/TravelCatApp/AgentCallInspector.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchModel.swift" \
+  "$project_root/Sources/TravelCatApp/AgentWorkbenchModel+Storage.swift" \
   "$project_root/Sources/TravelCatApp/AgentRuntimeDiscovery.swift" \
   "$project_root/Sources/TravelCatApp/AgentQuickCreateView.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchPresentation.swift" \
