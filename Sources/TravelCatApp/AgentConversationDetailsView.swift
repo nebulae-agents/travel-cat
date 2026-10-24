@@ -36,6 +36,18 @@ struct AgentConversationDetailsView: View {
         VStack(alignment: .leading, spacing: 13) {
             let items = WorkbenchConversationPresentation.processItems(task)
             let messages = WorkbenchConversationPresentation.processMessages(task)
+            if task.nativeState != nil {
+                HStack {
+                    Text("执行状态以官方记录为准").font(.caption).foregroundStyle(WorkbenchTheme.muted)
+                    Spacer()
+                    Button(model.nativeReconciliationRequests[task.id] == nil ? "核对执行记录" : "正在核对…") {
+                        Task { await model.reconcileNativeHistory(task.id) }
+                    }.disabled(model.nativeBackgroundBinding(task.id) == nil || model.nativeReconciliationRequests[task.id] != nil)
+                }
+                if let notice = model.nativeReconciliationNotices[task.id] {
+                    Text(notice).font(.caption).foregroundStyle(WorkbenchTheme.muted)
+                }
+            }
             if items.isEmpty && messages.isEmpty { Text("暂时没有工具过程记录。").font(.callout).foregroundStyle(WorkbenchTheme.muted) }
             ForEach(items) { item in
                 DisclosureGroup {
@@ -45,7 +57,7 @@ struct AgentConversationDetailsView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(item.title.isEmpty ? item.kind : item.title).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                        Text(statusTitle(item.status)).font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted)
+                        Text(model.nativeProcessStatusTitle(task.id, item: item)).font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted)
                     }
                 }
                 Divider()
@@ -88,8 +100,5 @@ struct AgentConversationDetailsView: View {
                     .font(.caption).foregroundStyle(WorkbenchTheme.muted)
             }
         }.font(.system(size: 12))
-    }
-    private func statusTitle(_ value: String) -> String {
-        switch value { case "completed": "已完成"; case "inProgress", "in_progress", "running": "执行中"; case "failed", "error": "失败"; case "declined": "已拒绝"; case "interrupted", "cancelled": "已取消"; default: value.isEmpty ? "已记录" : value }
     }
 }

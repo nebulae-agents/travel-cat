@@ -47,6 +47,33 @@ struct NativeTimelineItem: Codable, Equatable, Sendable, Identifiable {
     var title: String
     var detail: String
     var status: String
+    /// Nil in legacy snapshots, whose old default "completed" was not evidence.
+    var completionObserved: Bool? = nil
+    var reconciledStatus: String? = nil
+    var liveCompletionObserved: Bool? = nil
+    var evidenceStatus: String { reconciledStatus ?? status }
+
+    // Official App Server schema: each typed process has its own closed status enum.
+    static func terminalStatuses(for kind: String) -> Set<String> {
+        switch kind {
+        case "commandExecution", "fileChange": ["completed", "failed", "declined"]
+        case "mcpToolCall", "dynamicToolCall": ["completed", "failed"]
+        case "collabAgentToolCall": ["completed", "failed", "interrupted"]
+        default: []
+        }
+    }
+    static let statuslessKinds: Set<String> = ["userMessage", "hookPrompt", "agentMessage", "functionCallOutput", "plan", "reasoning", "subAgentActivity", "webSearch", "imageView", "sleep", "enteredReviewMode", "exitedReviewMode", "contextCompaction"]
+    var hasTerminalEvidence: Bool {
+        completionObserved == true && (Self.terminalStatuses(for: kind).contains(evidenceStatus) || Self.statuslessKinds.contains(kind) && evidenceStatus == "unknown")
+    }
+
+    func accepts(_ incoming: NativeTimelineItem) -> Bool {
+        guard id == incoming.id, turnID == incoming.turnID, kind == incoming.kind else { return false }
+        guard hasTerminalEvidence else { return true }
+        // A status-only query cannot freeze partial output before the actual final event arrives.
+        return liveCompletionObserved != true && incoming.liveCompletionObserved == true &&
+            incoming.hasTerminalEvidence && incoming.evidenceStatus == evidenceStatus
+    }
 }
 struct NativeTaskState: Codable, Equatable, Sendable {
     var executionID = UUID()
@@ -57,10 +84,22 @@ struct NativeTaskState: Codable, Equatable, Sendable {
     var items: [NativeTimelineItem] = []
     var lastReconciledAt: Date?
     var historyNotice: String?
+    var turnStatuses: [String: String]? = nil
+
+    static let terminalTurnStatuses: Set<String> = ["completed", "failed", "interrupted"]
+
+    mutating func recordTurnStatus(_ turn: String, status: String?) {
+        guard let status, Self.terminalTurnStatuses.union(["inProgress"]).contains(status),
+              !Self.terminalTurnStatuses.contains(turnStatuses?[turn] ?? "") else { return }
+        if turnStatuses == nil { turnStatuses = [:] }
+        turnStatuses?[turn] = status
+    }
 
     mutating func upsert(_ item: NativeTimelineItem) {
-        if let index = items.firstIndex(where: { $0.id == item.id }) { items[index] = item }
-        else { items.append(item) }
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            guard items[index].accepts(item) else { return }
+            items[index] = item
+        } else { items.append(item) }
     }
 }
 struct NativeApprovalBinding: Equatable, Sendable {

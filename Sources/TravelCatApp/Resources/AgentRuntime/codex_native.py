@@ -29,6 +29,7 @@ MAX_BACKGROUND_PAGES = 10
 MAX_BACKGROUND_BYTES = 1024 * 1024
 # Swift waits 15 seconds; this covers the entire native read, never each page separately.
 BACKGROUND_STATUS_SECONDS = 5
+TERMINAL_TURN_STATUSES = frozenset(('completed', 'failed', 'interrupted'))
 
 
 def _text(value, name, limit=512):
@@ -89,10 +90,10 @@ class CodexNativeController:
                     'native_prompt': self._prompt, 'native_resume': self._resume,
                     'native_permission': self._permission, 'native_cancel': self._cancel,
                     'native_detach': self._detach, 'native_background_stop': self._background_stop,
-                    'native_background_status': self._background_status,
+                    'native_background_status': self._background_status, 'native_reconcile': self._reconcile,
                     'native_artifacts': self._artifacts, 'native_export': self._export}
         if method not in handlers: raise NativeFailure('unsupported native method')
-        if method == 'native_background_status': return self._bounded_background_status(params)
+        if method in ('native_background_status', 'native_reconcile'): return self._bounded_native_read(params, handlers[method])
         with self.operations:
             if self.closed.is_set(): raise NativeFailure('native controller closed')
             return handlers[method](params)
@@ -218,7 +219,7 @@ class CodexNativeController:
         if task_id in self.tasks: raise NativeFailure('task already bound; detach before resuming')
         if thread_id and any(t.get('threadId') == thread_id and t['instanceId'] == instance['config']['instanceId'] for t in self.tasks.values()):
             raise NativeFailure('thread already bound to another task')
-        task = {'taskId': task_id, 'instanceId': instance['config']['instanceId'], 'threadId': thread_id, 'turnId': None, 'verified': False, 'generation': instance['generation'], 'messages': set(), 'uncertain': False, 'buffer': [], 'bufferBytes': 0, 'status': {'type': 'unknown'}, 'cancelWaiter': None, 'interruptRequestedTurn': None}
+        task = {'taskId': task_id, 'instanceId': instance['config']['instanceId'], 'threadId': thread_id, 'turnId': None, 'verified': False, 'generation': instance['generation'], 'messages': set(), 'uncertain': False, 'buffer': [], 'bufferBytes': 0, 'status': {'type': 'unknown'}, 'cancelWaiter': None, 'interruptRequestedTurn': None, 'terminalTurns': {}}
         self.tasks[task_id] = task
         return task
 
@@ -259,18 +260,28 @@ class CodexNativeController:
         if task['uncertain']: task.update(turnId=turn_id, uncertain=False)
         return {'turnId': turn_id}
 
-    def _pages(self, instance, method, params, limit=MAX_HISTORY):
+    def _pages(self, instance, method, params, limit=None, *, validate_scope=None, deadline=None, byte_budget=None):
+        if limit is None: limit = MAX_HISTORY
         values, seen, size, cursor = [], set(), 0, None
         for _ in range(MAX_PAGES):
-            response = instance['transport'].request(method, {**params, 'limit': 100, 'cursor': cursor})
+            if validate_scope: validate_scope()
+            options = {'deadline': deadline} if deadline is not None else {}
+            response = instance['transport'].request(method, {**params, 'limit': 100, 'cursor': cursor}, **options)
+            if validate_scope: validate_scope()
+            if not isinstance(response, dict) or 'nextCursor' not in response: raise NativeFailure('invalid native history page')
             data = response.get('data')
-            if not isinstance(data, list): raise NativeFailure('invalid native history page')
-            size += len(json.dumps(data).encode())
+            if not isinstance(data, list) or any(not isinstance(value, dict) or 'threadId' in params and value.get('threadId', params['threadId']) != params['threadId'] for value in data): raise NativeFailure('invalid native history page')
+            page_size = len(json.dumps(response).encode())
+            size += page_size
+            if byte_budget is not None:
+                byte_budget[0] -= page_size
+                if byte_budget[0] < 0: raise NativeFailure('native history exceeds shared byte limit')
             values.extend(data)
             if len(values) > limit or size > MAX_HISTORY_BYTES: raise NativeFailure('native history exceeds recovery limit')
             cursor = response.get('nextCursor')
             if cursor is None: return values
-            if not isinstance(cursor, str) or cursor in seen: raise NativeFailure('native history pagination did not progress')
+            _text(cursor, 'history cursor', 4096)
+            if cursor in seen: raise NativeFailure('native history pagination did not progress')
             seen.add(cursor)
         raise NativeFailure('native history exceeds page limit')
 
@@ -295,6 +306,7 @@ class CodexNativeController:
             active = [t['id'] for t in turns if t.get('status') == 'inProgress']
             if len(active) > 1: raise NativeFailure('ambiguous active turn in native history')
             with self.lock:
+                self._remember_terminal_turns(task, turns)
                 task.update(verified=True, turnId=active[0] if active else None, status=result['thread'].get('status', {'type': 'unknown'}), historyTurns=turns)
                 buffered = task['buffer']; task['buffer'] = []
                 for frame in buffered: self._frame(task['instanceId'], task['generation'], frame)
@@ -360,7 +372,7 @@ class CodexNativeController:
             yield
         finally: self.lock.release()
 
-    def _bounded_background_status(self, params):
+    def _bounded_native_read(self, params, handler):
         deadline = time.monotonic() + BACKGROUND_STATUS_SECONDS
         # Polls never queue behind controls or one another. A stop can wait only for one bounded read.
         if not self.background_status_slot.acquire(False): raise NativeFailure('native background status already pending')
@@ -369,7 +381,7 @@ class CodexNativeController:
             try:
                 self._check_background_deadline(deadline)
                 if self.closed.is_set(): raise NativeFailure('native controller closed')
-                return self._background_status(params, deadline=deadline)
+                return handler(params, deadline=deadline)
             finally: self.operations.release()
         finally: self.background_status_slot.release()
 
@@ -395,6 +407,45 @@ class CodexNativeController:
             item_ids = [process['itemId'] for process in processes]
             if len(set(item_ids)) != len(item_ids): raise NativeFailure('duplicate native background item identity')
             return {'threadId': identity[3], 'count': len(processes), 'itemIds': item_ids}
+
+    def _remember_terminal_turns(self, task, turns):
+        # Scope has already been validated by the caller; this is evidence, not control state.
+        for turn in turns:
+            status = turn.get('status')
+            if not isinstance(status, str) or status not in TERMINAL_TURN_STATUSES: continue
+            try: turn_id = _text(turn.get('id'), 'terminal turn id')
+            except NativeFailure: continue
+            task['terminalTurns'].setdefault(turn_id, status)
+        while len(task['terminalTurns']) > MAX_HISTORY:
+            task['terminalTurns'].pop(next(iter(task['terminalTurns'])))
+
+    def _reconcile(self, params, *, deadline):
+        # Official history reads never resume a thread or acquire caller-supplied authority.
+        if set(params) != {'taskId'}: raise NativeFailure('reconciliation accepts only taskId')
+        _text(params.get('taskId'), 'task id')
+        with self._background_status_lock(deadline):
+            task = self._task(params)
+            instance = self._background_scope(task)
+            identity = (task['taskId'], task['instanceId'], task['generation'], task['threadId'], task['turnId'])
+
+        def validate_scope():
+            self._check_background_deadline(deadline)
+            with self._background_status_lock(deadline):
+                current = self._background_scope(task)
+                if current is not instance or identity != (task['taskId'], task['instanceId'], task['generation'], task['threadId'], task['turnId']):
+                    raise NativeFailure('native reconciliation binding changed')
+
+        values = {}
+        byte_budget = [MAX_HISTORY_BYTES]
+        for name in ('turns', 'items'):
+            values[name] = self._pages(instance, 'thread/' + name + '/list',
+                {'threadId': identity[3], 'sortDirection': 'asc'}, validate_scope=validate_scope, deadline=deadline, byte_budget=byte_budget)
+        if sum(len(json.dumps(value).encode()) for value in values.values()) > MAX_HISTORY_BYTES:
+            raise NativeFailure('native reconciliation exceeds history limit')
+        with self._background_status_lock(deadline):
+            validate_scope()
+            self._remember_terminal_turns(task, values['turns'])
+            return {'threadId': identity[3], **values}
 
     def _stop_background(self, task):
         instance = self._background_scope(task)
@@ -456,7 +507,7 @@ class CodexNativeController:
         with self.lock:
             task = self._task(params)
             pending = self.approvals.get(params.get('requestId'))
-            if not pending or pending['taskId'] != task['taskId'] or pending['hash'] != params.get('requestHash') or pending['generation'] != task['generation'] or pending['threadId'] != task['threadId'] or pending['turnId'] != task['turnId'] or pending['expiresAt'] <= time.time():
+            if not pending or pending['taskId'] != task['taskId'] or pending['hash'] != params.get('requestHash') or pending['generation'] != task['generation'] or pending['threadId'] != task['threadId'] or pending['turnId'] != task['turnId'] or task['terminalTurns'].get(pending['turnId']) in TERMINAL_TURN_STATUSES or pending['expiresAt'] <= time.time():
                 raise NativeFailure('approval is stale or does not match this task')
             decision = params.get('optionId')
             if decision not in pending['options']: raise NativeFailure('unsupported approval decision')
@@ -487,7 +538,7 @@ class CodexNativeController:
             return
         cwd = p.get('cwd')
         safe_cwd = cwd is None or (isinstance(cwd, str) and Path(cwd).is_absolute() and _inside(Path(cwd).resolve(), Path(instance['config']['workspace'])))
-        if not task or not task['verified'] or task['turnId'] != p.get('turnId') or not p.get('itemId') or p.get('additionalPermissions') or p.get('networkApprovalContext') or p.get('grantRoot') or p.get('environmentId') not in (None, 'local') or not safe_cwd or len(self.approvals) >= 100:
+        if not task or not task['verified'] or task['turnId'] != p.get('turnId') or task['terminalTurns'].get(p.get('turnId')) in TERMINAL_TURN_STATUSES or not p.get('itemId') or p.get('additionalPermissions') or p.get('networkApprovalContext') or p.get('grantRoot') or p.get('environmentId') not in (None, 'local') or not safe_cwd or len(self.approvals) >= 100:
             transport.respond(frame['id'], {'decision': 'cancel'})
             return
         available = p.get('availableDecisions')
@@ -554,8 +605,15 @@ class CodexNativeController:
                 return
             if method in ('turn/started', 'turn/completed'):
                 turn = params.get('turn', {})
+                terminal = task['terminalTurns']
+                valid_terminal = isinstance(turn.get('status'), str) and turn['status'] in TERMINAL_TURN_STATUSES
+                if (method == 'turn/started' and turn.get('id') in terminal) or (method == 'turn/completed' and not valid_terminal):
+                    # Keep the raw notification visible without reviving control state.
+                    self._emit(instance_id, method, params, task['taskId'])
+                    return
+                if method == 'turn/completed': self._remember_terminal_turns(task, [turn])
                 for saved in task.get('historyTurns', []):
-                    if saved.get('id') == turn.get('id'): saved.update(turn)
+                    if saved.get('id') == turn.get('id') and saved.get('status') not in TERMINAL_TURN_STATUSES: saved.update(turn)
             if method == 'turn/started':
                 if task['turnId'] and task['turnId'] != params.get('turn', {}).get('id'): self._invalidate(task['taskId'], 'turn_changed')
                 task.update(turnId=params.get('turn', {}).get('id'), uncertain=False, status={'type': 'active'})

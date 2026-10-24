@@ -94,6 +94,41 @@ class NativeControllerTests(unittest.TestCase):
         self.assertEqual(method, 'thread/start'); self.assertEqual(p['permissions'], 'travelcat-native')
         self.assertEqual(p['approvalPolicy'], 'untrusted'); self.assertEqual(p['approvalsReviewer'], 'user')
         self.assertFalse(any(m == 'turn/start' for m, _ in self.transport.calls))
+    def test_completed_turn_does_not_revive_from_late_started_or_accept_old_approval(self):
+        self.prompt()
+        self.transport.event('turn/completed',{'threadId':'thread-1','turn':{'id':'turn-1','status':'completed'}})
+        self.transport.event('turn/started',{'threadId':'thread-1','turn':{'id':'turn-1','status':'inProgress'}})
+        task=self.controller.tasks['task-1']
+        self.assertIsNone(task['turnId'],'an observed terminal turn cannot become active again')
+        self.assertEqual(task['status'],{'type':'idle'})
+        self.transport.approval()
+        self.assertEqual(self.transport.answers[-1]['result'],{'decision':'cancel'})
+        self.assertEqual(self.events[-1]['data']['method'],'turn/started','raw stale notifications remain observable')
+        self.transport.event('turn/started',{'threadId':'thread-1','turn':{'id':'new-turn','status':'inProgress'}})
+        self.assertEqual(task['turnId'],'new-turn')
+        self.transport.approval()
+        self.assertEqual(self.transport.answers[-1]['result'],{'decision':'cancel'})
+
+    def test_confirmed_terminal_guard_is_bounded_and_uses_official_resume_evidence(self):
+        self.start()
+        self.transport.results['thread/turns/list']={'data':[{'id':'old-turn','status':'completed'}],'nextCursor':None}
+        self.controller.handle('native_resume',{'instanceId':self.instance,'taskId':'task-1','threadId':'thread-1'})
+        task=self.controller.tasks['task-1']
+        self.transport.event('turn/started',{'threadId':'thread-1','turn':{'id':'old-turn','status':'inProgress'}})
+        self.assertIsNone(task['turnId'])
+        with patch.object(native,'MAX_HISTORY',2):
+            for n in range(4): self.transport.event('turn/completed',{'threadId':'thread-1','turn':{'id':'turn-'+str(n),'status':'completed'}})
+        self.assertLessEqual(len(task['terminalTurns']),2)
+        self.transport.event('turn/started',{'threadId':'thread-1','turn':{'id':'turn-3','status':'inProgress'}})
+        self.assertIsNone(task['turnId'])
+
+    def test_invalid_turn_completion_never_creates_terminal_control_evidence(self):
+        self.prompt()
+        self.transport.event('turn/completed',{'threadId':'thread-1','turn':{'id':'turn-1','status':'bogus'}})
+        self.assertEqual(self.controller.tasks['task-1']['turnId'],'turn-1')
+        self.transport.event('turn/started',{'threadId':'thread-1','turn':{'id':'turn-1','status':'inProgress'}})
+        self.assertEqual(self.controller.tasks['task-1']['turnId'],'turn-1')
+
     def test_wrong_active_profile_blocks_prompt(self):
         self.transport.results['thread/start'] = {'thread': {'id': 'thread-1'}, 'activePermissionProfile': {'id': ':danger-full-access'}}
         with self.assertRaises(native.NativeFailure): self.start()
@@ -112,6 +147,38 @@ class NativeControllerTests(unittest.TestCase):
         self.assertLess(calls.index('turn/interrupt'), calls.index('thread/backgroundTerminals/list'))
         self.assertEqual(calls[-2:], ['thread/backgroundTerminals/list', 'thread/backgroundTerminals/list'])
         self.assertTrue(any(e['data']['method'] == 'turn/completed' for e in self.events))
+
+    def test_reconciled_terminal_proof_rejects_late_approval_but_new_turn_is_approvable(self):
+        self.prompt()
+        self.transport.results['thread/turns/list']={'data':[{'id':'turn-1','status':'completed'}],'nextCursor':None}
+        self.reconcile()
+        self.assertEqual(self.controller.tasks['task-1']['turnId'],'turn-1','query preserves raw current-turn binding')
+        self.transport.approval()
+        self.assertFalse(self.controller.approvals,'a terminal-proven turn cannot offer new approval authority')
+        self.assertFalse(any(event['data']['method']=='permission' for event in self.events))
+        self.assertNotIn({'decision':'accept'},[answer['result'] for answer in self.transport.answers])
+        self.transport.event('turn/started',{'threadId':'thread-1','turn':{'id':'next-turn','status':'inProgress'}})
+        self.transport.approval(turnId='next-turn',itemId='new-item')
+        self.assertEqual(self.permission(),{'sent':True})
+        self.assertEqual(self.transport.answers[-1]['result'],{'decision':'accept'})
+
+    def test_reconciled_terminal_proof_blocks_saved_decisions_without_query_side_effects(self):
+        self.prompt(); self.transport.approval()
+        request=self.events[-1]['data']['params'].copy()
+        pending={key:dict(value) for key,value in self.controller.approvals.items()}
+        task=self.controller.tasks['task-1']
+        original_turn,original_status=task['turnId'],dict(task['status'])
+        self.transport.results['thread/turns/list']={'data':[{'id':'turn-1','status':'completed'}],'nextCursor':None}
+        self.reconcile()
+        self.assertEqual(self.controller.approvals,pending,'query leaves original approvals untouched')
+        self.assertEqual(self.transport.answers,[],'query never responds to a server approval')
+        self.assertEqual(task['turnId'],original_turn)
+        self.assertEqual(task['status'],original_status)
+        for decision in ('accept','decline','cancel'):
+            with self.subTest(decision=decision),self.assertRaises(native.NativeFailure):
+                self.controller.handle('native_permission',{'taskId':'task-1','requestId':request['requestId'],'requestHash':request['requestHash'],'optionId':decision})
+        self.assertEqual(self.controller.approvals,pending,'rejected stale decisions do not erase the preserved record')
+        self.assertEqual(self.transport.answers,[],'no decision is sent after terminal proof')
 
     def test_approval_hash_task_scope_and_single_use(self):
         self.prompt(); self.transport.approval()
@@ -330,6 +397,176 @@ class NativeControllerTests(unittest.TestCase):
         with patch.object(native, 'MAX_BACKGROUND_PROCESSES', 0):
             with self.assertRaises(native.NativeFailure): self.controller.handle('native_background_status', {'taskId': 'task-1'})
         self.assertFalse(any(m == 'thread/backgroundTerminals/terminate' for m, _ in self.transport.calls))
+
+    def reconcile(self, params=None):
+        try:
+            return self.controller.handle('native_reconcile', params or {'taskId': 'task-1'})
+        except native.NativeFailure as error:
+            self.fail('scoped reconciliation must succeed: ' + str(error))
+
+    def test_reconcile_reads_official_history_without_resume_or_control_mutation(self):
+        self.start()
+        turns = [{'id':'turn-1','status':'completed'}]
+        items = [{'turnId':'turn-1','item':{'id':'command','type':'commandExecution','status':'completed'}}]
+        self.transport.results['thread/turns/list'] = {'data':turns,'nextCursor':None}
+        self.transport.results['thread/items/list'] = {'data':items,'nextCursor':None}
+        task = {key:value for key,value in self.controller.tasks['task-1'].items() if key!='terminalTurns'}
+        before = len(self.transport.calls)
+        deadline_before = len(self.transport.deadlines)
+        result = self.reconcile()
+        self.assertEqual(result,{'threadId':'thread-1','turns':turns,'items':items})
+        self.assertEqual({key:value for key,value in self.controller.tasks['task-1'].items() if key!='terminalTurns'},task)
+        self.assertEqual([m for m,_ in self.transport.calls[before:]],['thread/turns/list','thread/items/list'])
+        self.assertEqual(len(set(self.transport.deadlines[deadline_before:])),1)
+        self.assertIsNotNone(self.transport.deadlines[-1])
+
+    def test_reconcile_rejects_caller_authority_and_stale_binding_each_page(self):
+        self.start()
+        for params in ({'taskId':'task-1','threadId':'foreign'},{'taskId':'missing'},{'taskId':'task-1','instanceId':self.instance}):
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',params)
+        for phase in ('turns','items'):
+            def change(_):
+                self.controller.tasks['task-1'] = dict(self.controller.tasks['task-1'])
+                return {'data':[],'nextCursor':None}
+            method = 'thread/turns/list' if phase == 'turns' else 'thread/items/list'
+            self.transport.results[method] = change
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',{'taskId':'task-1'})
+            self.transport.results.pop(method)
+
+    def test_reconcile_shares_deadline_across_turns_and_items_and_all_pages(self):
+        self.start()
+        clock = [100.0]
+        def slow(_):
+            clock[0] += 3.0
+            return {'data':[],'nextCursor':None}
+        self.transport.results['thread/turns/list'] = slow
+        self.transport.results['thread/items/list'] = slow
+        before = len(self.transport.deadlines)
+        with patch.object(native.time,'monotonic',side_effect=lambda:clock[0]):
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',{'taskId':'task-1'})
+        self.assertEqual(self.transport.deadlines[before:],[105.0,105.0])
+        self.assertTrue(self.controller.instances[self.instance]['connected'])
+
+    def test_reconcile_never_queues_behind_controls_or_background_reads(self):
+        self.start()
+        for lock in (self.controller.operations,self.controller.background_status_slot):
+            lock.acquire()
+            errors=[]
+            def read():
+                try: self.controller.handle('native_reconcile',{'taskId':'task-1'})
+                except native.NativeFailure as error: errors.append(error)
+            worker=threading.Thread(target=read,daemon=True)
+            try:
+                worker.start(); worker.join(0.2)
+                self.assertFalse(worker.is_alive())
+            finally:
+                lock.release(); worker.join(1)
+            self.assertEqual(len(errors),1)
+        self.assertFalse(any(m in ('thread/turns/list','thread/items/list') for m,_ in self.transport.calls))
+
+    def test_reconcile_checks_scope_and_deadline_after_every_page(self):
+        self.start()
+        original=self.controller.tasks['task-1']
+        for mutation in ('task','generation','thread','turn','disconnect'):
+            instance=self.controller.instances[self.instance]
+            generation=instance['generation']
+            self.controller.tasks['task-1']=original
+            original.update(threadId='thread-1',turnId=None,generation=generation)
+            instance['connected']=True
+            pages=[]
+            def page(_):
+                pages.append(self.transport.deadlines[-1])
+                if len(pages)==2:
+                    if mutation=='task': self.controller.tasks['task-1']=dict(original)
+                    elif mutation=='generation': instance['generation']='other'
+                    elif mutation=='thread': original['threadId']='other'
+                    elif mutation=='turn': original['turnId']='new-turn'
+                    else: instance['connected']=False
+                return {'data':[],'nextCursor':'second' if len(pages)==1 else None}
+            self.transport.results['thread/turns/list']=page
+            with self.subTest(mutation=mutation),self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',{'taskId':'task-1'})
+            self.assertEqual(len(pages),2)
+            self.assertEqual(len(set(pages)),1)
+            instance.update(generation=generation,connected=True)
+        self.controller.tasks['task-1']=original
+
+    def test_reconcile_scope_lock_wait_uses_total_read_deadline(self):
+        self.start()
+        for phase in ('initial','after-page'):
+            entered,release=threading.Event(),threading.Event()
+            errors=[]
+            def page(_):
+                entered.set(); release.wait(0.5)
+                return {'data':[],'nextCursor':None}
+            self.transport.results['thread/turns/list']=page
+            def read():
+                try: self.controller.handle('native_reconcile',{'taskId':'task-1'})
+                except native.NativeFailure as error: errors.append(error)
+            worker=threading.Thread(target=read,daemon=True)
+            with self.subTest(phase=phase),patch.object(native,'BACKGROUND_STATUS_SECONDS',0.04):
+                if phase=='initial': self.controller.lock.acquire()
+                worker.start()
+                if phase=='after-page':
+                    self.assertTrue(entered.wait(0.3)); self.controller.lock.acquire()
+                try:
+                    release.set(); worker.join(0.2)
+                    self.assertFalse(worker.is_alive())
+                finally:
+                    self.controller.lock.release(); worker.join(1)
+                self.assertEqual(len(errors),1)
+
+    def test_reconcile_terminal_evidence_prevents_old_started_without_changing_controls(self):
+        self.start()
+        self.transport.results['thread/turns/list']={'data':[{'id':'old-turn','status':'completed'},{'id':'bad','status':'bogus'}],'nextCursor':None}
+        task=self.controller.tasks['task-1']
+        task['turnId']='current-turn'
+        original={key:value for key,value in task.items() if key!='terminalTurns'}
+        before=len(self.transport.calls)
+        self.reconcile()
+        self.assertEqual({key:value for key,value in task.items() if key!='terminalTurns'},original)
+        self.assertEqual([method for method,_ in self.transport.calls[before:]],['thread/turns/list','thread/items/list'])
+        self.transport.event('turn/started',{'threadId':'thread-1','turn':{'id':'old-turn','status':'inProgress'}})
+        self.assertEqual(task['turnId'],'current-turn','scoped official terminal proof must prevent resurrection')
+        self.assertNotIn('bad',task['terminalTurns'])
+        self.assertEqual(self.events[-1]['data']['method'],'turn/started')
+
+    def test_reconcile_never_caches_partial_or_stale_terminal_proof_and_cache_stays_bounded(self):
+        self.start()
+        task=self.controller.tasks['task-1']
+        self.transport.results['thread/turns/list']={'data':[{'id':'old','status':'completed'}],'nextCursor':None}
+        def failed(_): raise native.NativeFailure('fixture missing items page')
+        self.transport.results['thread/items/list']=failed
+        with self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',{'taskId':'task-1'})
+        self.assertEqual(task['terminalTurns'],{})
+        def stale(_):
+            task['turnId']='different-turn'
+            return {'data':[],'nextCursor':None}
+        self.transport.results['thread/items/list']=stale
+        with self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',{'taskId':'task-1'})
+        self.assertEqual(task['terminalTurns'],{})
+        self.transport.results['thread/items/list']={'data':[],'nextCursor':None}
+        with patch.object(native,'MAX_HISTORY',2):
+            for n in range(4):
+                self.transport.results['thread/turns/list']={'data':[{'id':'done-'+str(n),'status':'completed'}],'nextCursor':None}
+                self.reconcile()
+        self.assertEqual(set(task['terminalTurns']),{'done-2','done-3'})
+        self.assertEqual(task['turnId'],'different-turn')
+
+    def test_reconcile_accounts_for_full_page_bytes_and_cursor_size(self):
+        self.start()
+        self.transport.results['thread/turns/list']={'data':[],'nextCursor':'x'*5000}
+        before=len(self.transport.calls)
+        with self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',{'taskId':'task-1'})
+        self.assertEqual(len(self.transport.calls)-before,1,'reject oversized page metadata before another page')
+
+    def test_reconcile_validates_pages_identity_count_and_cursor_before_publish(self):
+        self.start()
+        for page in ({'data':[]},{'data':[{'threadId':'foreign','id':'turn'}],'nextCursor':None},{'data':['bad'],'nextCursor':None},{'data':[],'nextCursor':'same'}):
+            self.transport.results['thread/turns/list']=page
+            with self.subTest(page=page),self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',{'taskId':'task-1'})
+        self.transport.results['thread/turns/list']={'data':[{'id':'turn'}],'nextCursor':None}
+        with patch.object(native,'MAX_HISTORY',0):
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_reconcile',{'taskId':'task-1'})
 
     def test_background_status_all_pages_share_total_deadline_and_late_page_is_not_published(self):
         self.start()
@@ -652,6 +889,25 @@ class NativeTransportTests(unittest.TestCase):
         self.assertEqual(t.request('initialize', {})['codexHome'], self.config['profileRoot'])
         self.assertFalse(t.pending)
 
+    def test_official_history_read_deadlines_cover_writer_and_late_response_without_control_timeout(self):
+        t=self.connect()
+        for method in ('thread/turns/list','thread/items/list'):
+            with self.subTest(method=method):
+                t.writer.acquire()
+                started=time.monotonic()
+                try:
+                    with self.assertRaises(native.NativeFailure): t.request(method,{},deadline=started+0.03)
+                finally: t.writer.release()
+                self.assertLess(time.monotonic()-started,0.2)
+                started=time.monotonic()
+                with self.assertRaises(native.NativeFailure): t.request(method,{'fixture':'late'},deadline=started+0.03)
+                self.assertLess(time.monotonic()-started,0.2)
+                self.assertFalse(t.closed)
+                self.assertEqual(t.request('initialize',{})['codexHome'],self.config['profileRoot'])
+                self.assertFalse(t.pending)
+        for method in ('thread/resume','turn/start','turn/interrupt','thread/backgroundTerminals/terminate'):
+            with self.subTest(method=method),self.assertRaises(native.NativeFailure): t.request(method,{},deadline=time.monotonic()+0.1)
+
     def test_read_response_deadline_ignores_late_reply_and_keeps_next_request_bound(self):
         t = self.connect()
         started = time.monotonic()
@@ -815,8 +1071,8 @@ def client(c):
             if 'id' not in f or 'method' not in f: continue
             m = f['method']
             if m == 'never/respond': continue
-            if m == 'thread/backgroundTerminals/list' and f['params'].get('fixture') == 'never': continue
-            if m == 'thread/backgroundTerminals/list' and f['params'].get('fixture') == 'late':
+            if m in ('thread/backgroundTerminals/list','thread/turns/list','thread/items/list') and f['params'].get('fixture') == 'never': continue
+            if m in ('thread/backgroundTerminals/list','thread/turns/list','thread/items/list') and f['params'].get('fixture') == 'late':
                 import time; time.sleep(0.12)
                 send_frame(c,json.dumps({'id':f['id'],'result':{'stale':True}}).encode()); continue
             if m == 'close': send_frame(c,b'',opcode=8); continue

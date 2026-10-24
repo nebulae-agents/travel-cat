@@ -48,7 +48,7 @@ enum WorkbenchConversationPresentation {
         task.nativeState?.items.filter { !["agentMessage", "userMessage", "reasoning"].contains($0.kind) } ?? []
     }
     static func hasProcessFailure(_ task: WorkbenchTask) -> Bool {
-        processItems(task).contains { ["failed", "error"].contains($0.status) } || processMessages(task).contains { $0.text.hasSuffix(" · failed") || $0.text.hasSuffix(" · error") }
+        processItems(task).contains { $0.hasTerminalEvidence && $0.evidenceStatus == "failed" } || processMessages(task).contains { $0.text.hasSuffix(" · failed") || $0.text.hasSuffix(" · error") }
     }
     static func images(in inventory: LocalRuntimeInventory, context: String) -> [LocalRuntimeInventory.Image] {
         guard inventory.contexts.contains(where: { $0.name == context && $0.local && $0.available }) else { return [] }
