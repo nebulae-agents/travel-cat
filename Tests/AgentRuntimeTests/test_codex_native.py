@@ -58,6 +58,19 @@ class FakeTransport:
     def close(self): self.closed = True
 
 
+class SocketSendProbe:
+    """Delegate real socket I/O while observing bytes and controlled partial writes."""
+    def __init__(self, actual, *, first_byte_only=False, on_send=None):
+        self.actual, self.sent = actual, []
+        self.first_byte_only, self.on_send = first_byte_only, on_send
+    def __getattr__(self, name): return getattr(self.actual, name)
+    def send(self, data):
+        count = self.actual.send(data[:1] if self.first_byte_only else data)
+        self.sent.append(count)
+        if self.on_send: self.on_send(count)
+        return count
+
+
 class NativeControllerTests(unittest.TestCase):
     def setUp(self):
         self.assertTrue(hasattr(native, 'CodexNativeController'), 'native controller is not implemented')
@@ -908,6 +921,96 @@ class NativeTransportTests(unittest.TestCase):
         for method in ('thread/resume','turn/start','turn/interrupt','thread/backgroundTerminals/terminate'):
             with self.subTest(method=method),self.assertRaises(native.NativeFailure): t.request(method,{},deadline=time.monotonic()+0.1)
 
+    def test_scoped_read_expiry_before_first_byte_preserves_transport(self):
+        module = native._transport_module
+        t = self.connect()
+        probe = SocketSendProbe(t.socket); t.socket = probe
+        write, clock, entered = t._write_bytes, [100.0], []
+        deadline = 100.03
+        def expire_before_write(data, actual_deadline, **kwargs):
+            entered.append(actual_deadline)
+            clock[0] += 0.04  # Expire only after this exact writer boundary is entered.
+            return write(data, actual_deadline, **kwargs)
+        with patch.object(module.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(t, '_write_bytes', side_effect=expire_before_write), patch.object(t, '_send', wraps=t._send) as send:
+            with self.assertRaises(module.NativeFailure) as error:
+                t.request('thread/turns/list', {}, deadline=deadline)
+            self.assertIs(type(error.exception), module.NativeReadDeadline)
+            self.assertEqual(send.call_count, 1, 'Expired reads are not retried')
+        self.assertEqual(entered, [deadline], 'An earlier budget check cannot falsely satisfy this writer regression')
+        self.assertEqual(probe.sent, [], 'No frame byte reached the socket')
+        self.assertFalse(t.closed, 'A read expiring before its first byte leaves the connection usable')
+        self.assertFalse(t.pending)
+        self.assertEqual(t.request('initialize', {})['codexHome'], self.config['profileRoot'])
+
+    def test_response_queued_after_read_deadline_is_discarded_without_retry(self):
+        module = native._transport_module
+        t = self.connect()
+        delivered, target, observed, clock = threading.Event(), {}, {}, [100.0]
+        original_get, original_put, original_send = module.queue.Queue.get, module.queue.Queue.put_nowait, t._send
+        deadline = 100.03
+        def register_queue_before_send(value, *, deadline=None):
+            target['queue'] = t.pending[value['id']]  # Register before the real server can respond.
+            result = original_send(value, deadline=deadline)
+            self.assertTrue(delivered.wait(2), 'Exercise a response already queued before the caller enters get')
+            return result
+        def resume_after_late_frame(queue, *args, **kwargs):
+            if queue is target.get('queue'):
+                observed['getTimeout'] = kwargs.get('timeout')
+                self.assertTrue(delivered.wait(2), 'The actual owned response must be queued first')
+                clock[0] = deadline+0.1  # Advance only after actual put completed, even if it preceded get.
+                observed['resumedAt'] = clock[0]
+            return original_get(queue, *args, **kwargs)
+        def observe_delivery(queue, item):
+            value = original_put(queue, item)
+            if queue is target.get('queue'):
+                observed['staleFrame'] = item.get('result') == {'stale':True}
+                delivered.set()
+            return value
+        with patch.object(module.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(module.queue.Queue, 'get', resume_after_late_frame), patch.object(module.queue.Queue, 'put_nowait', observe_delivery), patch.object(t, '_send', side_effect=register_queue_before_send) as send:
+            with self.assertRaises(module.NativeReadDeadline):
+                t.request('thread/items/list', {'fixture':'late'}, deadline=deadline)
+            self.assertEqual(send.call_count, 1, 'A late response never causes a replay')
+        self.assertTrue(delivered.is_set())
+        self.assertTrue(observed['staleFrame'], 'The actual owned fake-server response was queued')
+        self.assertAlmostEqual(observed['getTimeout'], 0.03, places=6, msg='The caller reached the real get path before virtual expiry')
+        self.assertGreater(observed['resumedAt'], deadline)
+        self.assertFalse(t.closed)
+        self.assertFalse(t.pending)
+        # Real clock is restored before subsequent frames/default deadlines.
+        self.assertEqual(t.request('initialize', {})['codexHome'], self.config['profileRoot'])
+        self.assertFalse(t.pending, 'A late response cannot bind the next request')
+
+    def test_partial_read_and_control_expiry_still_disconnect(self):
+        module = native._transport_module
+        for partial_read in (True, False):
+            with self.subTest(partial_read=partial_read):
+                t = self.connect()
+                clock, entered = [100.0], []
+                def expire_after_actual_byte(count):
+                    self.assertEqual(count, 1)
+                    clock[0] += 0.04  # The byte must be sent before the read can expire.
+                probe = SocketSendProbe(t.socket, first_byte_only=partial_read,
+                                        on_send=expire_after_actual_byte if partial_read else None)
+                t.socket = probe
+                write = t._write_bytes
+                def expire_before_write(data, deadline, **kwargs):
+                    entered.append(deadline)
+                    clock[0] += 0.04
+                    return write(data, deadline, **kwargs)
+                with patch.object(module.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(module, 'REQUEST_SECONDS', 0.03), patch.object(t, '_send', wraps=t._send) as send:
+                    with self.assertRaises(module.NativeFailure) as error:
+                        if partial_read:
+                            t.request('thread/turns/list', {}, deadline=100.03)
+                        else:
+                            with patch.object(t, '_write_bytes', side_effect=expire_before_write):
+                                t.request('initialize', {})
+                    self.assertIs(type(error.exception), module.NativeFailure, 'Partial/control uncertainty must not become a safe read expiry')
+                    self.assertEqual(send.call_count, 1)
+                self.assertEqual(entered, [] if partial_read else [100.03])
+                self.assertEqual(sum(probe.sent), 1 if partial_read else 0)
+                self.assertTrue(t.closed)
+                self.assertFalse(t.pending)
+
     def test_read_response_deadline_ignores_late_reply_and_keeps_next_request_bound(self):
         t = self.connect()
         started = time.monotonic()
@@ -919,17 +1022,35 @@ class NativeTransportTests(unittest.TestCase):
         self.assertFalse(any(event.get('method') == 'connection/lost' for event in self.events))
 
     def test_read_send_and_response_share_same_deadline(self):
+        module = native._transport_module
         t = self.connect()
-        original = t._send
-        def delayed_send(value, *, deadline=None):
-            time.sleep(0.04)
-            return original(value,deadline=deadline)
-        started = time.monotonic()
-        with patch.object(t,'_send',side_effect=delayed_send):
-            with self.assertRaises(native.NativeFailure): t.request('thread/backgroundTerminals/list', {'fixture':'never'}, deadline=started+0.08)
-        self.assertLess(time.monotonic()-started,0.11,'response wait cannot restart the budget after sending')
+        probe = SocketSendProbe(t.socket); t.socket = probe
+        send, get = t._send, module.queue.Queue.get
+        clock, sent_deadlines, waits = [100.0], [], []
+        deadline = clock[0]+0.08
+        def consume_send_budget(value, *, deadline=None):
+            sent_deadlines.append(deadline)
+            clock[0] += 0.04  # Controlled send work; scheduler pauses cannot change this evidence.
+            return send(value, deadline=deadline)
+        def observe_real_wait(queue, *args, **kwargs):
+            waits.append(kwargs.get('timeout'))
+            return get(queue, *args, **kwargs)  # Preserve the actual queue expiry path.
+        with patch.object(module.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(t, '_send', side_effect=consume_send_budget), patch.object(module.queue.Queue, 'get', observe_real_wait):
+            with self.assertRaises(module.NativeReadDeadline):
+                t.request('thread/backgroundTerminals/list', {'fixture':'never'}, deadline=deadline)
+        self.assertEqual(sent_deadlines, [deadline], 'One request carries the original absolute deadline; no replay')
+        self.assertGreater(sum(probe.sent), 0, 'The real socket send path was exercised')
+        self.assertEqual(len(waits), 1)
+        self.assertAlmostEqual(waits[0], 0.04, places=6, msg='Response wait uses only the remaining budget, never a fresh 80ms')
         self.assertFalse(t.closed)
-        self.assertEqual(t.request('initialize', {})['codexHome'],self.config['profileRoot'])
+        self.assertFalse(t.pending)
+        # Restore the real clock before testing subsequent real frames/default deadlines.
+        self.assertEqual(t.request('initialize', {})['codexHome'], self.config['profileRoot'])
+        self.assertFalse(t.pending)
+        with patch.object(t, '_send', wraps=t._send) as invalid_send:
+            with self.assertRaises(module.NativeFailure):
+                t.request('turn/start', {}, deadline=time.monotonic()+0.08)
+            invalid_send.assert_not_called()
 
     def test_read_write_failure_does_not_wait_for_blocked_connection_lost_callback(self):
         t = self.connect()

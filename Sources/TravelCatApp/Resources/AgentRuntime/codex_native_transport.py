@@ -251,14 +251,17 @@ class NativeTransport:
         if headers.get(b'sec-websocket-accept') != accept or headers.get(b'upgrade', b'').lower() != b'websocket' or b'upgrade' not in [v.strip().lower() for v in headers.get(b'connection', b'').split(b',')] or b'sec-websocket-extensions' in headers:
             raise NativeFailure('invalid WebSocket upgrade response')
 
-    def _write_bytes(self, data, deadline):
+    def _write_bytes(self, data, deadline, *, scoped_read=False):
         # Select readiness is advisory: nonblocking I/O is essential under backpressure.
         self.socket.setblocking(False)
         offset = 0
         try:
             while offset < len(data):
                 remaining = deadline - time.monotonic()
-                if remaining <= 0 or not select.select([], [self.socket], [], remaining)[1]: raise NativeFailure('native socket write timed out')
+                if remaining <= 0 or not select.select([], [self.socket], [], remaining)[1]:
+                    if scoped_read and offset == 0:
+                        raise NativeReadDeadline('native background write deadline exceeded before first byte')
+                    raise NativeFailure('native socket write timed out')
                 try: sent = self.socket.send(data[offset:offset + 16384])
                 except (BlockingIOError, InterruptedError): continue
                 if not sent: raise NativeFailure('native socket closed during write')
@@ -281,7 +284,7 @@ class NativeTransport:
         try:
             if self.closed: raise NativeFailure('native socket disconnected')
             if read_deadline is not None: _remaining_read_time(deadline)
-            self._write_bytes(data, deadline)
+            self._write_bytes(data, deadline, scoped_read=read_deadline is not None)
         finally: self.writer.release()
 
     def _send(self, value, *, deadline=None):
@@ -309,6 +312,9 @@ class NativeTransport:
                 if deadline is not None: raise NativeReadDeadline('native background response deadline exceeded') from None
                 self._lost()
                 raise NativeFailure('native request timed out; outcome unknown, resume before retrying') from None
+            # Queue.get can return an item queued after its wait budget if the
+            # caller resumes late. The absolute observation deadline still wins.
+            if deadline is not None: _remaining_read_time(deadline)
             if isinstance(result, NativeFailure): raise result
             if 'error' in result: raise NativeFailure('native server rejected ' + method)
             if not isinstance(result.get('result'), dict): raise NativeFailure('invalid native server response')
