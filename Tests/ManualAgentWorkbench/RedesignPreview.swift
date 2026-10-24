@@ -17,6 +17,8 @@ extension Bundle { static var module: Bundle { .main } }
     var threads: [String:String] = [:]
     var instances: [String:String] = [:]
     var activeTurns: [String:String] = [:]
+    var backgroundCount = 1
+    var backgroundStatusFails = false
     let files: [String:Data] = ["分享提纲.md":Data("# 让 AI 进入日常工作\n\n1. 找到一个重复任务\n2. 先做一次可核对的小实验\n3. 让结果进入原有工作流程\n\n这是一份离线客户端验收制品。\n".utf8),"结果.txt":Data("离线制品预览与确认验收。\n".utf8)]
     func launch(python: String) throws {}
     func shutdown() { onExit?() }
@@ -47,7 +49,13 @@ extension Bundle { static var module: Bundle { .main } }
             let turn=activeTurns[id] ?? "fixture-turn"
             Task { try? await Task.sleep(for:.milliseconds(200)); self.complete(id,turn:turn,text:"",interrupted:true) }
             return ["requested":true,"backgroundStopped":true,"terminatedCount":0]
-        case "native_background_stop": return ["stopped":true,"terminatedCount":0]
+        case "native_background_status":
+            FileHandle.standardOutput.write(Data("fixture.backgroundStatus.read\n".utf8))
+            if backgroundStatusFails { throw WorkbenchFailure("离线夹具：后台命令状态暂时无法核对。") }
+            return ["threadId":threads[id] ?? "","count":backgroundCount,"itemIds":(0..<backgroundCount).map { "fixture-background-\($0)" }]
+        case "native_background_stop":
+            let stopped = backgroundCount; backgroundCount = 0
+            return ["stopped":true,"terminatedCount":stopped]
         case "native_detach": return ["detached":true]
         case "native_resume":
             threads[id]=params["threadId"] as? String;instances[id]=params["instanceId"] as? String
@@ -83,6 +91,16 @@ extension Bundle { static var module: Bundle { .main } }
         model.permissions.removeAll { $0.taskID == taskID };model.liveTasks.insert(taskID)
         model.mutate(taskID) { $0.status = .completed;$0.nativeState?.connection = .connected }
         model.selectedTaskID=taskID
+    }
+    @objc func backgroundRunning() {
+        completed(); runtime.backgroundCount = 1; runtime.backgroundStatusFails = false
+        model.invalidateNativeBackgroundStatus(taskID)
+        Task { await model.refreshNativeBackgroundStatus(taskID) }
+    }
+    @objc func backgroundUnknown() {
+        completed(); runtime.backgroundStatusFails = true
+        model.invalidateNativeBackgroundStatus(taskID)
+        Task { await model.refreshNativeBackgroundStatus(taskID) }
     }
     @objc func approval() {
         completed();let task=model.state.tasks.first { $0.id == taskID }!
@@ -125,7 +143,7 @@ extension Bundle { static var module: Bundle { .main } }
         let actions=RedesignActions(model:model,taskID:task.id,runtime:runtime,window:window)
         let menu=NSMenu();let appItem=NSMenuItem();let appMenu=NSMenu();appMenu.addItem(withTitle:"退出离线夹具",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q");appItem.submenu=appMenu;menu.addItem(appItem)
         let scenesItem=NSMenuItem(title:"验收场景",action:nil,keyEquivalent:"");let scenes=NSMenu(title:"验收场景")
-        for (title,action,key) in [("完成状态",#selector(RedesignActions.completed),"0"),("等待审批",#selector(RedesignActions.approval),"1"),("连接断开",#selector(RedesignActions.disconnected),"2"),("操作失败",#selector(RedesignActions.failed),"3"),("小窗口 760×600",#selector(RedesignActions.compact),"5"),("常用窗口 1000×740",#selector(RedesignActions.normal),"6")] {
+        for (title,action,key) in [("完成状态",#selector(RedesignActions.completed),"0"),("等待审批",#selector(RedesignActions.approval),"1"),("连接断开",#selector(RedesignActions.disconnected),"2"),("操作失败",#selector(RedesignActions.failed),"3"),("后台命令 1 个",#selector(RedesignActions.backgroundRunning),"7"),("后台命令待核对",#selector(RedesignActions.backgroundUnknown),"8"),("小窗口 760×600",#selector(RedesignActions.compact),"5"),("常用窗口 1000×740",#selector(RedesignActions.normal),"6")] {
             let item=NSMenuItem(title:title,action:action,keyEquivalent:key);item.target=actions;item.keyEquivalentModifierMask=[.command,.option];scenes.addItem(item)
         }
         scenesItem.submenu=scenes;menu.addItem(scenesItem);app.mainMenu=menu

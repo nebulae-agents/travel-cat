@@ -14,6 +14,8 @@ struct AgentConversationView: View {
     let audit: () -> Void
     let handoff: (WorkbenchInstance) -> Void
     let settings: () -> Void
+    @State private var conversationIsVisible = false
+    @State private var backgroundObservationToken: UUID?
     @State private var showingDetails = false
     @State private var nearBottom = true
     @State private var hasNewReply = false
@@ -31,6 +33,12 @@ struct AgentConversationView: View {
     private var requestCount: Int { requests.count + modelRequests.count }
     private var recoveryBusy: Bool { model.nativeRecovering.contains(task.id) || model.nativeDetaching.contains(task.id) }
 
+    private var backgroundObservationKey: String {
+        [task.id.uuidString, task.status.rawValue, task.nativeState?.executionID.uuidString ?? "",
+         task.nativeState?.connection.rawValue ?? "", task.nativeState?.pendingOperation?.id.uuidString ?? "",
+         conversationIsVisible ? "visible" : "hidden"].joined(separator: ":")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -38,6 +46,7 @@ struct AgentConversationView: View {
             ZStack(alignment: .trailing) {
                 VStack(spacing: 0) {
                     if let notice = importantNotice { noticeView(notice) }
+                    if task.nativeState != nil { backgroundStatus }
                     messages
                     VStack(spacing: 11) {
                         if requestCount > 0 { approval }
@@ -51,6 +60,20 @@ struct AgentConversationView: View {
                 }
             }
         }.background(WorkbenchTheme.canvas)
+        .background(ConversationVisibility { visible in
+            if conversationIsVisible != visible { conversationIsVisible = visible }
+            if !visible, let token = backgroundObservationToken { model.endNativeBackgroundObservation(task.id, token: token) }
+        }.frame(width: 0, height: 0))
+        .task(id: backgroundObservationKey) {
+            if conversationIsVisible, task.nativeState != nil {
+                let token = UUID(); backgroundObservationToken = token
+                await model.observeNativeBackgroundStatus(task.id, token: token)
+            }
+        }
+        .onDisappear {
+            conversationIsVisible = false
+            if let token = backgroundObservationToken { model.endNativeBackgroundObservation(task.id, token: token) }
+        }
         .onChange(of: requestCount) { _, value in approvalIndex = min(approvalIndex, max(0, value - 1)) }
     }
     private var header: some View {
@@ -85,13 +108,28 @@ struct AgentConversationView: View {
                 if model.isLive(task.id) {
                     if task.nativeState != nil && [.completed, .cancelled, .failed].contains(task.status) {
                         Button(model.nativeBackgroundStopping.contains(task.id) ? "正在停止后台命令…" : "停止后台命令") { Task { await model.stopNativeBackgroundTasks(task.id) } }
-                            .disabled(model.nativeBackgroundStopping.contains(task.id) || recoveryBusy)
+                            .disabled(!model.canStopNativeBackgroundTasks(task.id))
                     }
                     Button(task.nativeState == nil ? "结束会话" : "断开会话") { Task { await model.stop(task.id) } }
                         .disabled(task.nativeState != nil && (recoveryBusy || task.status == .cancelling || model.nativeBackgroundStopping.contains(task.id)))
                 }
             } label: { Image(systemName: "ellipsis").frame(width: 20, height: 24) }.menuStyle(.borderlessButton).fixedSize().help("更多会话操作").accessibilityLabel("更多会话操作")
         }.padding(.horizontal, 24).padding(.vertical, 16)
+    }
+    private var backgroundStatus: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 10) {
+                Label(model.nativeBackgroundStatusTitle(task.id, now: context.date), systemImage: "terminal")
+                    .foregroundStyle(WorkbenchTheme.muted)
+                Spacer()
+                if model.canStopNativeBackgroundTasks(task.id) || model.nativeBackgroundStopping.contains(task.id) {
+                    Button(model.nativeBackgroundStopping.contains(task.id) ? "正在停止…" : "停止后台命令") {
+                        Task { await model.stopNativeBackgroundTasks(task.id) }
+                    }.disabled(!model.canStopNativeBackgroundTasks(task.id)).controlSize(.small)
+                }
+            }.font(.system(size: 12)).padding(.horizontal, 24).padding(.vertical, 9)
+        }
+        .overlay(alignment: .bottom) { Divider() }
     }
     private var messages: some View {
         ScrollViewReader { proxy in
@@ -211,5 +249,43 @@ struct AgentConversationView: View {
         guard canSend else { return }
         let submitted = presentation.drafts.draft(for: target)
         Task { if await model.followUp(taskID: task.id, text: submitted.text) { presentation.drafts.clear(target, submittedRevision: submitted.revision) } }
+    }
+}
+
+/// A retained SwiftUI hierarchy can outlive its closed or hidden native window.
+private struct ConversationVisibility: NSViewRepresentable {
+    let changed: (Bool) -> Void
+    func makeNSView(context: Context) -> VisibilityView { VisibilityView() }
+    func updateNSView(_ view: VisibilityView, context: Context) { view.changed = changed; view.scheduleVisibility() }
+
+    @MainActor final class VisibilityView: NSView {
+        var changed: ((Bool) -> Void)?
+        private let observations = WorkbenchReceiptObservers()
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observations.removeAll()
+            if let window {
+                observations.replace([NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+                                NSWindow.didDeminiaturizeNotification, NSWindow.didBecomeKeyNotification,
+                                NSWindow.willCloseNotification].map { name in
+                    NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] notification in
+                        let closing = notification.name == NSWindow.willCloseNotification
+                        Task { @MainActor in self?.scheduleVisibility(closing: closing) }
+                    }
+                })
+            }
+            scheduleVisibility()
+        }
+        func scheduleVisibility(closing: Bool = false) {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let visible = !closing && self.window.map {
+                    $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) && !self.isHiddenOrHasHiddenAncestor
+                } == true
+                self.changed?(visible)
+            }
+        }
+        // Foundation token cleanup is owned separately from the view executor.
+        nonisolated deinit {}
     }
 }

@@ -51,6 +51,12 @@ final class AgentWorkbenchModel: ObservableObject {
     var nativeInterruptUnverified: Set<UUID> = []
     var nativeInterruptEvents: [UUID: [String: Any]] = [:]
     @Published var nativeBackgroundStopping: Set<UUID> = []
+    @Published var nativeBackgroundObservations: [UUID: NativeBackgroundObservation] = [:]
+    @Published var nativeBackgroundRequests: [UUID: NativeBackgroundRequest] = [:]
+    var nativeBackgroundPendingRefreshes: [UUID: NativeBackgroundPendingRefresh] = [:]
+    var nativeBackgroundRevisions: [UUID: UUID] = [:]
+    var nativeConnectionGenerations: [UUID: UUID] = [:]
+    var nativeBackgroundVisibility: [UUID: UUID] = [:]
     var nativeEventBuffers: [UUID: [[String: Any]]] = [:]
     @Published var nativeConnections: [UUID: NativeConnectionInfo] = [:]
     @Published var nativeBusy: Set<UUID> = []
@@ -139,6 +145,8 @@ final class AgentWorkbenchModel: ObservableObject {
                 self.state.tasks[index].nativeState?.connection = .disconnected
                 if self.state.tasks[index].nativeState?.pendingOperation?.status == .requested { self.state.tasks[index].nativeState?.pendingOperation?.status = .unknown }
             }
+            self.invalidateAllNativeBackgroundStatus()
+            self.nativeConnectionGenerations.removeAll()
             self.nativeConnections.removeAll()
             self.permissions.removeAll(); self.modelApprovals.removeAll(); self.liveTasks.removeAll()
             self.probeVerification = nil
@@ -444,6 +452,7 @@ final class AgentWorkbenchModel: ObservableObject {
     func shutdown() {
         saveTask?.cancel(); persist()
         hasShutdown = true; storageGeneration = UUID(); storageTask?.cancel()
+        invalidateAllNativeBackgroundStatus(); nativeBackgroundVisibility.removeAll()
         client.shutdown()
     }
 

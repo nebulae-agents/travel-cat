@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 from unittest.mock import patch
@@ -19,10 +21,12 @@ class FakeTransport:
     def __init__(self, config, callback):
         self.config, self.callback = config, callback
         self.calls, self.answers = [], []
+        self.deadlines = []
         self.closed = False
         self.results = {}
-    def request(self, method, params):
+    def request(self, method, params, *, deadline=None):
         self.calls.append((method, params))
+        self.deadlines.append(deadline)
         if method in self.results:
             result = self.results[method]
             return result(params) if callable(result) else result
@@ -258,6 +262,185 @@ class NativeControllerTests(unittest.TestCase):
     def background_process(self, process_id='process-1', **extra):
         return {'processId': process_id, 'itemId': 'command-' + process_id, 'cwd': str(self.workspace), 'command': 'sleep 30', 'osPid': 1, **extra}
 
+    def test_background_status_reads_completed_turn_without_mutating_or_terminating(self):
+        self.prompt()
+        self.transport.event('turn/completed', {'threadId': 'thread-1', 'turn': {'id': 'turn-1', 'status': 'completed'}})
+        task = self.controller.tasks['task-1']
+        before = dict(task)
+        self.transport.results['thread/backgroundTerminals/list'] = {'data': [self.background_process()], 'nextCursor': None}
+        calls = len(self.transport.calls)
+        result = self.controller.handle('native_background_status', {'taskId': 'task-1'})
+        self.assertEqual(result, {'threadId': 'thread-1', 'count': 1, 'itemIds': ['command-process-1']})
+        self.assertEqual(task, before)
+        self.assertEqual([m for m, _ in self.transport.calls[calls:]], ['thread/backgroundTerminals/list'])
+
+    def test_background_status_accepts_only_bound_task_identifier(self):
+        self.start()
+        calls = len(self.transport.calls)
+        for params in ({'taskId': 'foreign'}, {'taskId': 'task-1', 'threadId': 'thread-1'}, {'taskId': 'task-1', 'instanceId': self.instance}, {'taskId': 'task-1', 'processId': 'p'}):
+            with self.subTest(params=params), self.assertRaises(native.NativeFailure):
+                self.controller.handle('native_background_status', params)
+        self.controller.handle('native_detach', {'taskId': 'task-1'})
+        with self.assertRaises(native.NativeFailure): self.controller.handle('native_background_status', {'taskId': 'task-1'})
+        self.assertEqual(len(self.transport.calls), calls)
+
+    def test_background_status_paginates_and_returns_authoritative_empty(self):
+        self.start()
+        pages = iter([{'data': [self.background_process('p1')], 'nextCursor': 'next'}, {'data': [self.background_process('p2')], 'nextCursor': None}])
+        self.transport.results['thread/backgroundTerminals/list'] = lambda _: next(pages)
+        self.assertEqual(self.controller.handle('native_background_status', {'taskId': 'task-1'})['itemIds'], ['command-p1', 'command-p2'])
+        self.transport.results['thread/backgroundTerminals/list'] = {'data': [], 'nextCursor': None}
+        self.assertEqual(self.controller.handle('native_background_status', {'taskId': 'task-1'}), {'threadId': 'thread-1', 'count': 0, 'itemIds': []})
+        self.assertFalse(any(m == 'thread/backgroundTerminals/terminate' for m, _ in self.transport.calls))
+
+    def test_background_status_rejects_stale_binding_during_every_page(self):
+        self.start()
+        original_task = self.controller.tasks['task-1']
+        instance = self.controller.instances[self.instance]
+        for mutation in ('disconnect', 'generation', 'replacement', 'thread', 'instance'):
+            for page_number in (1, 2):
+                with self.subTest(mutation=mutation, page=page_number):
+                    self.controller.tasks['task-1'] = original_task
+                    original_task['threadId'] = 'thread-1'
+                    instance['connected'] = True
+                    instance['generation'] = original_task['generation']
+                    self.controller.instances[self.instance] = instance
+                    calls = []
+                    def listed(_):
+                        calls.append(1)
+                        if len(calls) == page_number:
+                            if mutation == 'disconnect': instance['connected'] = False
+                            elif mutation == 'generation': instance['generation'] = 'new-generation'
+                            elif mutation == 'replacement': self.controller.tasks['task-1'] = dict(original_task)
+                            elif mutation == 'thread': original_task['threadId'] = 'changed'
+                            elif mutation == 'instance': self.controller.instances[self.instance] = dict(instance)
+                        return {'data': [], 'nextCursor': 'second' if len(calls) == 1 else None}
+                    self.transport.results['thread/backgroundTerminals/list'] = listed
+                    with self.assertRaises(native.NativeFailure): self.controller.handle('native_background_status', {'taskId': 'task-1'})
+                    self.assertEqual(len(calls), page_number)
+        self.controller.tasks['task-1'] = original_task
+        self.controller.instances[self.instance] = instance
+
+    def test_background_status_preserves_list_limits_and_identity_validation(self):
+        self.start()
+        for page in ({'data': []}, {'data': [self.background_process(threadId='foreign')], 'nextCursor': None}, {'data': [self.background_process(), self.background_process()], 'nextCursor': None}, {'data': [], 'nextCursor': 'same'}):
+            self.transport.results['thread/backgroundTerminals/list'] = page
+            with self.subTest(page=page), self.assertRaises(native.NativeFailure): self.controller.handle('native_background_status', {'taskId': 'task-1'})
+        self.transport.results['thread/backgroundTerminals/list'] = {'data': [self.background_process()], 'nextCursor': None}
+        with patch.object(native, 'MAX_BACKGROUND_PROCESSES', 0):
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_background_status', {'taskId': 'task-1'})
+        self.assertFalse(any(m == 'thread/backgroundTerminals/terminate' for m, _ in self.transport.calls))
+
+    def test_background_status_all_pages_share_total_deadline_and_late_page_is_not_published(self):
+        self.start()
+        clock = [100.0]
+        pages = []
+        def slow_page(_):
+            pages.append(self.transport.deadlines[-1])
+            clock[0] += 3.0
+            return {'data': [], 'nextCursor': 'page-' + str(len(pages)) if len(pages) < 3 else None}
+        self.transport.results['thread/backgroundTerminals/list'] = slow_page
+        with patch.object(native.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(native, 'BACKGROUND_STATUS_SECONDS', 5, create=True):
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_background_status', {'taskId': 'task-1'})
+        self.assertEqual(pages,[105.0,105.0], 'all pages share one deadline; no third page after expiry')
+        self.assertTrue(self.controller.instances[self.instance]['connected'])
+
+    def test_background_status_busy_operation_never_waits_in_queue_or_sends_after_unlock(self):
+        self.start()
+        results = []
+        def read():
+            try: results.append(self.controller.handle('native_background_status', {'taskId': 'task-1'}))
+            except native.NativeFailure as error: results.append(error)
+        self.controller.operations.acquire()
+        worker = threading.Thread(target=read,daemon=True)
+        try:
+            worker.start(); worker.join(0.2)
+            finished_while_busy = not worker.is_alive()
+        finally:
+            self.controller.operations.release(); worker.join(1)
+        self.assertTrue(finished_while_busy,'read-only polls must fail promptly rather than queue behind controls')
+        self.assertTrue(results and isinstance(results[0],native.NativeFailure))
+        self.assertFalse(any(m == 'thread/backgroundTerminals/list' for m, _ in self.transport.calls))
+
+    def test_background_status_contention_does_not_accumulate_reads_ahead_of_stop(self):
+        self.start()
+        entered, release = threading.Event(), threading.Event()
+        original = self.transport.request
+        first = [True]
+        def slow_request(method, params, *, deadline=None):
+            if method == 'thread/backgroundTerminals/list' and first[0]:
+                first[0] = False; entered.set()
+                delay = max(0, deadline-time.monotonic()) if deadline is not None else 0.4
+                if not release.wait(delay): raise native.NativeFailure('fixture read deadline')
+            return original(method,params,deadline=deadline)
+        self.transport.request = slow_request
+        results, stopped = [], []
+        def read():
+            try: results.append(self.controller.handle('native_background_status', {'taskId': 'task-1'}))
+            except native.NativeFailure as error: results.append(error)
+        def stop():
+            stopped.append(self.controller.handle('native_background_stop', {'taskId': 'task-1'}))
+        with patch.object(native,'BACKGROUND_STATUS_SECONDS',0.08,create=True):
+            active = threading.Thread(target=read,daemon=True); active.start()
+            self.assertTrue(entered.wait(0.3))
+            queued = [threading.Thread(target=read,daemon=True) for _ in range(8)]
+            for worker in queued: worker.start()
+            stopper = threading.Thread(target=stop,daemon=True); stopper.start()
+            try:
+                stopper.join(0.25)
+                stopped_within_budget = not stopper.is_alive()
+                polls_rejected = all(not worker.is_alive() for worker in queued)
+            finally:
+                release.set(); active.join(1); stopper.join(1)
+                for worker in queued: worker.join(1)
+        self.assertTrue(stopped_within_budget,'stop can wait only for the current bounded read')
+        self.assertTrue(polls_rejected,'additional reads never accumulate behind the operation lock')
+        self.assertEqual(stopped,[{'stopped':True,'terminatedCount':0}])
+        self.assertEqual(len(results),9)
+        self.assertTrue(all(isinstance(result,native.NativeFailure) for result in results))
+
+    def test_background_status_scope_lock_wait_obeys_same_deadline_before_and_after_page(self):
+        self.start()
+        for phase in ('initial','after-page'):
+            entered, resume = threading.Event(), threading.Event()
+            results = []
+            def listed(_):
+                entered.set(); resume.wait(0.5)
+                return {'data':[],'nextCursor':None}
+            self.transport.results['thread/backgroundTerminals/list'] = listed
+            def read():
+                try: results.append(self.controller.handle('native_background_status', {'taskId':'task-1'}))
+                except native.NativeFailure as error: results.append(error)
+            worker = threading.Thread(target=read,daemon=True)
+            with self.subTest(phase=phase), patch.object(native,'BACKGROUND_STATUS_SECONDS',0.05):
+                if phase == 'initial': self.controller.lock.acquire()
+                worker.start()
+                if phase == 'after-page':
+                    self.assertTrue(entered.wait(0.3)); self.controller.lock.acquire()
+                try:
+                    resume.set(); worker.join(0.2)
+                    finished = not worker.is_alive()
+                finally:
+                    self.controller.lock.release(); worker.join(1)
+                self.assertTrue(finished,'status cannot wait behind an approval callback holding the scope lock')
+                self.assertTrue(results and isinstance(results[0],native.NativeFailure))
+                self.assertTrue(self.controller.background_status_slot.acquire(False))
+                self.controller.background_status_slot.release()
+                self.assertTrue(self.controller.operations.acquire(False))
+                self.controller.operations.release()
+
+    def test_background_status_slot_is_released_after_query_error_and_shutdown(self):
+        self.start()
+        def failed(_): raise native.NativeFailure('fixture EOF')
+        self.transport.results['thread/backgroundTerminals/list'] = failed
+        with self.assertRaises(native.NativeFailure): self.controller.handle('native_background_status', {'taskId':'task-1'})
+        self.transport.results['thread/backgroundTerminals/list'] = {'data':[],'nextCursor':None}
+        self.assertEqual(self.controller.handle('native_background_status', {'taskId':'task-1'})['count'],0)
+        self.controller.close()
+        with self.assertRaises(native.NativeFailure): self.controller.handle('native_background_status', {'taskId':'task-1'})
+        self.assertTrue(self.controller.background_status_slot.acquire(False))
+        self.controller.background_status_slot.release()
+
     def test_background_stop_paginates_terminates_only_bound_thread_and_verifies_empty(self):
         self.start()
         pages = iter([{'data': [self.background_process('p1')], 'nextCursor': 'next'}, {'data': [self.background_process('p2')], 'nextCursor': None}, {'data': [], 'nextCursor': None}])
@@ -454,6 +637,62 @@ class NativeTransportTests(unittest.TestCase):
             with self.assertRaises(native.NativeFailure): t.request('never/respond', {})
         self.assertTrue(any(e.get('method') == 'connection/lost' for e in self.events))
         with self.assertRaises(native.NativeFailure): t.request('initialize', {})
+    def test_read_deadline_covers_writer_wait_and_expired_request_sends_nothing(self):
+        t = self.connect()
+        t.writer.acquire()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(native.NativeFailure): t.request('thread/backgroundTerminals/list', {}, deadline=started+0.04)
+        finally: t.writer.release()
+        self.assertLess(time.monotonic()-started,0.2)
+        self.assertFalse(t.closed,'waiting for a writer did not put partial bytes on the socket')
+        with patch.object(t,'_send',wraps=t._send) as send:
+            with self.assertRaises(native.NativeFailure): t.request('thread/backgroundTerminals/list', {}, deadline=time.monotonic()-1)
+            send.assert_not_called()
+        self.assertEqual(t.request('initialize', {})['codexHome'], self.config['profileRoot'])
+        self.assertFalse(t.pending)
+
+    def test_read_response_deadline_ignores_late_reply_and_keeps_next_request_bound(self):
+        t = self.connect()
+        started = time.monotonic()
+        with self.assertRaises(native.NativeFailure): t.request('thread/backgroundTerminals/list', {'fixture':'late'}, deadline=started+0.04)
+        self.assertLess(time.monotonic()-started,0.2)
+        self.assertFalse(t.closed)
+        self.assertEqual(t.request('initialize', {})['codexHome'],self.config['profileRoot'])
+        self.assertFalse(t.pending)
+        self.assertFalse(any(event.get('method') == 'connection/lost' for event in self.events))
+
+    def test_read_send_and_response_share_same_deadline(self):
+        t = self.connect()
+        original = t._send
+        def delayed_send(value, *, deadline=None):
+            time.sleep(0.04)
+            return original(value,deadline=deadline)
+        started = time.monotonic()
+        with patch.object(t,'_send',side_effect=delayed_send):
+            with self.assertRaises(native.NativeFailure): t.request('thread/backgroundTerminals/list', {'fixture':'never'}, deadline=started+0.08)
+        self.assertLess(time.monotonic()-started,0.11,'response wait cannot restart the budget after sending')
+        self.assertFalse(t.closed)
+        self.assertEqual(t.request('initialize', {})['codexHome'],self.config['profileRoot'])
+
+    def test_read_write_failure_does_not_wait_for_blocked_connection_lost_callback(self):
+        t = self.connect()
+        entered, release = threading.Event(), threading.Event()
+        def blocked_callback(event):
+            entered.set(); release.wait(0.4); self.events.append(event)
+        t.callback = blocked_callback
+        started = time.monotonic()
+        try:
+            with patch.object(t,'_write_bytes',side_effect=native.NativeFailure('fixture uncertain partial frame')):
+                with self.assertRaises(native.NativeFailure):
+                    t.request('thread/backgroundTerminals/list', {}, deadline=started+0.05)
+            elapsed = time.monotonic()-started
+            self.assertTrue(entered.wait(0.2))
+            self.assertTrue(t.closed,'uncertain partial frames must still close the socket')
+            self.assertFalse(t.pending)
+        finally: release.set()
+        self.assertLess(elapsed,0.2,'bounded read cleanup must not wait on a scope callback held by approvals')
+
     def test_oversize_frame_disconnects(self):
         t = self.connect()
         with self.assertRaises(native.NativeFailure): t.request('oversize', {})
@@ -576,6 +815,10 @@ def client(c):
             if 'id' not in f or 'method' not in f: continue
             m = f['method']
             if m == 'never/respond': continue
+            if m == 'thread/backgroundTerminals/list' and f['params'].get('fixture') == 'never': continue
+            if m == 'thread/backgroundTerminals/list' and f['params'].get('fixture') == 'late':
+                import time; time.sleep(0.12)
+                send_frame(c,json.dumps({'id':f['id'],'result':{'stale':True}}).encode()); continue
             if m == 'close': send_frame(c,b'',opcode=8); continue
             if m == 'bad-continuation': send_frame(c,b'{}',opcode=0); continue
             if m == 'oversize': send_frame(c,b'x'*(3*1024*1024)); continue
