@@ -1080,3 +1080,60 @@ extension NativeAgentModelTests {
         }
     }
 }
+
+
+extension NativeAgentModelTests {
+    @MainActor func testReasoningLifecyclePreservesDetailAuditOrderAndConversationAttention() async throws {
+        let (model, runtime, _, audit, root, instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        await model.start(instanceID: instance.id, text: "hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.emit(taskID: id, instanceID: instance.id, method: "item/started", params: ["threadId": "native-thread", "turnId": "native-turn", "item": ["id": "thinking", "type": "reasoning", "summary": []]])
+        runtime.emit(taskID: id, instanceID: instance.id, method: "item/started", params: ["threadId": "native-thread", "turnId": "native-turn", "item": ["id": "future", "type": "futureProcess", "payload": "preserve"]])
+        model.mutate(id) { $0.status = .completed; $0.unread = false; $0.archivedAt = Date() }
+        let item: [String: Any] = ["id": "thinking", "type": "reasoning", "summary": [["type": "summary_text", "text": "思考\r\n\t🙂  "]], "content": ["stored detail"]]
+        let expected = try JSONSerialization.data(withJSONObject: item, options: [.prettyPrinted, .sortedKeys])
+        runtime.emit(taskID: id, instanceID: instance.id, method: "item/completed", params: ["threadId": "native-thread", "turnId": "native-turn", "item": item])
+        let task = try XCTUnwrap(model.state.tasks.first)
+        XCTAssertNil(task.archivedAt); XCTAssertTrue(task.unread)
+        XCTAssertEqual(task.nativeState?.items.map(\.id), ["thinking", "future"])
+        XCTAssertEqual(Data(try XCTUnwrap(task.nativeState?.items.first?.detail).utf8), expected)
+        XCTAssertEqual(WorkbenchConversationPresentation.thinkingItems(task).map(\.text), ["思考\r\n\t🙂  \n\nstored detail"])
+        XCTAssertFalse(task.messages.contains { $0.runtimeItemID == "thinking" }, "reasoning never becomes a duplicate saved message")
+        XCTAssertEqual(WorkbenchConversationPresentation.processItems(task).map(\.id), ["future"])
+        let savedEvent = try XCTUnwrap(audit.saved.last { $0["kind"] as? String == "native.event" && $0["method"] as? String == "item/completed" })
+        let auditedItem = try XCTUnwrap((savedEvent["params"] as? [String: Any])?["item"] as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: auditedItem, options: [.prettyPrinted, .sortedKeys]), expected)
+        runtime.emit(taskID: id, instanceID: instance.id, method: "item/reasoning/summaryTextDelta", params: ["threadId": "native-thread", "turnId": "native-turn", "itemId": "thinking", "delta": "not projected live"])
+        XCTAssertEqual(Data(try XCTUnwrap(model.state.tasks[0].nativeState?.items.first?.detail).utf8), expected)
+        runtime.emit(taskID: id, instanceID: instance.id, method: "item/completed", params: ["threadId": "native-thread", "turnId": "native-turn", "item": ["id": "answer", "type": "agentMessage", "text": "普通正文含 reasoning <think>标签</think>"]])
+        XCTAssertEqual(model.state.tasks[0].messages.last?.text, "普通正文含 reasoning <think>标签</think>")
+        XCTAssertNil(AgentThinkingContent.acp(try XCTUnwrap(model.state.tasks[0].messages.last)))
+    }
+
+    @MainActor func testRepeatedReasoningResumePreservesStableItemsAndDoesNotCreateMessages() async throws {
+        let (model, runtime, _, _, root, instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        await model.start(instanceID: instance.id, text: "hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.onExit?()
+        runtime.results["native_resume"] = ["threadId": "native-thread", "turns": [["id": "native-turn", "status": "completed"]], "items": [
+            ["turnId": "native-turn", "item": ["id": "r", "type": "reasoning", "summary": ["resume🙂\r\n"]]],
+            ["turnId": "native-turn", "item": ["id": "e", "type": "reasoning", "summary": []]],
+            ["turnId": "native-turn", "item": ["id": "answer", "type": "agentMessage", "text": "done"]]]]
+        await model.recoverNative(taskID: id)
+        let first = try XCTUnwrap(model.state.tasks.first)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let originalItems = try encoder.encode(first.nativeState?.items)
+        let originalMessages = try encoder.encode(first.messages)
+        await model.recoverNative(taskID: id)
+        let task = model.state.tasks[0]
+        XCTAssertEqual(try encoder.encode(task.nativeState?.items), originalItems)
+        XCTAssertEqual(try encoder.encode(task.messages), originalMessages)
+        XCTAssertEqual(task.nativeState?.items.map(\.id), ["r", "e", "answer"])
+        XCTAssertEqual(WorkbenchConversationPresentation.thinkingItems(task).map(\.id), ["native.reasoning:r"])
+        XCTAssertEqual(task.messages.filter { $0.runtimeItemID == "answer" }.count, 1)
+        XCTAssertFalse(task.messages.contains { ["r", "e"].contains($0.runtimeItemID ?? "") })
+        XCTAssertEqual(runtime.requests.filter { $0.0 == "native_prompt" }.count, 1)
+    }
+}

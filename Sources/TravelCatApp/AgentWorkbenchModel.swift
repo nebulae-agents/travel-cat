@@ -631,11 +631,15 @@ final class AgentWorkbenchModel: ObservableObject {
             }
         case "update":
             let kind = data["sessionUpdate"] as? String ?? ""
-            if kind == "agent_message_chunk", let content = data["content"] as? [String: Any], let text = content["text"] as? String {
+            if ["agent_message_chunk", "agent_thought_chunk"].contains(kind),
+               let content = data["content"] as? [String: Any], content["type"] as? String == "text",
+               let text = content["text"] as? String {
+                let source = "acp." + kind
                 mutate(id) { task in
-                    if task.messages.last?.role == "assistant", let index = task.messages.indices.last {
+                    if task.messages.last?.role == "assistant", task.messages.last?.sourceKind == source,
+                       let index = task.messages.indices.last {
                         task.messages[index].text = String((task.messages[index].text + text).prefix(500_000))
-                    } else { task.messages.append(.init(role: "assistant", text: String(text.prefix(500_000)))) }
+                    } else { task.messages.append(.init(role: "assistant", text: String(text.prefix(500_000)), sourceKind: source)) }
                 }
             } else if kind == "tool_call" || kind == "tool_call_update" {
                 let title = data["title"] as? String ?? "工具执行"

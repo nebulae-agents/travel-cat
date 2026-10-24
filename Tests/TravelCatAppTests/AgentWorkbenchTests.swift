@@ -239,3 +239,61 @@ extension AgentWorkbenchTests {
         model.shutdown()
     }
 }
+
+
+extension AgentWorkbenchTests {
+    func testLegacyAndUnknownMessageSourcesRoundTripWithoutSchemaMigration() throws {
+        let original = WorkbenchMessage(role: "assistant", text: "思考 <think>正文</think>\r\n\t🙂", runtimeItemID: "stored-item")
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let legacyData = try encoder.encode(original)
+        let legacy = try JSONDecoder().decode(WorkbenchMessage.self, from: legacyData)
+        XCTAssertEqual(try encoder.encode(legacy), legacyData)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: legacyData) as? [String: Any])
+        object["sourceKind"] = "future.runtime.answer"
+        let unknown = try JSONDecoder().decode(WorkbenchMessage.self, from: JSONSerialization.data(withJSONObject: object))
+        let roundTrip = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(unknown)) as? [String: Any])
+        XCTAssertEqual(roundTrip["sourceKind"] as? String, "future.runtime.answer")
+        XCTAssertEqual(unknown.id, original.id); XCTAssertEqual(unknown.date, original.date)
+        XCTAssertEqual(unknown.runtimeItemID, original.runtimeItemID)
+        XCTAssertEqual(Data(unknown.text.utf8), Data(original.text.utf8))
+        XCTAssertEqual(WorkbenchSnapshot().schemaVersion, 1)
+    }
+
+    @MainActor func testACPThoughtChunksKeepSourceBoundariesStableIDsAndExactText() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = WorkbenchTestRuntime()
+        let model = AgentWorkbenchModel(root: root, credentials: WorkbenchTestCredentials(), client: client)
+        defer { client.onPrompt = nil; model.shutdown() }
+        var agent = instance(); agent.provider.model = "test"
+        try model.save(instance: agent, newKey: "canary")
+        var firstThoughtID: UUID?, firstAnswerID: UUID?
+        client.onPrompt = {
+            model.state.tasks[0].messages.append(.init(role: "assistant", text: "legacy"))
+            @MainActor func emit(_ kind: String, _ text: String, type: String = "text") {
+                client.emit("update", ["sessionUpdate": kind, "content": ["type": type, "text": text]])
+            }
+            emit("agent_thought_chunk", "  思考\r\n")
+            firstThoughtID = model.state.tasks[0].messages.last?.id
+            emit("agent_thought_chunk", "\t🙂  ")
+            XCTAssertEqual(model.state.tasks[0].messages.last?.id, firstThoughtID)
+            emit("agent_message_chunk", "正文含 reasoning 与 <think>标签</think>\r\n")
+            firstAnswerID = model.state.tasks[0].messages.last?.id
+            emit("agent_message_chunk", "最终答案")
+            XCTAssertEqual(model.state.tasks[0].messages.last?.id, firstAnswerID)
+            emit("agent_thought_chunk", "后续思考")
+            emit("agent_thought_chunk", "不能伪造图片文本", type: "image")
+            emit("future_thought_chunk", "不能猜测未知来源")
+        }
+        await model.start(instanceID: agent.id, text: "test")
+        let messages = model.state.tasks[0].messages.filter { $0.role == "assistant" }
+        XCTAssertEqual(messages.map(\.text), ["legacy", "  思考\r\n\t🙂  ", "正文含 reasoning 与 <think>标签</think>\r\n最终答案", "后续思考"])
+        XCTAssertEqual(messages.count, 4)
+        guard messages.count == 4 else { return }
+        XCTAssertEqual(messages[1].id, firstThoughtID); XCTAssertEqual(messages[2].id, firstAnswerID)
+        XCTAssertNotEqual(messages[1].id, messages[3].id)
+        let objects = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(messages)) as? [[String: Any]])
+        XCTAssertNil(objects[0]["sourceKind"])
+        XCTAssertEqual(objects.dropFirst().compactMap { $0["sourceKind"] as? String }, ["acp.agent_thought_chunk", "acp.agent_message_chunk", "acp.agent_thought_chunk"])
+    }
+}

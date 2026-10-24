@@ -81,6 +81,8 @@ struct WorkbenchMessage: Codable, Identifiable, Equatable, Sendable {
     var text: String
     var date = Date()
     var runtimeItemID: String? = nil
+    /// Explicit runtime provenance only; absent legacy and future values remain ordinary body text.
+    var sourceKind: String? = nil
 }
 /// An explicit ACP cleanup receipt, bound to the exact stored task and session.
 /// Missing in legacy snapshots; a disconnected client is never a receipt.

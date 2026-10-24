@@ -173,3 +173,72 @@ final class AgentWorkbenchNavigationTests: XCTestCase {
         XCTAssertFalse(model.canReply(id))
     }
 }
+
+extension AgentWorkbenchNavigationTests {
+    @MainActor func testHandoffUsesLatestBodyAnswerAndPreservesDraftAndNavigationWithoutSending() async throws {
+        let (model, runtime, root, a, b) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        await model.start(instanceID: a.id, text: "first question")
+        let id = try XCTUnwrap(model.selectedTaskID)
+        let answer = WorkbenchMessage(role: "assistant", text: "普通答案 A\r\n\t🙂  ", sourceKind: "acp.agent_message_chunk")
+        model.mutate(id) { task in
+            task.messages += [answer, .init(role: "user", text: "next question"), .init(role: "assistant", text: "private thought B", sourceKind: "acp.agent_thought_chunk")]
+        }
+        model.updateDraft(.new(b.id)) { $0.text = "已有草稿"; $0.files = [["name": "keep.txt"]] }
+        let source = try XCTUnwrap(model.state.tasks.first { $0.id == id })
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let original = try encoder.encode(source)
+        let calls = runtime.calls
+        XCTAssertEqual(WorkbenchConversationPresentation.latestAssistantBody(source)?.id, answer.id)
+        XCTAssertTrue(model.prepareHandoff(from: id, to: b.id))
+        let draft = model.draft(for: .new(b.id))
+        XCTAssertEqual(draft.text, "已有草稿\n\n承接对话：\(source.title)\n\n上轮回复：\n" + answer.text)
+        XCTAssertEqual(draft.files, [["name": "keep.txt"]])
+        XCTAssertEqual(draft.parentTaskID, id)
+        XCTAssertEqual(model.preferredInstanceID, b.id); XCTAssertNil(model.selectedTaskID)
+        XCTAssertEqual(runtime.calls, calls, "handoff prepares a draft without sending or invoking a runtime")
+        XCTAssertEqual(try encoder.encode(try XCTUnwrap(model.state.tasks.first { $0.id == id })), original)
+        XCTAssertTrue(WorkbenchConversationPresentation.matches(source, query: "private thought B"), "search retains accepted thoughts")
+    }
+
+    @MainActor func testOnlyThoughtHandoffCannotChangeDraftSelectionOrInvokeRuntime() async throws {
+        let (model, runtime, root, a, b) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        await model.start(instanceID: a.id, text: "first question")
+        let id = try XCTUnwrap(model.selectedTaskID)
+        model.mutate(id) { $0.messages.append(.init(role: "assistant", text: "only thought", sourceKind: "acp.agent_thought_chunk")) }
+        model.updateDraft(.new(b.id)) { $0.text = "不要覆盖"; $0.parentTaskID = UUID() }
+        let task = try XCTUnwrap(model.state.tasks.first { $0.id == id })
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let before = try encoder.encode(model.state)
+        let calls = runtime.calls
+        XCTAssertNil(WorkbenchConversationPresentation.latestAssistantBody(task), "the menu has no body answer to offer")
+        XCTAssertFalse(model.prepareHandoff(from: id, to: b.id), "stale UI cannot create a thought-only handoff")
+        XCTAssertEqual(try encoder.encode(model.state), before)
+        XCTAssertEqual(model.preferredInstanceID, a.id); XCTAssertEqual(model.selectedTaskID, id)
+        XCTAssertEqual(runtime.calls, calls)
+    }
+
+    @MainActor func testHandoffKeepsLegacyUnknownAndNativeBodyAnswersEligible() async throws {
+        let (model, runtime, root, a, b) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        await model.start(instanceID: a.id, text: "question")
+        let id = try XCTUnwrap(model.selectedTaskID)
+        let calls = runtime.calls
+        let candidates = [
+            WorkbenchMessage(role: "assistant", text: "legacy <think>body</think>"),
+            WorkbenchMessage(role: "assistant", text: "unknown reasoning body", sourceKind: "future.runtime.thought"),
+            WorkbenchMessage(role: "assistant", text: "Native body", runtimeItemID: "native-agent-message"),
+            WorkbenchMessage(role: "assistant", text: "ACP body", sourceKind: "acp.agent_message_chunk")]
+        for body in candidates {
+            model.mutate(id) { $0.messages = [body, .init(role: "assistant", text: "later typed thought", sourceKind: "acp.agent_thought_chunk")] }
+            model.updateDraft(.new(b.id)) { $0.text = ""; $0.parentTaskID = nil }
+            let task = try XCTUnwrap(model.state.tasks.first { $0.id == id })
+            XCTAssertEqual(WorkbenchConversationPresentation.latestAssistantBody(task)?.id, body.id)
+            XCTAssertTrue(model.prepareHandoff(from: id, to: b.id))
+            XCTAssertEqual(model.draft(for: .new(b.id)).text, "承接对话：\(task.title)\n\n上轮回复：\n" + body.text)
+            XCTAssertEqual(model.draft(for: .new(b.id)).parentTaskID, id)
+        }
+        XCTAssertEqual(runtime.calls, calls)
+    }
+}

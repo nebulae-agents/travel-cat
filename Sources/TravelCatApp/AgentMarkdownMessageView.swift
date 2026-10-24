@@ -11,6 +11,7 @@ struct AgentMarkdownSourceIdentity: Equatable {
 struct AgentMarkdownRawSnapshot: Identifiable {
     let id = UUID()
     let text: String
+    var isRecord = false
 }
 
 /// Retained by SwiftUI identity: constructing a message view never reparses its body.
@@ -39,6 +40,8 @@ struct AgentMarkdownRawSnapshot: Identifiable {
 
 @MainActor struct AgentMarkdownMessageView: View {
     let text: String
+    let rawSource: String?
+    init(text: String, rawSource: String? = nil) { self.text = text; self.rawSource = rawSource }
     @StateObject private var reading = AgentMarkdownReadingState()
     @State private var rawSnapshot: AgentMarkdownRawSnapshot?
 
@@ -47,21 +50,24 @@ struct AgentMarkdownRawSnapshot: Identifiable {
             if let content = reading.content {
                 if content.isDegraded {
                     Text(verbatim: content.preview).textSelection(.enabled)
-                    Text("正文较长，当前显示阅读预览。可查看或复制完整原文。")
+                    Text(rawSource == nil ? "正文较长，当前显示阅读预览。可查看或复制完整原文。" : "思考内容较长，当前显示阅读预览。可查看或复制完整原始记录。")
                         .font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted)
                 } else {
                     ForEach(content.blocks) { block in blockView(block, content: content) }
                 }
             }
             HStack(spacing: 14) {
-                Button("查看原文") { rawSnapshot = .init(text: text) }
-                Button("复制原文") { AgentMarkdownCopy.raw(text, to: .general) }
+                Button(rawSource == nil ? "查看原文" : "查看原始记录") { rawSnapshot = makeRawSnapshot() }
+                Button(rawSource == nil ? "复制原文" : "复制原始记录") { copyRaw(to: .general) }
             }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(WorkbenchTheme.muted)
         }
         .font(.system(size: 14)).lineSpacing(6).frame(maxWidth: .infinity, alignment: .leading)
         .task(id: AgentMarkdownSourceIdentity(text)) { reading.update(text) }
         .sheet(item: $rawSnapshot) { snapshot in AgentMarkdownRawView(snapshot: snapshot) }
     }
+
+    func makeRawSnapshot() -> AgentMarkdownRawSnapshot { .init(text: rawSource ?? text, isRecord: rawSource != nil) }
+    @discardableResult func copyRaw(to pasteboard: NSPasteboard) -> Bool { AgentMarkdownCopy.raw(rawSource ?? text, to: pasteboard) }
 
     @ViewBuilder private func blockView(_ block: AgentMarkdownContent.Block, content: AgentMarkdownContent) -> some View {
         switch block.kind {
@@ -96,14 +102,14 @@ struct AgentMarkdownRawSnapshot: Identifiable {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("消息原文").font(.headline)
+                Text(snapshot.isRecord ? "原始记录" : "消息原文").font(.headline)
                 Spacer()
-                Button("复制完整原文") { AgentMarkdownCopy.raw(snapshot.text, to: .general) }
+                Button(snapshot.isRecord ? "复制完整原始记录" : "复制完整原文") { AgentMarkdownCopy.raw(snapshot.text, to: .general) }
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             Text("此处保留打开时的内容，可自由选择；后续回复会继续显示在对话中。")
                 .font(.caption).foregroundStyle(WorkbenchTheme.muted)
-            AgentMarkdownRawText(snapshot: snapshot.text)
+            AgentMarkdownRawText(snapshot: snapshot.text, isRecord: snapshot.isRecord)
         }.padding(18).frame(minWidth: 480, idealWidth: 700, minHeight: 320, idealHeight: 500)
     }
 }
@@ -112,7 +118,8 @@ struct AgentMarkdownRawSnapshot: Identifiable {
 /// large (store-bounded) snapshots scrollable without eagerly laying out the entire message.
 @MainActor struct AgentMarkdownRawText: NSViewRepresentable {
     let snapshot: String
-    static func makeTextView(_ snapshot: String) -> NSTextView {
+    var isRecord = false
+    static func makeTextView(_ snapshot: String, isRecord: Bool = false) -> NSTextView {
         let view = NSTextView()
         view.isEditable = false; view.isSelectable = true; view.isRichText = false; view.importsGraphics = false
         view.isAutomaticLinkDetectionEnabled = false; view.isAutomaticDataDetectionEnabled = false
@@ -125,7 +132,7 @@ struct AgentMarkdownRawSnapshot: Identifiable {
         view.textContainer?.widthTracksTextView = false
         view.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         view.layoutManager?.allowsNonContiguousLayout = true
-        view.setAccessibilityLabel("消息原文（打开时快照）")
+        view.setAccessibilityLabel(isRecord ? "原始记录（打开时快照）" : "消息原文（打开时快照）")
         view.string = snapshot
         return view
     }
@@ -133,7 +140,7 @@ struct AgentMarkdownRawSnapshot: Identifiable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true
-        scroll.documentView = Self.makeTextView(snapshot)
+        scroll.documentView = Self.makeTextView(snapshot, isRecord: isRecord)
         return scroll
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
