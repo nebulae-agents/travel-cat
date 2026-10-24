@@ -1,6 +1,22 @@
 import AppKit
 import SwiftUI
 
+/// Tokens own only Foundation notification registrations; cleanup needs no UI executor.
+final class WorkbenchReceiptObservers {
+    private let center: NotificationCenter
+    private var tokens: [NSObjectProtocol] = []
+    init(center: NotificationCenter = .default) { self.center = center }
+    func replace(_ next: [NSObjectProtocol]) {
+        removeAll()
+        tokens = next
+    }
+    func removeAll() {
+        tokens.forEach(center.removeObserver)
+        tokens = []
+    }
+    deinit { tokens.forEach(center.removeObserver) }
+}
+
 /// Selection survives closing a window. Only a visibly presented detail can acknowledge a result.
 struct WorkbenchReadReceipt: NSViewRepresentable {
     let taskID: UUID?
@@ -15,17 +31,16 @@ struct WorkbenchReadReceipt: NSViewRepresentable {
     }
     @MainActor final class ReceiptView: NSView {
         var acknowledge: (() -> Void)?
-        private var observations: [NSObjectProtocol] = []
+        private let observations = WorkbenchReceiptObservers()
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            observations.forEach(NotificationCenter.default.removeObserver)
-            observations = []
+            observations.removeAll()
             if let window {
-                observations = [NSWindow.didBecomeKeyNotification, NSWindow.didDeminiaturizeNotification, NSWindow.didChangeOcclusionStateNotification].map { name in
+                observations.replace([NSWindow.didBecomeKeyNotification, NSWindow.didDeminiaturizeNotification, NSWindow.didChangeOcclusionStateNotification].map { name in
                     NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
                         Task { @MainActor in self?.scheduleReceipt() }
                     }
-                }
+                })
             }
             scheduleReceipt()
         }
@@ -36,6 +51,8 @@ struct WorkbenchReadReceipt: NSViewRepresentable {
                 self.acknowledge?()
             }
         }
-        isolated deinit { observations.forEach(NotificationCenter.default.removeObserver) }
+        // Avoid isolated-deinit back deployment on older Swift runtimes. The token
+        // owner performs Foundation cleanup; all view operations remain MainActor.
+        nonisolated deinit {}
     }
 }

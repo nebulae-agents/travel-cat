@@ -162,12 +162,13 @@ extension AgentWorkbenchTests {
 extension AgentWorkbenchTests {
     @MainActor
     func testWorkbenchRenderWithPendingPermission() async throws {
-        // This may be the first AppKit test in the CI process.
+        // Initialize this fixture's AppKit dependency explicitly.
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let client = WorkbenchTestRuntime()
         let model = AgentWorkbenchModel(root: root, credentials: WorkbenchTestCredentials(), client: client)
+        defer { client.onPrompt = nil; model.shutdown() }
         var agent = instance(); agent.provider.model = "test"; agent.name = "项目开发助手"
         try model.save(instance: agent, newKey: "canary")
         client.onPrompt = {
@@ -176,12 +177,22 @@ extension AgentWorkbenchTests {
         }
         await model.start(instanceID: agent.id, text: "检查项目并生成改进报告")
         let view = NSHostingView(rootView: AgentWorkbenchView(model: model).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light))
+        // Match the fixed-size hosting used by TravelUtilityWindowController.
+        view.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 740), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .aqua)
         view.appearance = NSAppearance(named: .aqua)
         window.contentView = view
         if ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] != nil { window.orderFrontRegardless() }
-        defer { window.orderOut(nil) }
+        defer {
+            window.orderOut(nil)
+            // Detach the test host before model shutdown publishes final state.
+            window.contentView = nil
+            window.close()
+            XCTAssertNil(window.contentView)
+            XCTAssertFalse(window.isVisible)
+        }
         view.frame = NSRect(x: 0, y: 0, width: 1000, height: 740)
         view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(300))
@@ -193,7 +204,6 @@ extension AgentWorkbenchTests {
         if let path = ProcessInfo.processInfo.environment["TRAVELCAT_AGENT_RENDER"] {
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: path))
         }
-        model.shutdown()
     }
 }
 
