@@ -52,6 +52,10 @@ final class AgentWorkbenchModel: ObservableObject {
     @Published var nativeNotice: String?
     @Published var nativeLoginIDs: [UUID: String] = [:]
     private var decidingCalls: Set<UUID> = []
+    var hasConversationDecisionInFlight: Bool { !decidingCalls.isEmpty || !nativeDeciding.isEmpty }
+    @Published var conversationNavigationRevision = 0
+    @Published var conversationControls: Set<UUID> = []
+    @Published var acpPermissionReplies: [UUID: Set<String>] = [:]
     @Published var selectedTaskID: UUID?
     @Published var preferredInstanceID: UUID?
     @Published var error: String?
@@ -137,6 +141,8 @@ final class AgentWorkbenchModel: ObservableObject {
             guard let self, self.isStorageReady else { return }
             for index in self.state.tasks.indices where self.liveTasks.contains(self.state.tasks[index].id) {
                 if self.state.tasks[index].status.active { self.state.tasks[index].status = .unknown; self.state.tasks[index].unread = true }
+                self.state.tasks[index].cleanupEvidence = nil
+                if self.state.tasks[index].requiresConversationAttention { self.state.tasks[index].archivedAt = nil }
             }
             for index in self.state.tasks.indices where self.state.tasks[index].nativeState != nil {
                 self.state.tasks[index].nativeState?.connection = .disconnected
@@ -169,10 +175,11 @@ final class AgentWorkbenchModel: ObservableObject {
         preferredInstanceID = id
         let tasks = state.tasks.filter { $0.instanceID == id }.sorted { $0.createdAt > $1.createdAt }
         let pending = Set(permissions.map(\.taskID) + modelApprovals.map(\.taskID))
-        selectedTaskID = (tasks.first { pending.contains($0.id) }
+        let selection = (tasks.first { pending.contains($0.id) }
             ?? tasks.first { $0.unread }
             ?? tasks.first { $0.status.active }
             ?? tasks.first)?.id
+        if let selection { openConversation(selection) } else { selectedTaskID = nil }
     }
 
     func save(instance: WorkbenchInstance, newKey: String) throws {
@@ -404,7 +411,7 @@ final class AgentWorkbenchModel: ObservableObject {
         persist()
     }
     func canReply(_ id: UUID) -> Bool {
-        isStorageReady && !nativeBackgroundStopping.contains(id) && !nativeRecovering.contains(id) && !nativeDetaching.contains(id) && liveTasks.contains(id) && state.tasks.first(where: { $0.id == id }).map {
+        isStorageReady && acpPermissionReplies[id]?.isEmpty != false && !conversationControls.contains(id) && !nativeBackgroundStopping.contains(id) && !nativeRecovering.contains(id) && !nativeDetaching.contains(id) && liveTasks.contains(id) && state.tasks.first(where: { $0.id == id }).map {
             ($0.nativeState == nil || $0.nativeState?.connection == .connected) &&
             ($0.status == .completed || $0.status == .cancelled || ($0.nativeState != nil && $0.status == .failed)) && !($0.sessionID ?? "").isEmpty
         } == true
@@ -417,7 +424,12 @@ final class AgentWorkbenchModel: ObservableObject {
     func respond(_ request: WorkbenchPermission, option: WorkbenchPermission.Option) async {
         guard isStorageReady else { return }
         if request.nativeBinding != nil { await respondNative(request, option: option); return }
-        guard permissions.contains(where: { $0.id == request.id && $0.taskID == request.taskID }) else { return }
+        guard permissions.contains(where: { $0.id == request.id && $0.taskID == request.taskID }),
+              acpPermissionReplies[request.taskID, default: []].insert(request.id).inserted else { return }
+        defer {
+            acpPermissionReplies[request.taskID]?.remove(request.id)
+            if acpPermissionReplies[request.taskID]?.isEmpty == true { acpPermissionReplies.removeValue(forKey: request.taskID) }
+        }
         permissions.removeAll { $0.id == request.id && $0.taskID == request.taskID }
         do {
             _ = try await client.request("permission", ["taskId": request.taskID.uuidString, "requestId": request.id, "optionId": option.id])
@@ -427,6 +439,8 @@ final class AgentWorkbenchModel: ObservableObject {
     func cancel(_ id: UUID) async {
         guard isStorageReady else { return }
         if state.tasks.first(where: { $0.id == id })?.nativeState != nil { await cancelNative(id); return }
+        guard conversationControls.insert(id).inserted else { return }
+        defer { conversationControls.remove(id) }
         mutate(id) { $0.status = .cancelling }
         do { _ = try await client.request("cancel", ["taskId": id.uuidString]) }
         catch { fail(id, error) }
@@ -435,13 +449,24 @@ final class AgentWorkbenchModel: ObservableObject {
         guard isStorageReady else { return }
         invalidateArtifactReads(id)
         if state.tasks.first(where: { $0.id == id })?.nativeState != nil { await detachNative(id); return }
+        guard let stoppedTask = state.tasks.first(where: { $0.id == id }) else { return }
+        let stoppedSession = stoppedTask.sessionID
+        guard conversationControls.insert(id).inserted else { return }
+        defer { conversationControls.remove(id) }
         do {
             let result = try await client.request("stop", ["taskId": id.uuidString])
+            guard let current = state.tasks.first(where: { $0.id == id }), current.sessionID == stoppedSession else {
+                error = "清理回执与当前会话不匹配，请重新核对；当前记录已保留。"; return
+            }
             permissions.removeAll { $0.taskID == id }; modelApprovals.removeAll { $0.taskID == id }
             if result["stopped"] as? Bool == true {
                 liveTasks.remove(id)
                 applyScheduledRetention()
-                mutate(id) { if $0.status.active { $0.status = .cancelled }; $0.messages.append(.init(role: "system", text: "会话已关闭。")) }
+                mutate(id) {
+                    if $0.status.active { $0.status = .cancelled }
+                    $0.cleanupEvidence = .init(taskID: id, sessionID: $0.sessionID, confirmedAt: Date())
+                    $0.messages.append(.init(role: "system", text: "会话已关闭。"))
+                }
             } else {
                 mutate(id) { $0.status = .unknown; $0.messages.append(.init(role: "system", text: "容器清理尚未确认，请检查连接并重试结束会话。")) }
             }
@@ -581,6 +606,7 @@ final class AgentWorkbenchModel: ObservableObject {
                   auditError == nil else { return }
             modelApprovals.removeAll { $0.id == callID }
             modelApprovals.append(.init(taskID: id, callID: callID, requestHash: hash, destination: destination, model: model))
+            mutate(id) { $0.archivedAt = nil }
         case "permission":
             guard let requestID = data["requestId"] as? String else { return }
             let options = (data["options"] as? [[String: Any]] ?? []).compactMap { item -> WorkbenchPermission.Option? in
@@ -622,7 +648,9 @@ final class AgentWorkbenchModel: ObservableObject {
     func mutate(_ id: UUID, _ change: (inout WorkbenchTask) -> Void) {
         guard isStorageReady else { return }
         guard let index = state.tasks.firstIndex(where: { $0.id == id }) else { return }
+        let previousSessionID = state.tasks[index].sessionID
         change(&state.tasks[index])
+        state.tasks[index].normalizeConversationMetadata(previousSessionID: previousSessionID, isLive: liveTasks.contains(id), pending: pendingConversationTaskIDs.contains(id))
         // Session output is bounded by the runtime; preserve the full accepted event history.
         saveTask?.cancel()
         saveTask = Task { [weak self] in
@@ -632,7 +660,11 @@ final class AgentWorkbenchModel: ObservableObject {
     func fail(_ id: UUID, _ failure: Error) {
         let cleaned = (failure as? WorkbenchFailure)?.taskRetained == false
         if cleaned { liveTasks.remove(id) }
-        mutate(id) { $0.status = cleaned ? .failed : .unknown; $0.messages.append(.init(role: "system", text: failure.localizedDescription)); $0.unread = true }
+        mutate(id) {
+            $0.status = cleaned ? .failed : .unknown
+            if cleaned, $0.nativeState == nil { $0.cleanupEvidence = .init(taskID: id, sessionID: $0.sessionID, confirmedAt: Date()) }
+            $0.messages.append(.init(role: "system", text: failure.localizedDescription)); $0.unread = true
+        }
         permissions.removeAll { $0.taskID == id }; modelApprovals.removeAll { $0.taskID == id }; persist()
     }
     func persist() {

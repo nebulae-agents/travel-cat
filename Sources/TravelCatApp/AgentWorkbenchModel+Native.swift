@@ -371,7 +371,7 @@ extension AgentWorkbenchModel {
                       !["agentMessage", "userMessage"].contains(saved.kind) else { return }
                 do {
                     try nativeRecord(id, kind: "native.event", fields: ["method": method, "params": params])
-                    mergeNativeItem(id, item: item, turnID: turn, completedEvent: true, isLiveCompletion: true)
+                    mergeNativeItem(id, item: item, turnID: turn, completedEvent: true, isLiveCompletion: true, isRuntimeEvent: true)
                     try persistNative()
                 } catch { self.error = error.localizedDescription }
                 return
@@ -406,14 +406,20 @@ extension AgentWorkbenchModel {
                 }
             case "turn/completed":
                 guard let turn, turn == state.tasks.first(where: { $0.id == id })?.nativeState?.turnID else { return }
+                let previousOutcome = task.nativeState?.turnStatuses?[turn]
+                let outcome = NativeTaskState.terminalTurnStatuses.contains(previousOutcome ?? "") ? previousOutcome : turnObject?["status"] as? String
+                let newOutcome = previousOutcome != outcome || task.status != nativeStatus(outcome)
                 mutate(id) {
                     $0.nativeState?.recordTurnStatus(turn, status: turnObject?["status"] as? String)
                     $0.status = nativeStatus($0.nativeState?.turnStatuses?[turn] ?? turnObject?["status"] as? String)
-                    $0.unread = true; $0.nativeState?.pendingOperation?.status = .confirmed
+                    if newOutcome { $0.unread = true }
+                    $0.nativeState?.pendingOperation?.status = .confirmed
                 }
                 permissions.removeAll { $0.taskID == id }
-                invalidateNativeBackgroundStatus(id)
-                Task { [weak self] in await self?.reconcileNativeHistory(id) }
+                if newOutcome {
+                    invalidateNativeBackgroundStatus(id)
+                    Task { [weak self] in await self?.reconcileNativeHistory(id) }
+                }
             case "permission":
                 guard let requestID = params["requestId"] as? String, let hash = params["requestHash"] as? String,
                       let turn, let item = params["itemId"] as? String, let expiry = params["expiresAt"] as? Double,
@@ -435,7 +441,7 @@ extension AgentWorkbenchModel {
                 mutate(id) { if $0.status == .awaitingPermission && !permissions.contains(where: { $0.taskID == id }) { $0.status = .running } }
             case "item/started", "item/completed":
                 if let item = params["item"] as? [String: Any] {
-                    mergeNativeItem(id, item: item, turnID: turn, completedEvent: method == "item/completed", isLiveCompletion: method == "item/completed")
+                    mergeNativeItem(id, item: item, turnID: turn, completedEvent: method == "item/completed", isLiveCompletion: method == "item/completed", isRuntimeEvent: true)
                     if method == "item/completed", let itemID = item["id"] as? String {
                         permissions.removeAll { $0.taskID == id && $0.nativeBinding?.itemID == itemID }
                         mutate(id) {
@@ -446,7 +452,7 @@ extension AgentWorkbenchModel {
                 }
             case "item/agentMessage/delta", "item/commandExecution/outputDelta":
                 guard let itemID = params["itemId"] as? String, let delta = params["delta"] as? String else { return }
-                mutate(id) { task in
+                mutateNativeConversationEvent(id) { task in
                     if let index = task.nativeState?.items.firstIndex(where: { $0.id == itemID }) {
                         guard task.nativeState?.items[index].hasTerminalEvidence != true else { return }
                         task.nativeState?.items[index].detail += delta
@@ -468,7 +474,7 @@ extension AgentWorkbenchModel {
         else { task.messages.append(.init(role: role, text: text, runtimeItemID: itemID)) }
     }
 
-    func mergeNativeItem(_ id: UUID, item: [String: Any], turnID: String?, completedEvent: Bool = false, isLiveCompletion: Bool = false) {
+    func mergeNativeItem(_ id: UUID, item: [String: Any], turnID: String?, completedEvent: Bool = false, isLiveCompletion: Bool = false, isRuntimeEvent: Bool = false) {
         guard let itemID = item["id"] as? String, let kind = item["type"] as? String else { return }
         let detail: String
         if let text = item["text"] as? String { detail = text }
@@ -480,7 +486,7 @@ extension AgentWorkbenchModel {
             status: item["status"] as? String ?? "unknown",
             completionObserved: NativeTimelineItem.terminalStatuses(for: kind).contains(item["status"] as? String ?? "") || completedEvent && NativeTimelineItem.statuslessKinds.contains(kind))
         incoming.liveCompletionObserved = isLiveCompletion && incoming.hasTerminalEvidence ? true : nil
-        mutate(id) { task in
+        mutateNativeConversationEvent(id, isRuntimeEvent: isRuntimeEvent) { task in
             if let saved = task.nativeState?.items.first(where: { $0.id == itemID }) {
                 guard saved.accepts(incoming) else { return }
                 if saved.hasTerminalEvidence { incoming.reconciledStatus = saved.reconciledStatus }
