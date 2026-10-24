@@ -56,6 +56,12 @@ enum WorkbenchConversationPresentation {
         task.messages.filter { !isProcessMessage($0) && ($0.role != "assistant" || !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
     }
     static func processMessages(_ task: WorkbenchTask) -> [WorkbenchMessage] { task.messages.filter(isProcessMessage) }
+    static func latestAssistantBody(_ task: WorkbenchTask) -> WorkbenchMessage? {
+        task.messages.last { $0.role == "assistant" && $0.sourceKind != "acp.agent_thought_chunk" }
+    }
+    static func thinkingItems(_ task: WorkbenchTask) -> [AgentThinkingContent] {
+        task.nativeState?.items.compactMap(AgentThinkingContent.native) ?? []
+    }
     static func processItems(_ task: WorkbenchTask) -> [NativeTimelineItem] {
         task.nativeState?.items.filter { !["agentMessage", "userMessage", "reasoning"].contains($0.kind) } ?? []
     }

@@ -14,6 +14,8 @@ struct AgentConversationView: View {
     let audit: () -> Void
     let handoff: (WorkbenchInstance) -> Void
     let settings: () -> Void
+    @StateObject private var thinkingExpansion = AgentThinkingExpansion()
+    @StateObject private var nativeThinking = AgentNativeThinkingCache()
     @State private var conversationIsVisible = false
     @State private var backgroundObservationToken: UUID?
     @State private var showingDetails = false
@@ -104,7 +106,7 @@ struct AgentConversationView: View {
                 Button("制品与文件…", action: artifacts)
                 Button("调用与审计…", action: audit)
                 Menu("交接给其他 Agent") { ForEach(model.state.instances) { instance in Button(instance.name) { handoff(instance) } } }
-                    .disabled(task.messages.last(where: { $0.role == "assistant" }) == nil)
+                    .disabled(WorkbenchConversationPresentation.latestAssistantBody(task) == nil)
                 if let parent = task.parentTaskID { Button("查看上游对话") { model.openConversation(parent) } }
                 Divider()
                 Button("Agent 设置…", action: settings)
@@ -143,6 +145,9 @@ struct AgentConversationView: View {
                         if task.status == .running || task.status == .connecting {
                             HStack(spacing: 9) { ProgressView().controlSize(.small); Text(task.status == .connecting ? "正在建立会话…" : "正在处理…").font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted) }
                         }
+                        ForEach(nativeThinking.contents(for: task)) { content in
+                            AgentThinkingDisclosureView(taskID: task.id, content: content, expansion: thinkingExpansion).padding(.leading, 36)
+                        }
                         let count = WorkbenchConversationPresentation.processItems(task).count + WorkbenchConversationPresentation.processMessages(task).count
                         HStack(spacing: 18) {
                             if count > 0 {
@@ -178,7 +183,11 @@ struct AgentConversationView: View {
                 Image(systemName: instance?.symbol ?? "sparkles").font(.system(size: 12)).foregroundStyle(WorkbenchTheme.accent).frame(width: 24, height: 24).background(WorkbenchTheme.sidebar, in: RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 8) {
                     Text(instance?.name ?? "Agent").font(.system(size: 12, weight: .medium)).foregroundStyle(WorkbenchTheme.muted)
-                    AgentMarkdownMessageView(text: message.text)
+                    if let content = AgentThinkingContent.acp(message) {
+                        AgentThinkingDisclosureView(taskID: task.id, content: content, expansion: thinkingExpansion)
+                    } else {
+                        AgentMarkdownMessageView(text: message.text)
+                    }
                 }
             }
         } else {

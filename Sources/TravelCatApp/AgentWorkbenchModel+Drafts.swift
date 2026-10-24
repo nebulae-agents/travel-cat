@@ -18,6 +18,18 @@ extension AgentWorkbenchModel {
             self?.persist()
         }
     }
+    @discardableResult func prepareHandoff(from taskID: UUID, to instanceID: UUID) -> Bool {
+        guard isStorageReady, state.instances.contains(where: { $0.id == instanceID }),
+              let task = state.tasks.first(where: { $0.id == taskID }),
+              let reply = WorkbenchConversationPresentation.latestAssistantBody(task) else { return false }
+        let text = "承接对话：\(task.title)\n\n上轮回复：\n" + reply.text
+        updateDraft(.new(instanceID)) { draft in
+            if !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft.text += "\n\n" + text } else { draft.text = text }
+            draft.parentTaskID = task.id
+        }
+        preferredInstanceID = instanceID; selectedTaskID = nil
+        return true
+    }
     func removeDraftParent(_ target: WorkbenchDraftTarget) {
         guard draft(for: target).parentTaskID != nil else { return }
         updateDraft(target) { $0.parentTaskID = nil }

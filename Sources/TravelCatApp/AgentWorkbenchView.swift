@@ -187,12 +187,8 @@ struct AgentWorkbenchView: View {
         }
     }
     private func handoff(_ task: WorkbenchTask, to instance: WorkbenchInstance) {
-        let text = "承接对话：\(task.title)\n\n上轮回复：\n" + (task.messages.last(where: { $0.role == "assistant" })?.text ?? "")
-        model.updateDraft(.new(instance.id)) { draft in
-            if !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft.text += "\n\n" + text } else { draft.text = text }
-            draft.parentTaskID = task.id
-        }
-        model.preferredInstanceID = instance.id; model.selectedTaskID = nil; focusRequest = UUID()
+        guard model.prepareHandoff(from: task.id, to: instance.id) else { return }
+        focusRequest = UUID()
     }
     private func instanceName(_ id: UUID) -> String { model.state.instances.first { $0.id == id }?.name ?? "已移除的 Agent" }
 }
