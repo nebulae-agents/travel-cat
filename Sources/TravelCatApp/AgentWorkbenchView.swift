@@ -10,6 +10,10 @@ struct AgentWorkbenchView: View {
     @State private var taskSheet: TaskSheet?
     private var selectedTask: WorkbenchTask? { model.state.tasks.first { $0.id == model.selectedTaskID } }
     private var selectedInstance: WorkbenchInstance? { model.state.instances.first { $0.id == model.preferredInstanceID } }
+    private var visibleTasks: [WorkbenchTask] {
+        WorkbenchConversationPresentation.tasks(model.state.tasks, instanceID: presentation.filterInstanceID,
+            query: presentation.query, scope: presentation.scope, pendingTaskIDs: model.pendingConversationTaskIDs)
+    }
     private var newTarget: WorkbenchDraftTarget { .new(model.preferredInstanceID) }
     private var newDraft: Binding<WorkbenchSubmissionDraft> {
         let target = newTarget
@@ -46,10 +50,13 @@ struct AgentWorkbenchView: View {
         .frame(minWidth: 760, minHeight: 600).workbenchSurface()
         .background(WorkbenchReadReceipt(taskID: showingSettings || taskSheet != nil ? nil : model.selectedTaskID,
             unread: selectedTask?.unread ?? false, acknowledge: { model.markRead($0) }).frame(width: 0, height: 0))
-        .onAppear { if model.preferredInstanceID == nil, let first = model.state.instances.first { model.openInstance(first.id) } }
-        .onChange(of: model.selectedTaskID) { _, _ in
-            if let selectedTask, let filter = presentation.filterInstanceID, selectedTask.instanceID != filter { presentation.filterInstanceID = nil }
+        .onAppear {
+            if model.preferredInstanceID == nil, let first = model.state.instances.first { model.openInstance(first.id) }
+            revealSelection()
         }
+        .onChange(of: model.selectedTaskID) { _, _ in revealSelection() }
+        .onChange(of: model.conversationNavigationRevision) { _, _ in revealSelection() }
+        .onChange(of: selectedTask?.archivedAt) { _, _ in revealSelection() }
         .sheet(isPresented: $showingSettings) { AgentWorkbenchSettingsView(model: model, didCreate: { id in model.preferredInstanceID = id; model.selectedTaskID = nil; focusRequest = UUID() }) }
         .sheet(item: $taskSheet) { sheet in
             switch sheet.kind {
@@ -92,6 +99,12 @@ struct AgentWorkbenchView: View {
                     let count = model.permissions.count + model.modelApprovals.count
                     if count > 0 { Button("\(count) 待确认") { openPending() }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(CottageTheme.terracotta) }
                 }
+                TextField("搜索标题和消息", text: Binding(get: { presentation.query }, set: { presentation.updateQuery($0) }))
+                    .textFieldStyle(.roundedBorder).accessibilityLabel("搜索标题和消息")
+                if let error = presentation.queryError { Text(error).font(.caption).foregroundStyle(CottageTheme.terracotta) }
+                Picker("对话范围", selection: $presentation.scope) {
+                    ForEach(WorkbenchConversationScope.allCases) { Text($0.title).tag($0) }
+                }.pickerStyle(.segmented).labelsHidden()
                 Picker("按 Agent 筛选", selection: $presentation.filterInstanceID) {
                     Text("全部 Agent").tag(Optional<UUID>.none)
                     ForEach(model.state.instances) { Text($0.name).tag(Optional($0.id)) }
@@ -99,23 +112,24 @@ struct AgentWorkbenchView: View {
             }.padding(.horizontal, 5).padding(.top, 4)
             ScrollView {
                 LazyVStack(spacing: 5) {
-                    ForEach(WorkbenchConversationPresentation.tasks(model.state.tasks, instanceID: presentation.filterInstanceID)) { task in
+                    ForEach(visibleTasks) { task in
                         Button {
                             model.selectedTaskID = task.id
                             model.preferredInstanceID = task.instanceID
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
                                 HStack {
-                                    Text(WorkbenchConversationPresentation.shortTitle(task.title)).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                                    Text(WorkbenchConversationPresentation.shortTitle(task.displayTitle)).font(.system(size: 13, weight: .medium)).lineLimit(1)
                                     Spacer(minLength: 2)
+                                    if task.pinnedAt != nil { Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(WorkbenchTheme.accent).accessibilityLabel("已置顶") }
                                     if task.unread { Circle().fill(CottageTheme.terracotta).frame(width: 5, height: 5) }
                                 }
                                 Text("\(instanceName(task.instanceID)) · \(task.status.title)").font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted).lineLimit(1)
                             }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(model.selectedTaskID == task.id ? WorkbenchTheme.selection : .clear, in: RoundedRectangle(cornerRadius: 8)).contentShape(Rectangle())
-                        }.buttonStyle(.plain).help(task.title)
+                        }.buttonStyle(.plain).help(task.displayTitle)
                     }
-                    if model.state.tasks.isEmpty { Text("对话会保留在这里。").font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted).padding(.top, 12) }
+                    if visibleTasks.isEmpty { Text(presentation.query.isEmpty ? (presentation.scope == .archived ? "暂无已归档对话。" : "对话会保留在这里。") : "没有匹配的对话。").font(.system(size: 12)).foregroundStyle(WorkbenchTheme.muted).padding(.top, 12) }
                 }
             }
             Divider()
@@ -142,11 +156,14 @@ struct AgentWorkbenchView: View {
                 }
                 let canSend = model.isStorageReady && !model.isStarting && !model.isDraftSubmitting(newTarget) && selectedInstance != nil && !newDraft.wrappedValue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 AgentComposerView(draft: newDraft, instance: selectedInstance,
-                    parentTitle: model.state.tasks.first(where: { $0.id == newDraft.wrappedValue.parentTaskID })?.title,
+                    parentTitle: model.state.tasks.first(where: { $0.id == newDraft.wrappedValue.parentTaskID })?.displayTitle,
                     removeParent: { model.removeDraftParent(newTarget) }, isNew: true, canSend: canSend, focusRequest: focusRequest,
                     hint: model.isDraftSubmitting(newTarget) ? "正在确认提交结果，草稿会保留到确认成功；新编辑的内容会独立保留。" : (model.isStarting ? "正在建立新对话，输入中的新内容会保留为草稿。" : nil), allowModelAccess: modelConsent, onFailure: { model.error = $0 }, send: start)
             }.padding(24).frame(maxWidth: 780)
         }.background(WorkbenchTheme.canvas)
+    }
+    private func revealSelection() {
+        if let selectedTask { presentation.reveal(selectedTask, pendingTaskIDs: model.pendingConversationTaskIDs) }
     }
     private func openNewConversation() {
         model.selectedTaskID = nil
@@ -155,7 +172,7 @@ struct AgentWorkbenchView: View {
     }
     private func openPending() {
         let ids = Set(model.permissions.map(\.taskID) + model.modelApprovals.map(\.taskID))
-        if let task = model.state.tasks.first(where: { ids.contains($0.id) }) { model.selectedTaskID = task.id; model.preferredInstanceID = task.instanceID }
+        if let task = model.state.tasks.first(where: { ids.contains($0.id) }) { model.openConversation(task.id) }
     }
     private func start() {
         guard let instance = selectedInstance, !model.isStarting else { return }

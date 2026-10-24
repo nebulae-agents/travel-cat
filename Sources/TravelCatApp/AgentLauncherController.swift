@@ -125,9 +125,8 @@ final class AgentLauncherController: NSObject, NSWindowDelegate {
         closeInbox()
         switch entry.destination {
         case .task(let taskID):
-            guard let task = model?.state.tasks.first(where: { $0.id == taskID }) else { return }
-            model?.preferredInstanceID = task.instanceID
-            model?.selectedTaskID = taskID
+            guard model?.state.tasks.contains(where: { $0.id == taskID }) == true else { return }
+            model?.openConversation(taskID)
             action()
         case .postcard(let eventID): openPostcard(eventID)
         }
