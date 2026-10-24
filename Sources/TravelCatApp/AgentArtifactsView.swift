@@ -30,7 +30,7 @@ private enum ArtifactPresentation {
             }
             return .image(NSImage(cgImage:image,size:.zero))
         }
-        if let text = String(data:bytes,encoding:.utf8), !text.unicodeScalars.contains(where:{ $0.value == 0 || ($0.value < 32 && ![9,10,13].contains($0.value)) }) {
+        if let text = WorkbenchArtifactText.decode(bytes) {
             return .text(text)
         }
         return .unsupported("此格式暂不支持内嵌预览，请下载后核对。")
@@ -51,6 +51,9 @@ struct AgentArtifactsView: View {
     @State private var issue: String?
     @State private var notice: String?
     @State private var pageIndex = 0
+    @State private var comparison: WorkbenchArtifactComparison?
+    private var currentFile: WorkbenchArtifact? { model.artifactInventories[taskID]?.files.first { $0.path == preview?.artifact.path } }
+    private var previewStatus: WorkbenchArtifactPreview.VersionStatus { preview?.versionStatus(current:currentFile) ?? .unverified }
 
     var body: some View {
         VStack(alignment:.leading,spacing:12) {
@@ -60,8 +63,11 @@ struct AgentArtifactsView: View {
                 Button("刷新",systemImage:"arrow.clockwise") { refresh() }.disabled(busy)
                 Button("关闭") { generation = UUID(); dismiss() }.keyboardShortcut(.cancelAction)
             }
-            Text("此任务工作目录的文件，列表不代表全部为本轮新建。单个文件最多 4 MiB。")
+            Text("相对实际提交前的 SHA 基线核对变化，不代表作者归属。单文件最多读取 4 MiB；只在提交任务或主动读取时扫描。")
                 .font(.caption).foregroundStyle(CottageTheme.mutedInk)
+            if let inventory = model.artifactInventories[taskID] {
+                Text(inventory.notice).font(.caption).foregroundStyle(CottageTheme.mutedInk)
+            }
             HSplitView {
                 ScrollView {
                     LazyVStack(alignment:.leading,spacing:5) {
@@ -69,10 +75,11 @@ struct AgentArtifactsView: View {
                             Button { select(file) } label: {
                                 VStack(alignment:.leading,spacing:3) {
                                     Text(file.path).lineLimit(2).multilineTextAlignment(.leading)
-                                    Text(ByteCountFormatter.string(fromByteCount:Int64(file.size),countStyle:.file)).font(.caption).foregroundStyle(CottageTheme.mutedInk)
+                                    Text(file.changeLabel + " · " + ByteCountFormatter.string(fromByteCount:Int64(file.size),countStyle:.file)).font(.caption).foregroundStyle(CottageTheme.mutedInk)
+                                    if file.sha256 == nil { Text("SHA 未核实" + (file.readable ? "" : " · 仅元数据")).font(.caption2).foregroundStyle(CottageTheme.mutedInk) }
                                 }.frame(maxWidth:.infinity,alignment:.leading).padding(8)
                                     .background(selected == file.path ? CottageTheme.moss.opacity(0.12) : Color.clear).clipShape(RoundedRectangle(cornerRadius:8))
-                            }.buttonStyle(.plain).disabled(busy)
+                            }.buttonStyle(.plain).disabled(busy || !file.readable)
                         }
                         if files.isEmpty && !busy { Text("暂无可读取的文件").font(.callout).foregroundStyle(CottageTheme.mutedInk).padding(8) }
                     }
@@ -80,16 +87,30 @@ struct AgentArtifactsView: View {
                 VStack(alignment:.leading,spacing:8) {
                     if let preview, let presentation {
                         Text(preview.artifact.path).font(CottageTheme.heading).lineLimit(2).textSelection(.enabled)
-                        previewContent(presentation).frame(maxWidth:.infinity,maxHeight:.infinity)
-                        Text("确认只记录此文件的当前内容版本，与任务审批、已读和执行完成分别保存。")
+                        Text("预览 SHA：" + preview.sha256).font(.caption2).textSelection(.enabled).lineLimit(2)
+                        if previewStatus == .old {
+                            HStack {
+                                Text("当前文件已变化，下面保留的是旧预览。下载仍保存旧字节。").font(.caption).foregroundStyle(CottageTheme.terracotta)
+                                Button("读取新版本") { if let currentFile { select(currentFile) } }.disabled(busy)
+                                Button("比较新版本") { compareLatest() }.disabled(busy)
+                            }
+                        } else if previewStatus == .unverified {
+                            Text("当前 SHA 未核实；此处是已读取的预览，刷新后可重新核对。").font(.caption).foregroundStyle(CottageTheme.mutedInk)
+                        }
+                        if let comparison {
+                            HStack { Text("已查看版本比较").font(.caption); Spacer(); Button("返回预览") { self.comparison = nil } }
+                            ReadOnlyArtifactText(text:comparison.text).frame(maxWidth:.infinity,maxHeight:.infinity).background(CottageTheme.card)
+                        } else { previewContent(presentation).frame(maxWidth:.infinity,maxHeight:.infinity) }
+                        history(path:preview.artifact.path)
+                        Text("确认前会重新读取当前 SHA；确认记录按路径和 SHA 保留，与审批、已读和执行完成分别保存。")
                             .font(.caption).foregroundStyle(CottageTheme.mutedInk)
                         HStack {
                             if presentation.canConfirm {
                                 Button(model.isArtifactConfirmed(taskID:taskID,preview:preview) ? "此版本已确认" : "确认此版本") { confirm(preview) }
-                                    .disabled(busy || model.isArtifactConfirmed(taskID:taskID,preview:preview))
+                                    .disabled(busy || comparison != nil || previewStatus == .old || model.isArtifactConfirmed(taskID:taskID,preview:preview))
                             }
                             Spacer()
-                            Button("下载预览版本",systemImage:"arrow.down.to.line") { download(preview) }.disabled(busy)
+                            Button(previewStatus == .old ? "下载旧预览版本" : "下载预览版本",systemImage:"arrow.down.to.line") { download(preview) }.disabled(busy)
                         }
                     } else {
                         Spacer(); Text(busy ? "正在读取…" : "选择一个文件进行只读预览").foregroundStyle(CottageTheme.mutedInk).frame(maxWidth:.infinity); Spacer()
@@ -99,9 +120,10 @@ struct AgentArtifactsView: View {
             if busy { ProgressView().controlSize(.small) }
             if let issue { Text(issue).font(.callout).foregroundStyle(CottageTheme.terracotta).textSelection(.enabled) }
             if let notice { Text(notice).font(.callout).foregroundStyle(CottageTheme.moss) }
+            if let reason = model.artifactHistoryNotice[taskID] { Text(reason).font(.caption).foregroundStyle(CottageTheme.mutedInk) }
         }.padding(18).frame(minWidth:540,idealWidth:780,maxWidth:820,minHeight:380,idealHeight:580,maxHeight:620)
             .cottageSurface().onAppear { refresh() }.onDisappear { generation = UUID() }
-            .onChange(of:taskID) { _,_ in generation = UUID(); busy = false; files = []; selected = nil; preview = nil; presentation = nil; refresh() }
+            .onChange(of:taskID) { _,_ in generation = UUID(); busy = false; files = []; selected = nil; preview = nil; presentation = nil; comparison = nil; refresh() }
     }
     @ViewBuilder private func previewContent(_ content: ArtifactPresentation) -> some View {
         switch content {
@@ -124,7 +146,6 @@ struct AgentArtifactsView: View {
     }
     private func refresh() {
         guard !busy else { return }; busy = true; issue = nil; notice = nil
-        preview = nil; presentation = nil; selected = nil
         let token = UUID(); generation = token; let id = taskID
         Task { @MainActor in
             do { let result = try await model.listArtifacts(taskID:id); guard generation == token, taskID == id else { return }; files = result }
@@ -133,13 +154,61 @@ struct AgentArtifactsView: View {
         }
     }
     private func select(_ file: WorkbenchArtifact) {
-        guard !busy else { return }; busy = true; issue = nil; notice = nil; selected = file.path; preview = nil; presentation = nil
+        guard !busy else { return }; busy = true; issue = nil; notice = nil
+        if selected != file.path { preview = nil; presentation = nil }
+        selected = file.path; comparison = nil
         let token = UUID(); generation = token; let id = taskID
         Task { @MainActor in
             do {
                 let result = try await model.loadArtifact(taskID:id,artifact:file)
                 guard generation == token, taskID == id, selected == file.path else { return }
                 preview = result; presentation = .decode(result); pageIndex = 0
+                do { try model.rememberArtifactPreview(taskID:id,preview:result) }
+                catch { issue = "预览已读取，但查看历史未保存：" + error.localizedDescription }
+            } catch { guard generation == token, taskID == id else { return }; issue = error.localizedDescription }
+            if generation == token { busy = false }
+        }
+    }
+    @ViewBuilder private func history(path: String) -> some View {
+        let versions = model.artifactHistory(taskID:taskID,path:path)
+        let confirmations = model.state.tasks.first { $0.id == taskID }?.artifactReviews?.filter { $0.path == path } ?? []
+        DisclosureGroup("最近两次已查看版本（较旧确认只保留 SHA 元数据）") {
+            VStack(alignment:.leading,spacing:5) {
+                ForEach(versions) { version in
+                    HStack {
+                        Text(String(version.sha256.prefix(12)) + " · " + version.viewedAt.formatted(date:.abbreviated,time:.shortened)).font(.caption).textSelection(.enabled)
+                        if let preview { Button("与预览比较") { comparison = .compare(old:version,current:preview) }.disabled(busy) }
+                        if version.text != nil {
+                            Button("查看已存正文") {
+                                issue = nil; notice = nil
+                                do {
+                                    try model.viewSavedArtifactVersion(taskID:taskID,version:version) { saved in
+                                        preview = saved; selected = path; presentation = .decode(saved); comparison = nil; pageIndex = 0
+                                    }
+                                } catch { issue = "历史正文查看记录未能更新：" + error.localizedDescription }
+                            }.disabled(busy)
+                        } else { Text("仅元数据").font(.caption).foregroundStyle(CottageTheme.mutedInk) }
+                    }
+                }
+                if versions.isEmpty { Text("尚无已保存的查看历史。").font(.caption) }
+                Text("正文每个文件最多 256 KiB；总计 2 MiB。二进制、图片和 PDF 仅保存 SHA、大小；历史不代表完整任务差异。").font(.caption2).foregroundStyle(CottageTheme.mutedInk)
+                if !confirmations.isEmpty {
+                    Text("已确认 \(confirmations.count) 个内容版本；确认 SHA 独立保留。").font(.caption)
+                }
+            }.padding(.top,4)
+        }.font(.caption)
+    }
+    private func compareLatest() {
+        guard !busy, let old = preview, let file = currentFile else { return }
+        busy = true; issue = nil; let token = generation; let id = taskID
+        Task { @MainActor in
+            do {
+                let current = try await model.loadArtifact(taskID:id,artifact:file)
+                guard generation == token, taskID == id, preview == old else { return }
+                let saved = WorkbenchArtifactVersion(path:old.artifact.path,sha256:old.sha256,size:old.bytes.count,viewedAt:Date(),text:WorkbenchArtifactText.savedText(old),reason:nil)
+                comparison = .compare(old:saved,current:current)
+                do { try model.rememberArtifactPreview(taskID:id,preview:current) }
+                catch { issue = "比较已读取，但查看历史未保存：" + error.localizedDescription }
             } catch { guard generation == token, taskID == id else { return }; issue = error.localizedDescription }
             if generation == token { busy = false }
         }

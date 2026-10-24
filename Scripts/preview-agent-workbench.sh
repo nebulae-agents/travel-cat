@@ -67,6 +67,7 @@ xcrun swiftc -target "$(uname -m)-apple-macos14.0" -swift-version 6 -parse-as-li
   "$project_root/Sources/TravelCatApp/AgentWorkbenchSettingsView.swift" \
   "$project_root/Sources/TravelCatApp/AgentInstanceEditor.swift" \
   "$project_root/Sources/TravelCatApp/AgentArtifactData.swift" \
+  "$project_root/Sources/TravelCatApp/AgentArtifactVersions.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchModel+Artifacts.swift" \
   "$project_root/Sources/TravelCatApp/AgentArtifactsView.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchView.swift" \
