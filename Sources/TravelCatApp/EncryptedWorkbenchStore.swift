@@ -4,6 +4,28 @@ import Foundation
 
 extension WorkbenchStore {
     @MainActor
+    static func encrypted(root: URL, credentials: any AsyncTravelServiceCredentialStoring) async throws -> WorkbenchStore {
+        let identifier = "workbench-content-v1"
+        let exists = try EncryptedWorkbenchStorage.hasSealedFile(root: root)
+        let value = try await credentials.read(id: identifier)
+        try Task.checkCancellation()
+        if let value {
+            guard let key = Data(base64Encoded: value), key.count == 32 else { throw WorkbenchFailure("对话加密密钥无效，原数据未修改。") }
+            return WorkbenchStore(root: root, keyData: key)
+        }
+        guard !exists else { throw WorkbenchFailure("对话加密密钥缺失，已保留密文；请恢复原钥匙串。") }
+        try Task.checkCancellation()
+        let key = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+        try await credentials.save(key.base64EncodedString(), id: identifier)
+        try Task.checkCancellation()
+        guard try await credentials.read(id: identifier) == key.base64EncodedString() else {
+            throw WorkbenchFailure("无法确认对话密钥已保存，未迁移原数据。")
+        }
+        try Task.checkCancellation()
+        return WorkbenchStore(root: root, keyData: key)
+    }
+
+    @MainActor
     static func encrypted(root: URL, credentials: any TravelServiceCredentialStoring) throws -> WorkbenchStore {
         let identifier = "workbench-content-v1"
         // Inspect storage even if a credential exists; errors must not become 'missing'.

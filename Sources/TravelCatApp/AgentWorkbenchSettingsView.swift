@@ -73,7 +73,7 @@ struct AgentWorkbenchSettingsView: View {
         .sheet(item: $editing) { instance in
             let adding = !model.state.instances.contains(where: { $0.id == instance.id })
             AgentInstanceEditor(instance: instance) { next, key in
-                try model.save(instance: next, newKey: key)
+                try await model.saveInstance(instance: next, newKey: key)
                 if adding { didCreate(next.id); dismiss() }
             }
         }
@@ -84,7 +84,7 @@ struct AgentWorkbenchSettingsView: View {
         }
         .alert("删除这个 Agent？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             Button("取消", role: .cancel) { removing = nil }
-            Button("删除 Agent", role: .destructive) { if let item = removing { model.remove(instanceID: item.id) }; removing = nil }
+            Button("删除 Agent", role: .destructive) { if let item = removing { Task { await model.removeInstance(instanceID: item.id) } }; removing = nil }.disabled(model.savingInstance)
         } message: { Text("已有任务和运行中的会话仍会受到原有保护规则限制。") }
     }
 

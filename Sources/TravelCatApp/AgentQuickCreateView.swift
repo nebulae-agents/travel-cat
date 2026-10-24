@@ -15,6 +15,7 @@ struct AgentQuickCreateView: View {
     @State private var formError: String?
     @State private var step = 0
     @State private var selectedContext = ""
+    @State private var saving = false
 
     private var selectedVerified: Bool {
         guard let selectedImage, let proof = model.probeVerification else { return false }
@@ -54,7 +55,7 @@ struct AgentQuickCreateView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("隔离容器清理待确认").font(.headline)
                             if let name = retained.containerName { Text(verbatim: name).font(.caption.monospaced()).textSelection(.enabled) }
-                            Button(model.probingLocal ? "清理中…" : "重试清理") { Task { await model.retryProbeCleanup() } }.disabled(model.probingLocal)
+                            Button(model.probingLocal ? "清理中…" : "重试清理") { Task { await model.retryProbeCleanup() } }.disabled(model.probingLocal || saving)
                         }.padding(12).background(WorkbenchTheme.warning, in: RoundedRectangle(cornerRadius: 9))
                     }
                     if step == 1, let selectedImage {
@@ -74,20 +75,20 @@ struct AgentQuickCreateView: View {
             }
             if let formError { Text(formError).font(.caption).foregroundStyle(CottageTheme.terracotta) }
             HStack {
-                Button("高级手动配置") { dismiss(); openManual() }.disabled(model.probingLocal)
+                Button("高级手动配置") { dismiss(); openManual() }.disabled(model.probingLocal || saving)
                 Spacer()
-                Button("取消") { dismiss() }.disabled(model.probingLocal).keyboardShortcut(.cancelAction)
-                if step > 0 { Button("上一步") { step -= 1 }.disabled(model.probingLocal) }
+                Button("取消") { dismiss() }.disabled(model.probingLocal || saving).keyboardShortcut(.cancelAction)
+                if step > 0 { Button("上一步") { step -= 1 }.disabled(model.probingLocal || saving) }
                 if step < 2 {
                     Button("下一步") { step += 1 }.buttonStyle(.borderedProminent)
                         .disabled(model.probingLocal || model.scanningLocal || (step == 0 ? selectedImage == nil : !selectedVerified || draft == nil))
                 } else {
-                    Button("保存 Agent") { saveDraft() }.buttonStyle(.borderedProminent).disabled(!selectedVerified || draft == nil)
+                    Button(saving ? "正在保存…" : "保存 Agent") { saveDraft() }.buttonStyle(.borderedProminent).disabled(!selectedVerified || draft == nil || saving)
                 }
             }
         }.padding(22).frame(width: min(700, (NSScreen.main?.visibleFrame.width ?? 900) - 100), height: min(600, (NSScreen.main?.visibleFrame.height ?? 800) - 100))
         .workbenchSurface()
-        .interactiveDismissDisabled(model.probingLocal)
+        .interactiveDismissDisabled(model.probingLocal || saving)
         .task { if model.localInventory == nil { await model.scanLocal() }; selectAvailableContext() }
         .onChange(of: model.localInventory) { _, _ in selectAvailableContext() }
         .onChange(of: selectedContext) { _, value in
@@ -218,11 +219,16 @@ struct AgentQuickCreateView: View {
         guard let draft, model.probeVerification == draft.verification else {
             formError = "兼容性检查已失效，请重新检查。"; return
         }
-        do {
-            let instance = try draft.validatedInstance()
-            try model.save(instance: instance, newKey: draft.newKey)
-            didSave(instance.id)
-            dismiss()
-        } catch { formError = error.localizedDescription }
+        guard !saving else { return }
+        saving = true
+        Task {
+            defer { saving = false }
+            do {
+                let instance = try draft.validatedInstance()
+                try await model.saveInstance(instance: instance, newKey: draft.newKey)
+                didSave(instance.id)
+                dismiss()
+            } catch { formError = error.localizedDescription }
+        }
     }
 }

@@ -5,11 +5,12 @@ import AppKit
 struct AgentInstanceEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State var instance: WorkbenchInstance
-    let save: (WorkbenchInstance, String) throws -> Void
+    let save: (WorkbenchInstance, String) async throws -> Void
     @State private var commandText = ""
     @State private var key = ""
     @State private var error: String?
     @State private var advanced = false
+    @State private var saving = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -43,18 +44,25 @@ struct AgentInstanceEditor: View {
                         Text("镜像需包含 Python 3.11+ 和 ACP 适配器；不会自动拉取。API Key 仅保存在宿主钥匙串，容器使用任务模型代理。").font(.caption).foregroundStyle(WorkbenchTheme.muted)
                     }
                 }
-            }.formStyle(.grouped).scrollContentBackground(.hidden)
+            }.formStyle(.grouped).scrollContentBackground(.hidden).disabled(saving)
             if let error { Text(error).foregroundStyle(CottageTheme.terracotta).font(.caption).textSelection(.enabled) }
             HStack {
-                Spacer(); Button("取消") { key = ""; dismiss() }.keyboardShortcut(.cancelAction)
-                Button("保存更改") {
+                Spacer(); Button("取消") { key = ""; dismiss() }.disabled(saving).keyboardShortcut(.cancelAction)
+                Button(saving ? "正在保存…" : "保存更改") {
+                    guard !saving else { return }
                     instance.command = commandText.components(separatedBy: .newlines).filter { !$0.isEmpty }
-                    do { try save(instance, key); key = ""; dismiss() }
-                    catch { self.error = error.localizedDescription; advanced = true }
-                }.buttonStyle(.borderedProminent)
+                    let candidate = instance, secret = key
+                    saving = true
+                    Task {
+                        defer { saving = false }
+                        do { try await save(candidate, secret); key = ""; dismiss() }
+                        catch { self.error = error.localizedDescription; advanced = true }
+                    }
+                }.buttonStyle(.borderedProminent).disabled(saving)
             }
         }.padding(22).frame(width: min(660, (NSScreen.main?.visibleFrame.width ?? 900) - 100), height: min(620, (NSScreen.main?.visibleFrame.height ?? 800) - 100))
         .workbenchSurface()
+        .interactiveDismissDisabled(saving)
         .onAppear { commandText = instance.command.joined(separator: "\n"); advanced = instance.image.isEmpty }
     }
 }

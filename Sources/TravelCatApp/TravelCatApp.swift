@@ -120,6 +120,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             refreshMenuState()
             agentWorkbench = AgentWorkbenchModel(root: applicationSupport.appendingPathComponent("TravelCatAgents", isDirectory: true))
             installDesktopPet(model: model)
+            agentWorkbench?.retryStorage()
             let services = try GenerationServiceController(
                 store: TravelGenerationConfigurationStore(root: rootURL), credentials: serviceCredentials,
                 hasExistingHistory: !loaded.events.isEmpty,
