@@ -25,9 +25,9 @@ struct AgentConversationView: View {
     private var instance: WorkbenchInstance? { model.state.instances.first { $0.id == task.instanceID } }
     private var target: WorkbenchDraftTarget { .task(task.id) }
     private var draft: Binding<WorkbenchSubmissionDraft> {
-        Binding(get: { presentation.drafts.draft(for: target) }, set: { value in presentation.drafts.update(target) { $0 = value } })
+        Binding(get: { model.draft(for: target) }, set: { value in model.updateDraft(target) { $0 = value } })
     }
-    private var canSend: Bool { model.canReply(task.id) && !draft.wrappedValue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var canSend: Bool { model.canReply(task.id) && !model.isDraftSubmitting(target) && !draft.wrappedValue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var requests: [WorkbenchPermission] { model.permissions.filter { $0.taskID == task.id } }
     private var modelRequests: [WorkbenchModelApproval] { model.modelApprovals.filter { $0.taskID == task.id } }
     private var requestCount: Int { requests.count + modelRequests.count }
@@ -50,7 +50,9 @@ struct AgentConversationView: View {
                     messages
                     VStack(spacing: 11) {
                         if requestCount > 0 { approval }
-                        AgentComposerView(draft: draft, instance: instance, isNew: false, canSend: canSend, focusRequest: focusRequest,
+                        AgentComposerView(draft: draft, instance: instance,
+                            parentTitle: model.state.tasks.first(where: { $0.id == draft.wrappedValue.parentTaskID })?.title,
+                            removeParent: { model.removeDraftParent(target) }, isNew: false, canSend: canSend, focusRequest: focusRequest,
                             hint: composerHint, allowModelAccess: .constant(false), onFailure: { model.error = $0 }, send: send)
                     }.padding(.horizontal, 24).padding(.top, 9).padding(.bottom, 16).frame(maxWidth: 820)
                 }.frame(maxWidth: .infinity)
@@ -247,8 +249,7 @@ struct AgentConversationView: View {
     }
     private func send() {
         guard canSend else { return }
-        let submitted = presentation.drafts.draft(for: target)
-        Task { if await model.followUp(taskID: task.id, text: submitted.text) { presentation.drafts.clear(target, submittedRevision: submitted.revision) } }
+        Task { await model.followUpDraft(taskID: task.id) }
     }
 }
 

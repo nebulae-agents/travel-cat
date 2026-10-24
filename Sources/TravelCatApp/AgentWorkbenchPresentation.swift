@@ -1,27 +1,8 @@
 import Foundation
 import Combine
 
-enum WorkbenchDraftTarget: Hashable {
-    case new(UUID?)
-    case task(UUID)
-}
-
-struct WorkbenchDraftCollection {
-    private var values: [WorkbenchDraftTarget: WorkbenchSubmissionDraft] = [:]
-    func draft(for target: WorkbenchDraftTarget) -> WorkbenchSubmissionDraft { values[target] ?? WorkbenchSubmissionDraft() }
-    mutating func update(_ target: WorkbenchDraftTarget, _ change: (inout WorkbenchSubmissionDraft) -> Void) {
-        var draft = values[target] ?? WorkbenchSubmissionDraft()
-        change(&draft); values[target] = draft
-    }
-    mutating func clear(_ target: WorkbenchDraftTarget, submittedRevision: UUID) {
-        guard var draft = values[target] else { return }
-        draft.clear(ifUnchangedSince: submittedRevision); values[target] = draft
-    }
-}
-
 @MainActor
 final class AgentWorkbenchPresentation: ObservableObject {
-    @Published var drafts = WorkbenchDraftCollection()
     @Published var filterInstanceID: UUID?
     @Published var modelConsent: [UUID: Bool] = [:]
 }

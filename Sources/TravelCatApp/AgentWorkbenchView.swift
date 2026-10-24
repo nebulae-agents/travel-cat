@@ -13,7 +13,7 @@ struct AgentWorkbenchView: View {
     private var newTarget: WorkbenchDraftTarget { .new(model.preferredInstanceID) }
     private var newDraft: Binding<WorkbenchSubmissionDraft> {
         let target = newTarget
-        return Binding(get: { presentation.drafts.draft(for: target) }, set: { value in presentation.drafts.update(target) { $0 = value } })
+        return Binding(get: { model.draft(for: target) }, set: { value in model.updateDraft(target) { $0 = value } })
     }
     private var modelConsent: Binding<Bool> {
         Binding(get: { model.preferredInstanceID.flatMap { presentation.modelConsent[$0] } ?? false }, set: { if let id = model.preferredInstanceID { presentation.modelConsent[id] = $0 } })
@@ -23,6 +23,13 @@ struct AgentWorkbenchView: View {
         HSplitView {
             sidebar.frame(minWidth: 200, idealWidth: 224, maxWidth: 280)
             VStack(spacing: 0) {
+                if let notice = model.draftSaveNotice {
+                    HStack {
+                        Label(notice, systemImage: "exclamationmark.triangle")
+                        Spacer()
+                        Button("重试保存") { model.retryDraftSave() }
+                    }.font(.system(size: 12)).padding(12).background(WorkbenchTheme.warning)
+                }
                 if let error = model.auditError {
                     Label(error, systemImage: "exclamationmark.shield").font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(12).foregroundStyle(CottageTheme.terracotta).background(WorkbenchTheme.warning)
                 }
@@ -129,12 +136,15 @@ struct AgentWorkbenchView: View {
             VStack(alignment: .leading, spacing: 12) {
                 if !model.state.instances.isEmpty {
                     Picker("使用 Agent", selection: $model.preferredInstanceID) {
+                        Text("未选择 Agent · 独立草稿").tag(Optional<UUID>.none)
                         ForEach(model.state.instances) { Text($0.name).tag(Optional($0.id)) }
                     }.frame(maxWidth: 320).controlSize(.small)
                 }
-                let canSend = model.isStorageReady && !model.isStarting && selectedInstance != nil && !newDraft.wrappedValue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                AgentComposerView(draft: newDraft, instance: selectedInstance, isNew: true, canSend: canSend, focusRequest: focusRequest,
-                    hint: model.isStarting ? "正在建立新对话，输入中的新内容会保留为草稿。" : nil, allowModelAccess: modelConsent, onFailure: { model.error = $0 }, send: start)
+                let canSend = model.isStorageReady && !model.isStarting && !model.isDraftSubmitting(newTarget) && selectedInstance != nil && !newDraft.wrappedValue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                AgentComposerView(draft: newDraft, instance: selectedInstance,
+                    parentTitle: model.state.tasks.first(where: { $0.id == newDraft.wrappedValue.parentTaskID })?.title,
+                    removeParent: { model.removeDraftParent(newTarget) }, isNew: true, canSend: canSend, focusRequest: focusRequest,
+                    hint: model.isDraftSubmitting(newTarget) ? "正在确认提交结果，草稿会保留到确认成功；新编辑的内容会独立保留。" : (model.isStarting ? "正在建立新对话，输入中的新内容会保留为草稿。" : nil), allowModelAccess: modelConsent, onFailure: { model.error = $0 }, send: start)
             }.padding(24).frame(maxWidth: 780)
         }.background(WorkbenchTheme.canvas)
     }
@@ -149,20 +159,19 @@ struct AgentWorkbenchView: View {
     }
     private func start() {
         guard let instance = selectedInstance, !model.isStarting else { return }
-        let target = newTarget, submitted = presentation.drafts.draft(for: newTarget)
+        let target = newTarget, submitted = model.draft(for: newTarget)
         guard !submitted.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let native = instance.native != nil
         let policy = native || modelConsent.wrappedValue ? "task" : "review"
         Task {
-            await model.start(instanceID: instance.id, text: submitted.text, files: native ? [] : submitted.files, parentTaskID: submitted.parentTaskID, modelPolicy: policy) {
-                presentation.drafts.clear(target, submittedRevision: submitted.revision)
+            await model.startDraft(target: target, instanceID: instance.id, modelPolicy: policy) {
                 presentation.modelConsent[instance.id] = false
             }
         }
     }
     private func handoff(_ task: WorkbenchTask, to instance: WorkbenchInstance) {
         let text = "承接对话：\(task.title)\n\n上轮回复：\n" + (task.messages.last(where: { $0.role == "assistant" })?.text ?? "")
-        presentation.drafts.update(.new(instance.id)) { draft in
+        model.updateDraft(.new(instance.id)) { draft in
             if !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft.text += "\n\n" + text } else { draft.text = text }
             draft.parentTaskID = task.id
         }
