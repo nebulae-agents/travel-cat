@@ -177,7 +177,7 @@ struct AgentConversationView: View {
                 Image(systemName: instance?.symbol ?? "sparkles").font(.system(size: 12)).foregroundStyle(WorkbenchTheme.accent).frame(width: 24, height: 24).background(WorkbenchTheme.sidebar, in: RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 8) {
                     Text(instance?.name ?? "Agent").font(.system(size: 12, weight: .medium)).foregroundStyle(WorkbenchTheme.muted)
-                    Text(verbatim: message.text).font(.system(size: 14)).lineSpacing(6).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    AgentMarkdownMessageView(text: message.text)
                 }
             }
         } else {
