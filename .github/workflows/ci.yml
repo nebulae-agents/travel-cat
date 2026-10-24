@@ -39,7 +39,7 @@ jobs:
       - name: Agent runtime contracts
         run: |
           unset TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT
-          python3 -m unittest discover -s Tests/AgentRuntimeTests -p 'test_*.py'
+          python3 Scripts/run-agent-runtime-contracts.py
       - name: Upload tooling contracts
         run: Scripts/tests/project-upload-tools-tests.sh
       - name: Plugin contracts
