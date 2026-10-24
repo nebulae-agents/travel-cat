@@ -40,6 +40,21 @@ final class NativeAgentDataTests: XCTestCase {
         XCTAssertEqual(state.connection, .disconnected)
     }
 
+    func testLegacyNativeSnapshotPreservesStatusWithoutInventedCompletionEvidence() throws {
+        var state = NativeTaskState()
+        state.upsert(.init(id:"legacy",turnID:"old",kind:"commandExecution",title:"echo",detail:"original",status:"completed"))
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with:JSONEncoder().encode(state)) as? [String:Any])
+        json.removeValue(forKey:"turnStatuses")
+        var items = try XCTUnwrap(json["items"] as? [[String:Any]])
+        items[0].removeValue(forKey:"completionObserved"); json["items"] = items
+        let decoded = try JSONDecoder().decode(NativeTaskState.self,from:JSONSerialization.data(withJSONObject:json))
+        XCTAssertEqual(decoded.items[0].status,"completed")
+        XCTAssertNil(decoded.items[0].completionObserved)
+        XCTAssertNil(decoded.items[0].liveCompletionObserved)
+        XCTAssertFalse(decoded.items[0].hasTerminalEvidence)
+        XCTAssertNil(decoded.turnStatuses)
+    }
+
     func testCancellationRequestIsDistinctFromConfirmedTerminalState() {
         var state = NativeTaskState()
         state.pendingOperation = .init(kind: .interrupt, targetID: "turn-1")

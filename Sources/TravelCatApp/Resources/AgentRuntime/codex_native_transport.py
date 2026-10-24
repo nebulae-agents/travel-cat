@@ -288,9 +288,9 @@ class NativeTransport:
         self._wire_send(json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode(), deadline=deadline)
 
     def request(self, method, params, *, deadline=None):
-        # Only this read-only RPC may expire locally without invalidating mutation outcomes.
+        # Only these read-only RPCs may expire locally without invalidating mutation outcomes.
         if deadline is not None:
-            if method != 'thread/backgroundTerminals/list': raise NativeFailure('read deadline is only valid for background status')
+            if method not in ('thread/backgroundTerminals/list', 'thread/turns/list', 'thread/items/list'): raise NativeFailure('read deadline is only valid for scoped observations')
             _remaining_read_time(deadline)
         request_id = str(uuid.uuid4())
         response = queue.Queue(maxsize=1)
