@@ -28,6 +28,17 @@ class NativeFailure(Exception):
     pass
 
 
+class NativeReadDeadline(NativeFailure):
+    """No partial frame was sent, or a fully sent read simply has no response yet."""
+    pass
+
+
+def _remaining_read_time(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0: raise NativeReadDeadline('native background status deadline exceeded')
+    return remaining
+
+
 def _private_directory(path):
     path = Path(path)
     if not path.exists(): path.mkdir(mode=0o700, parents=True)
@@ -254,24 +265,33 @@ class NativeTransport:
                 offset += sent
         except (OSError, ValueError): raise NativeFailure('native socket write failed') from None
 
-    def _wire_send(self, payload, opcode=1):
+    def _wire_send(self, payload, opcode=1, *, deadline=None):
         if len(payload) > MAX_FRAME: raise NativeFailure('native request exceeds frame limit')
         key = os.urandom(4)
         if len(payload) < 126: header = bytes([128 | opcode, 128 | len(payload)])
         elif len(payload) < 65536: header = bytes([128 | opcode, 254]) + struct.pack('!H', len(payload))
         else: header = bytes([128 | opcode, 255]) + struct.pack('!Q', len(payload))
         data = header + key + bytes(b ^ key[i % 4] for i, b in enumerate(payload))
-        deadline = time.monotonic() + REQUEST_SECONDS
-        if not self.writer.acquire(timeout=REQUEST_SECONDS): raise NativeFailure('native socket writer timed out')
+        read_deadline = deadline
+        deadline = deadline if deadline is not None else time.monotonic() + REQUEST_SECONDS
+        remaining = _remaining_read_time(deadline) if read_deadline is not None else REQUEST_SECONDS
+        if not self.writer.acquire(timeout=remaining):
+            if read_deadline is not None: raise NativeReadDeadline('native background writer deadline exceeded')
+            raise NativeFailure('native socket writer timed out')
         try:
             if self.closed: raise NativeFailure('native socket disconnected')
+            if read_deadline is not None: _remaining_read_time(deadline)
             self._write_bytes(data, deadline)
         finally: self.writer.release()
 
-    def _send(self, value):
-        self._wire_send(json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode())
+    def _send(self, value, *, deadline=None):
+        self._wire_send(json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode(), deadline=deadline)
 
-    def request(self, method, params):
+    def request(self, method, params, *, deadline=None):
+        # Only this read-only RPC may expire locally without invalidating mutation outcomes.
+        if deadline is not None:
+            if method != 'thread/backgroundTerminals/list': raise NativeFailure('read deadline is only valid for background status')
+            _remaining_read_time(deadline)
         request_id = str(uuid.uuid4())
         response = queue.Queue(maxsize=1)
         with self.lock:
@@ -279,12 +299,14 @@ class NativeTransport:
             if len(self.pending) >= 32: raise NativeFailure('too many native requests')
             self.pending[request_id] = response
         try:
-            try: self._send({'id': request_id, 'method': method, 'params': params})
+            try: self._send({'id': request_id, 'method': method, 'params': params}, deadline=deadline)
+            except NativeReadDeadline: raise
             except NativeFailure:
-                self._lost()
+                self._lost(notify_async=deadline is not None)
                 raise
-            try: result = response.get(timeout=REQUEST_SECONDS)
+            try: result = response.get(timeout=_remaining_read_time(deadline) if deadline is not None else REQUEST_SECONDS)
             except queue.Empty:
+                if deadline is not None: raise NativeReadDeadline('native background response deadline exceeded') from None
                 self._lost()
                 raise NativeFailure('native request timed out; outcome unknown, resume before retrying') from None
             if isinstance(result, NativeFailure): raise result
@@ -365,18 +387,30 @@ class NativeTransport:
         except (OSError, ValueError, TypeError, NativeFailure): pass
         finally: self._lost()
 
-    def _lost(self):
+    def _lost(self, *, notify_async=False):
         with self.lock:
             if self.closed: return
             self.closed = True
             pending = list(self.pending.values())
+            callback = self.callback  # The original connection/generation owns this notification.
         self._stop_client()
-        try:
-            self.callback({'method': 'connection/lost', 'params': {}})
-        finally:
+
+        def wake_waiters():
             for target in pending:
                 try: target.put_nowait(NativeFailure('native socket disconnected; turn outcome unknown'))
                 except queue.Full: pass
+
+        def notify():
+            callback({'method': 'connection/lost', 'params': {}})
+
+        if notify_async:
+            # A bounded read cannot hold the operation slot behind an approval's scope lock.
+            # Close and wake all IPC waiters now; only the generation-bound notification is deferred.
+            wake_waiters()
+            threading.Thread(target=notify, daemon=True).start()
+        else:
+            try: notify()
+            finally: wake_waiters()
 
     def _stop_client(self):
         try: self.socket.shutdown(socket.SHUT_RDWR)

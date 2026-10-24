@@ -61,6 +61,231 @@ final class NativeAgentModelTests: XCTestCase {
         return (model,runtime,credentials,audit,root,instance)
     }
 
+    @MainActor func testCompletedTurnKeepsFreshBackgroundCountSeparateFromTerminalState() async throws {
+        let (model,runtime,_,audit,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.emit(taskID:id,instanceID:instance.id,method:"turn/completed",params:["threadId":"native-thread","turn":["id":"native-turn","status":"completed"]])
+        XCTAssertNil(model.freshNativeBackgroundObservation(id))
+        XCTAssertEqual(model.nativeBackgroundStatusTitle(id),"后台命令待核对")
+        runtime.results["native_background_status"] = ["threadId":"native-thread","count":1,"itemIds":["background-item"]]
+        let auditCount = audit.saved.count
+        await model.refreshNativeBackgroundStatus(id)
+        XCTAssertEqual(model.freshNativeBackgroundObservation(id)?.count,1)
+        XCTAssertEqual(model.freshNativeBackgroundObservation(id)?.itemIDs,["background-item"])
+        XCTAssertEqual(model.nativeBackgroundStatusTitle(id),"后台命令：1 个")
+        XCTAssertEqual(model.state.tasks[0].status,.completed)
+        XCTAssertTrue(model.canStopNativeBackgroundTasks(id))
+        await model.refreshNativeBackgroundStatus(id)
+        XCTAssertEqual(audit.saved.count,auditCount,"routine read-only polls do not append audit records")
+        let params = try XCTUnwrap(runtime.requests.last?.1)
+        XCTAssertEqual(Set(params.keys),["taskId"])
+        let snapshot = String(decoding:try JSONEncoder().encode(model.state),as:UTF8.self)
+        XCTAssertFalse(snapshot.contains("background-item"),"current observations never enter the persisted snapshot")
+    }
+
+    @MainActor func testBackgroundFailureMeansUnknownWithoutChangingCompletedTurn() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        model.mutate(id) { $0.status = .completed }
+        runtime.results["native_background_status"] = ["threadId":"native-thread","count":0,"itemIds":[]]
+        await model.refreshNativeBackgroundStatus(id)
+        XCTAssertEqual(model.freshNativeBackgroundObservation(id)?.count,0)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let original = try encoder.encode(model.state.tasks[0])
+        runtime.failMethod = "native_background_status"
+        await model.refreshNativeBackgroundStatus(id)
+        XCTAssertNil(model.freshNativeBackgroundObservation(id))
+        XCTAssertEqual(model.nativeBackgroundStatusTitle(id),"后台命令待核对")
+        XCTAssertEqual(try encoder.encode(model.state.tasks[0]),original)
+        XCTAssertNil(model.error)
+    }
+
+    @MainActor func testBackgroundObservationExpiresAfterTenSecondsAndValidatesResponse() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.results["native_background_status"] = ["threadId":"native-thread","count":0,"itemIds":[]]
+        await model.refreshNativeBackgroundStatus(id)
+        let checked = try XCTUnwrap(model.freshNativeBackgroundObservation(id)?.checkedAt)
+        XCTAssertNotNil(model.freshNativeBackgroundObservation(id,now:checked.addingTimeInterval(9)))
+        XCTAssertNil(model.freshNativeBackgroundObservation(id,now:checked.addingTimeInterval(11)))
+        for result: [String:Any] in [["threadId":"foreign","count":0,"itemIds":[]], ["threadId":"native-thread","count":1,"itemIds":[]], ["threadId":"native-thread","count":true,"itemIds":["i"]], ["threadId":"native-thread","count":2,"itemIds":["i","i"]]] {
+            runtime.results["native_background_status"] = result
+            await model.refreshNativeBackgroundStatus(id)
+            XCTAssertNil(model.freshNativeBackgroundObservation(id))
+        }
+    }
+
+    @MainActor func testConcurrentBackgroundRefreshCoalescesWithoutCancellingTurn() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.results["native_background_status"] = ["threadId":"native-thread","count":0,"itemIds":[]]
+        runtime.duringRequest = { method, _ in
+            guard method == "native_background_status" else { return }
+            XCTAssertEqual(model.nativeBackgroundStatusTitle(id),"正在核对…")
+            await model.refreshNativeBackgroundStatus(id)
+        }
+        await model.refreshNativeBackgroundStatus(id)
+        XCTAssertEqual(runtime.requests.filter { $0.0 == "native_background_status" }.count,1)
+        XCTAssertEqual(model.state.tasks[0].status,.running)
+    }
+
+    @MainActor func testBackgroundOldSuccessAndFailureCannotPublishAcrossContextChanges() async throws {
+        for change in ["disconnect","resume","prompt","stop","execution","shutdown"] {
+            for fail in [false,true] {
+                let (model,runtime,_,_,root,instance) = try fixture()
+                await model.start(instanceID:instance.id,text:"hello")
+                let id = try XCTUnwrap(model.state.tasks.first?.id)
+                model.mutate(id) { $0.status = .completed }
+                runtime.results["native_background_status"] = ["threadId":"native-thread","count":7,"itemIds":(0..<7).map { "old-\($0)" }]
+                runtime.results["native_resume"] = ["threadId":"native-thread","turns":[["id":"native-turn","status":"completed"]],"items":[],"backgroundCount":0]
+                runtime.results["native_background_stop"] = ["stopped":true,"terminatedCount":0]
+                runtime.duringRequest = { method, _ in
+                    guard method == "native_background_status" else { return }
+                    switch change {
+                    case "disconnect": runtime.onExit?()
+                    case "resume": await model.recoverNative(taskID:id)
+                    case "prompt": _ = await model.followUp(taskID:id,text:"next")
+                    case "stop": await model.stopNativeBackgroundTasks(id)
+                    case "execution": model.mutate(id) { $0.nativeState?.executionID = UUID() }
+                    default: model.shutdown()
+                    }
+                    if fail { throw WorkbenchFailure("old failure") }
+                }
+                await model.refreshNativeBackgroundStatus(id)
+                XCTAssertNil(model.freshNativeBackgroundObservation(id),"\(change) fail=\(fail)")
+                XCTAssertFalse(model.state.tasks[0].messages.contains { $0.text.contains("old failure") })
+                if change != "shutdown" { model.shutdown() }
+                try? FileManager.default.removeItem(at:root)
+            }
+        }
+    }
+
+    @MainActor func testVisibleBackgroundObservationRejectsResultAfterViewExit() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        runtime.results["native_background_status"] = ["threadId":"native-thread","count":0,"itemIds":[]]
+        let token = model.beginNativeBackgroundObservation(id)
+        runtime.duringRequest = { method, _ in
+            if method == "native_background_status" { model.endNativeBackgroundObservation(id,token:token) }
+        }
+        await model.refreshNativeBackgroundStatus(id,visibilityToken:token)
+        XCTAssertNil(model.freshNativeBackgroundObservation(id))
+        let count = runtime.requests.count
+        await model.refreshNativeBackgroundStatus(id,visibilityToken:token)
+        XCTAssertEqual(runtime.requests.count,count)
+    }
+
+    @MainActor func testCompletionQueuesFreshVisibleReadUntilUncancelledOldReadReleasesSlot() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        var releaseOld: CheckedContinuation<Void,Never>?
+        var readCount = 0, activeReads = 0, maximumActiveReads = 0
+        runtime.duringRequest = { method, _ in
+            guard method == "native_background_status" else { return }
+            readCount += 1; activeReads += 1; maximumActiveReads = max(maximumActiveReads,activeReads)
+            if readCount == 1 {
+                await withCheckedContinuation { releaseOld = $0 }
+                runtime.results[method] = ["threadId":"native-thread","count":1,"itemIds":["stale-item"]]
+            } else { runtime.results[method] = ["threadId":"native-thread","count":0,"itemIds":[]] }
+            activeReads -= 1
+        }
+        let oldToken = model.beginNativeBackgroundObservation(id)
+        let old = Task { await model.refreshNativeBackgroundStatus(id,visibilityToken:oldToken) }
+        for _ in 0..<100 where releaseOld == nil { await Task.yield() }
+        XCTAssertNotNil(releaseOld)
+        old.cancel() // The runtime deliberately ignores this cancellation until its response arrives.
+        runtime.emit(taskID:id,instanceID:instance.id,method:"turn/completed",params:["threadId":"native-thread","turn":["id":"native-turn","status":"completed"]])
+        let currentToken = model.beginNativeBackgroundObservation(id)
+        let current = Task { await model.refreshNativeBackgroundStatus(id,visibilityToken:currentToken) }
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(readCount,1,"the new visible request must wait for the old IPC slot")
+        releaseOld?.resume(); await old.value; await current.value
+        XCTAssertEqual(readCount,2,"completion refresh must run immediately after the old slot releases, with no five-second poll sleep")
+        XCTAssertEqual(maximumActiveReads,1)
+        XCTAssertEqual(model.freshNativeBackgroundObservation(id)?.count,0)
+        XCTAssertEqual(model.freshNativeBackgroundObservation(id)?.itemIDs,[])
+        XCTAssertEqual(model.state.tasks[0].status,.completed)
+    }
+
+    @MainActor func testQueuedVisibleRefreshDropsWhenHiddenCancelledOrBindingChanges() async throws {
+        for invalidation in ["hidden","cancelled","binding"] {
+            let (model,runtime,_,_,root,instance) = try fixture()
+            await model.start(instanceID:instance.id,text:"hello")
+            let id = try XCTUnwrap(model.state.tasks.first?.id)
+            var releaseOld: CheckedContinuation<Void,Never>?
+            var readCount = 0
+            runtime.results["native_background_status"] = ["threadId":"native-thread","count":1,"itemIds":["stale-item"]]
+            runtime.duringRequest = { method, _ in
+                guard method == "native_background_status" else { return }
+                readCount += 1
+                if readCount == 1 { await withCheckedContinuation { releaseOld = $0 } }
+            }
+            let oldToken = model.beginNativeBackgroundObservation(id)
+            let old = Task { await model.refreshNativeBackgroundStatus(id,visibilityToken:oldToken) }
+            for _ in 0..<100 where releaseOld == nil { await Task.yield() }
+            XCTAssertNotNil(releaseOld)
+            runtime.emit(taskID:id,instanceID:instance.id,method:"turn/completed",params:["threadId":"native-thread","turn":["id":"native-turn","status":"completed"]])
+            let token = model.beginNativeBackgroundObservation(id)
+            let current = Task { await model.refreshNativeBackgroundStatus(id,visibilityToken:token) }
+            for _ in 0..<10 { await Task.yield() }
+            switch invalidation {
+            case "hidden": model.endNativeBackgroundObservation(id,token:token)
+            case "cancelled": current.cancel()
+            default: model.mutate(id) { $0.nativeState?.executionID = UUID() }
+            }
+            releaseOld?.resume(); await old.value; await current.value
+            XCTAssertEqual(readCount,1,invalidation)
+            XCTAssertNil(model.freshNativeBackgroundObservation(id),invalidation)
+            model.shutdown(); try? FileManager.default.removeItem(at:root)
+        }
+    }
+
+    @MainActor func testOldViewExitCannotInvalidateNewVisibleObservation() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        let old = model.beginNativeBackgroundObservation(id)
+        let current = model.beginNativeBackgroundObservation(id)
+        runtime.results["native_background_status"] = ["threadId":"native-thread","count":0,"itemIds":[]]
+        await model.refreshNativeBackgroundStatus(id,visibilityToken:current)
+        model.endNativeBackgroundObservation(id,token:old)
+        XCTAssertEqual(model.freshNativeBackgroundObservation(id)?.count,0)
+        XCTAssertEqual(model.nativeBackgroundVisibility[id],current)
+        model.endNativeBackgroundObservation(id,token:current)
+        XCTAssertNil(model.freshNativeBackgroundObservation(id))
+    }
+
+    @MainActor func testBackgroundReadinessAndStopConflictGuards() async throws {
+        let (model,runtime,_,_,root,instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }
+        await model.start(instanceID:instance.id,text:"hello")
+        let id = try XCTUnwrap(model.state.tasks.first?.id)
+        XCTAssertFalse(model.canStopNativeBackgroundTasks(id))
+        model.mutate(id) { $0.status = .completed }
+        XCTAssertTrue(model.canStopNativeBackgroundTasks(id))
+        model.nativeInterruptPending.insert(id)
+        XCTAssertFalse(model.canStopNativeBackgroundTasks(id))
+        model.nativeInterruptPending.remove(id)
+        let count = runtime.requests.count
+        model.loadFailed = true
+        await model.refreshNativeBackgroundStatus(id)
+        XCTAssertFalse(model.canStopNativeBackgroundTasks(id))
+        XCTAssertEqual(runtime.requests.count,count)
+    }
+
     @MainActor func testNativeSaveAndStartNeverReadsModelCredentials() async throws {
         let (model,runtime,credentials,audit,root,instance) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at:root) }

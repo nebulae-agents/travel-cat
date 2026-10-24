@@ -97,3 +97,36 @@ struct NativeConnectionInfo: Equatable, Sendable {
                      models: models, capabilities: (data["capabilities"] as? [String: Any] ?? [:]).compactMapValues { $0 as? Bool })
     }
 }
+
+/// Current observations are intentionally not Codable and never enter a task snapshot.
+struct NativeBackgroundBinding: Equatable, Sendable {
+    let taskID: UUID
+    let instanceID: UUID
+    let executionID: UUID
+    let threadID: String
+    let turnID: String?
+    let operationID: UUID?
+    let connectionGeneration: UUID?
+    let revision: UUID?
+}
+
+struct NativeBackgroundObservation: Equatable, Sendable {
+    let count: Int
+    let itemIDs: [String]
+    let checkedAt: Date
+    let requestToken: UUID
+    let binding: NativeBackgroundBinding
+}
+
+struct NativeBackgroundRequest: Equatable, Sendable {
+    let token: UUID
+    let binding: NativeBackgroundBinding
+    let visibilityToken: UUID?
+}
+
+struct NativeBackgroundPendingRefresh {
+    let token: UUID
+    let binding: NativeBackgroundBinding
+    let visibilityToken: UUID
+    let continuation: CheckedContinuation<Void, Never>
+}

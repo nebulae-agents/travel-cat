@@ -1,5 +1,6 @@
 """Bounded native Codex control. Auth and inference remain in the official server."""
 import hashlib
+from contextlib import contextmanager
 import importlib.util
 import json
 import os
@@ -26,6 +27,8 @@ CANCEL_COMPLETION_SECONDS = 10
 MAX_BACKGROUND_PROCESSES = 256
 MAX_BACKGROUND_PAGES = 10
 MAX_BACKGROUND_BYTES = 1024 * 1024
+# Swift waits 15 seconds; this covers the entire native read, never each page separately.
+BACKGROUND_STATUS_SECONDS = 5
 
 
 def _text(value, name, limit=512):
@@ -74,6 +77,7 @@ class CodexNativeController:
         self.instances, self.tasks, self.approvals = {}, {}, {}
         self.lock = threading.RLock()
         self.operations = threading.RLock()
+        self.background_status_slot = threading.Lock()
         self.closed = threading.Event()
         self.sweeper = threading.Thread(target=self._sweep, daemon=True)
         self.sweeper.start()
@@ -85,8 +89,10 @@ class CodexNativeController:
                     'native_prompt': self._prompt, 'native_resume': self._resume,
                     'native_permission': self._permission, 'native_cancel': self._cancel,
                     'native_detach': self._detach, 'native_background_stop': self._background_stop,
+                    'native_background_status': self._background_status,
                     'native_artifacts': self._artifacts, 'native_export': self._export}
         if method not in handlers: raise NativeFailure('unsupported native method')
+        if method == 'native_background_status': return self._bounded_background_status(params)
         with self.operations:
             if self.closed.is_set(): raise NativeFailure('native controller closed')
             return handlers[method](params)
@@ -310,10 +316,13 @@ class CodexNativeController:
                 raise NativeFailure('native background task binding is stale or disconnected')
             return instance
 
-    def _list_background(self, instance, thread_id):
+    def _list_background(self, instance, thread_id, validate_scope=None, *, deadline=None):
         values, process_ids, cursors, cursor, size = [], set(), set(), None, 0
         for _ in range(MAX_BACKGROUND_PAGES):
-            response = instance['transport'].request('thread/backgroundTerminals/list', {'threadId': thread_id, 'cursor': cursor, 'limit': 100})
+            if validate_scope: validate_scope()
+            options = {'deadline': deadline} if deadline is not None else {}
+            response = instance['transport'].request('thread/backgroundTerminals/list', {'threadId': thread_id, 'cursor': cursor, 'limit': 100}, **options)
+            if validate_scope: validate_scope()
             if not isinstance(response, dict) or not isinstance(response.get('data'), list) or 'nextCursor' not in response:
                 raise NativeFailure('invalid native background terminal page')
             size += len(json.dumps(response).encode())
@@ -336,6 +345,56 @@ class CodexNativeController:
             if cursor in cursors: raise NativeFailure('native background pagination did not progress')
             cursors.add(cursor)
         raise NativeFailure('native background terminal list exceeds page limit')
+
+    @staticmethod
+    def _check_background_deadline(deadline):
+        if time.monotonic() >= deadline: raise NativeFailure('native background status deadline exceeded')
+
+    @contextmanager
+    def _background_status_lock(self, deadline):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self.lock.acquire(timeout=remaining):
+            raise NativeFailure('native background scope deadline exceeded')
+        try:
+            self._check_background_deadline(deadline)
+            yield
+        finally: self.lock.release()
+
+    def _bounded_background_status(self, params):
+        deadline = time.monotonic() + BACKGROUND_STATUS_SECONDS
+        # Polls never queue behind controls or one another. A stop can wait only for one bounded read.
+        if not self.background_status_slot.acquire(False): raise NativeFailure('native background status already pending')
+        try:
+            if not self.operations.acquire(False): raise NativeFailure('native control busy; background status skipped')
+            try:
+                self._check_background_deadline(deadline)
+                if self.closed.is_set(): raise NativeFailure('native controller closed')
+                return self._background_status(params, deadline=deadline)
+            finally: self.operations.release()
+        finally: self.background_status_slot.release()
+
+    def _background_status(self, params, *, deadline):
+        # This read accepts only the product task, never caller-supplied runtime authority.
+        if set(params) != {'taskId'}: raise NativeFailure('background status accepts only taskId')
+        _text(params.get('taskId'), 'task id')
+        with self._background_status_lock(deadline):
+            task = self._task(params)
+            instance = self._background_scope(task)
+            identity = (task['taskId'], task['instanceId'], task['generation'], task['threadId'])
+
+        def validate_scope():
+            self._check_background_deadline(deadline)
+            with self._background_status_lock(deadline):
+                current = self._background_scope(task)
+                if current is not instance or identity != (task['taskId'], task['instanceId'], task['generation'], task['threadId']):
+                    raise NativeFailure('native background observation binding changed')
+
+        processes = self._list_background(instance, identity[3], validate_scope, deadline=deadline)
+        with self._background_status_lock(deadline):
+            validate_scope()
+            item_ids = [process['itemId'] for process in processes]
+            if len(set(item_ids)) != len(item_ids): raise NativeFailure('duplicate native background item identity')
+            return {'threadId': identity[3], 'count': len(processes), 'itemIds': item_ids}
 
     def _stop_background(self, task):
         instance = self._background_scope(task)
