@@ -32,7 +32,7 @@ struct MailboxInbox {
                 kind = [.failed, .unknown].contains(task.status) ? .failure : .result
                 subtitle = "Agent · \(task.status.title)"
             } else { return nil }
-            return .init(id: "task-\(task.id)", title: task.title, subtitle: subtitle, date: task.createdAt, kind: kind, destination: .task(task.id))
+            return .init(id: "task-\(task.id)", title: task.displayTitle, subtitle: subtitle, date: task.createdAt, kind: kind, destination: .task(task.id))
         }
         entries += postcards
         var seen = Set<String>()

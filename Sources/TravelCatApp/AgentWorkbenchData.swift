@@ -82,11 +82,23 @@ struct WorkbenchMessage: Codable, Identifiable, Equatable, Sendable {
     var date = Date()
     var runtimeItemID: String? = nil
 }
+/// An explicit ACP cleanup receipt, bound to the exact stored task and session.
+/// Missing in legacy snapshots; a disconnected client is never a receipt.
+struct WorkbenchCleanupEvidence: Codable, Equatable, Sendable {
+    let taskID: UUID
+    let sessionID: String?
+    let confirmedAt: Date
+}
 struct WorkbenchTask: Codable, Identifiable, Sendable {
     var modelPolicy: String? = nil
     var id = UUID()
     var instanceID: UUID
     var title: String
+    var customTitle: String? = nil
+    var pinnedAt: Date? = nil
+    var archivedAt: Date? = nil
+    var cleanupEvidence: WorkbenchCleanupEvidence? = nil
+    var displayTitle: String { customTitle ?? title }
     var status: WorkbenchTaskStatus = .connecting
     var sessionID: String?
     var parentTaskID: UUID?
@@ -133,6 +145,10 @@ struct WorkbenchStore {
         for index in state.tasks.indices where state.tasks[index].status.active {
             state.tasks[index].status = .unknown
             state.tasks[index].unread = true
+        }
+        for index in state.tasks.indices {
+            let session = state.tasks[index].sessionID
+            state.tasks[index].normalizeConversationMetadata(previousSessionID: session, isLive: false, pending: false)
         }
         return state
     }

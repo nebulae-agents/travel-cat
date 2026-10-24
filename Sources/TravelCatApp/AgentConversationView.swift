@@ -51,7 +51,7 @@ struct AgentConversationView: View {
                     VStack(spacing: 11) {
                         if requestCount > 0 { approval }
                         AgentComposerView(draft: draft, instance: instance,
-                            parentTitle: model.state.tasks.first(where: { $0.id == draft.wrappedValue.parentTaskID })?.title,
+                            parentTitle: model.state.tasks.first(where: { $0.id == draft.wrappedValue.parentTaskID })?.displayTitle,
                             removeParent: { model.removeDraftParent(target) }, isNew: false, canSend: canSend, focusRequest: focusRequest,
                             hint: composerHint, allowModelAccess: .constant(false), onFailure: { model.error = $0 }, send: send)
                     }.padding(.horizontal, 24).padding(.top, 9).padding(.bottom, 16).frame(maxWidth: 820)
@@ -81,7 +81,7 @@ struct AgentConversationView: View {
     private var header: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(WorkbenchConversationPresentation.shortTitle(task.title)).font(.system(size: 14, weight: .semibold)).lineLimit(1).help(task.title)
+                Text(WorkbenchConversationPresentation.shortTitle(task.displayTitle)).font(.system(size: 14, weight: .semibold)).lineLimit(1).help(task.displayTitle)
                 HStack(spacing: 6) {
                     Circle().fill(task.nativeState?.connection == .disconnected ? WorkbenchTheme.muted : WorkbenchTheme.accent).frame(width: 5, height: 5)
                     Text(instance?.name ?? "已移除的 Agent").lineLimit(1)
@@ -99,12 +99,13 @@ struct AgentConversationView: View {
             }
             Button { withAnimation(.easeInOut(duration: 0.15)) { showingDetails.toggle() } } label: { Image(systemName: "sidebar.right") }
                 .buttonStyle(.plain).frame(width: 28, height: 28).help("对话详情").accessibilityLabel("对话详情")
+            AgentConversationManagementMenu(model: model, presentation: presentation, task: task)
             Menu {
                 Button("制品与文件…", action: artifacts)
                 Button("调用与审计…", action: audit)
                 Menu("交接给其他 Agent") { ForEach(model.state.instances) { instance in Button(instance.name) { handoff(instance) } } }
                     .disabled(task.messages.last(where: { $0.role == "assistant" }) == nil)
-                if let parent = task.parentTaskID { Button("查看上游对话") { model.selectedTaskID = parent } }
+                if let parent = task.parentTaskID { Button("查看上游对话") { model.openConversation(parent) } }
                 Divider()
                 Button("Agent 设置…", action: settings)
                 if model.isLive(task.id) {
