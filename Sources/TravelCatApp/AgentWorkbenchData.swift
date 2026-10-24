@@ -95,6 +95,7 @@ struct WorkbenchTask: Codable, Identifiable, Sendable {
     var createdAt = Date()
     var nativeState: NativeTaskState? = nil
     var artifactReviews: [WorkbenchArtifactReview]? = nil
+    var artifactVersions: [WorkbenchArtifactVersion]? = nil
 }
 struct WorkbenchSnapshot: Codable, Sendable {
     var schemaVersion = 1
@@ -124,6 +125,7 @@ struct WorkbenchStore {
         guard raw.count <= 64 * 1024 * 1024 else { throw WorkbenchFailure("Agent 数据超过保存上限，原文件未覆盖。") }
         var state = try JSONDecoder().decode(WorkbenchSnapshot.self, from: raw)
         try state.drafts?.validate()
+        try state.validateArtifactVersions()
         guard state.schemaVersion == 1 else { throw WorkbenchFailure("不支持的 Agent 配置版本，未覆盖原文件。") }
         for index in state.tasks.indices {
             if state.tasks[index].nativeState != nil { state.tasks[index].nativeState?.connection = .disconnected }
@@ -137,6 +139,8 @@ struct WorkbenchStore {
     func save(_ state: WorkbenchSnapshot) throws {
         guard state.schemaVersion == 1 else { throw WorkbenchFailure("不支持的配置版本。") }
         try state.drafts?.validate()
+        try state.validateArtifactVersions()
+        guard keyData != nil || !state.tasks.contains(where: { !($0.artifactVersions ?? []).isEmpty }) else { throw WorkbenchFailure("文件历史只可保存到加密存储。") }
         if let keyData {
             try EncryptedWorkbenchStorage(root: root, keyData: keyData).save(JSONEncoder().encode(state))
             return

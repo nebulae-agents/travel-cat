@@ -73,8 +73,9 @@ def _configuration(params):
 
 
 class CodexNativeController:
-    def __init__(self, output):
+    def __init__(self, output, audit=None):
         self.output = output
+        self.audit = audit
         self.instances, self.tasks, self.approvals = {}, {}, {}
         self.lock = threading.RLock()
         self.operations = threading.RLock()
@@ -91,9 +92,12 @@ class CodexNativeController:
                     'native_permission': self._permission, 'native_cancel': self._cancel,
                     'native_detach': self._detach, 'native_background_stop': self._background_stop,
                     'native_background_status': self._background_status, 'native_reconcile': self._reconcile,
-                    'native_artifacts': self._artifacts, 'native_export': self._export}
+                    'native_artifacts': self._artifacts, 'native_export': self._export,
+                    'native_artifact_changes': self._artifact_changes}
         if method not in handlers: raise NativeFailure('unsupported native method')
         if method in ('native_background_status', 'native_reconcile'): return self._bounded_native_read(params, handlers[method])
+        if method in ('native_artifacts','native_export','native_artifact_changes'):
+            return self._bounded_artifact_read(params, handlers[method])
         with self.operations:
             if self.closed.is_set(): raise NativeFailure('native controller closed')
             return handlers[method](params)
@@ -120,34 +124,82 @@ class CodexNativeController:
             instance = self.instances[task['instanceId']]
             if not task.get('generation') or task['generation'] != instance.get('generation'):
                 raise NativeFailure('native artifact task requires current connection resume')
+            if 'bindingId' in params and (params['bindingId']!=task['bindingId'] or params.get('executionId')!=task['executionId']):
+                raise NativeFailure('artifact caller binding or execution is stale')
             return task
 
-    def _workspace_read(self, params, method):
-        task = self._artifact_task(params)
-        root = self.instances[task['instanceId']]['config']['workspace']
-        request = {'method': method}
-        if method == 'export': request['path'] = params.get('path')
-        fd = None
+    @staticmethod
+    def _open_workspace(root):
+        fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            # Walk every ancestor without following links, then read through the
-            # pinned directory descriptor even if a name changes during the read.
-            fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             for component in Path(root).parts[1:]:
                 child = _workspace_module.open_directory(fd, component)
-                os.close(fd)
-                fd = child
-            return _workspace_module.perform(request, root=fd)
+                os.close(fd); fd = child
+            return fd
         except Exception:
-            # No fallback to a caller path or a broader directory after a denial.
+            os.close(fd); raise
+
+    @staticmethod
+    def _artifact_identity(task):
+        return (task.get('bindingId'),task.get('executionId'),task.get('generation'),task.get('threadId'))
+
+    def _bounded_artifact_read(self, params, handler):
+        # Share the nonqueued read slot. Kernel filesystem calls cannot be forcibly
+        # cancelled; keep control operations unlocked while bounded I/O runs.
+        deadline=time.monotonic()+BACKGROUND_STATUS_SECONDS
+        if not self.background_status_slot.acquire(False):raise NativeFailure('native observation already pending')
+        try:
+            if not self.operations.acquire(False):raise NativeFailure('native control busy; artifact read skipped')
+            try:
+                with self._background_status_lock(deadline):
+                    task=self._artifact_task(params)
+                    identity=self._artifact_identity(task)
+            finally:self.operations.release()
+            result=handler(params,deadline=deadline)
+            with self._background_status_lock(deadline):
+                self._check_background_deadline(deadline)
+                if self._artifact_task(params) is not task or self._artifact_identity(task)!=identity:
+                    raise NativeFailure('artifact binding changed during read')
+            return result
+        finally:self.background_status_slot.release()
+
+    def _scoped_artifact_task(self,params,deadline):
+        if deadline is None:return self._artifact_task(params)
+        with self._background_status_lock(deadline):return self._artifact_task(params)
+
+    def _workspace_read(self, params, method, *, deadline=None):
+        task = self._scoped_artifact_task(params,deadline)
+        identity=self._artifact_identity(task)
+        instance=self.instances[task['instanceId']]
+        root = instance['config']['workspace']
+        request = {'method': method}
+        if method == 'export': request['path'] = params.get('path')
+        fd = current = None
+        try:
+            fd=self._open_workspace(root)
+            root_identity=_workspace_module.identity(os.fstat(fd))
+            if root_identity!=task['workspaceIdentity']:raise NativeFailure('workspace root changed')
+            result=_workspace_module.perform(request, root=fd)
+            current=self._open_workspace(root)
+            if _workspace_module.identity(os.fstat(current))!=root_identity or self._scoped_artifact_task(params,deadline) is not task or self._artifact_identity(task)!=identity:
+                raise NativeFailure('artifact binding or workspace changed')
+            if method=='export':result.update(bindingId=task['bindingId'],executionId=task['executionId'])
+            return result
+        except Exception:
             raise NativeFailure('artifact read denied or failed') from None
         finally:
             if fd is not None: os.close(fd)
+            if current is not None:os.close(current)
 
-    def _artifacts(self, params):
-        return self._workspace_read(params, 'artifacts')
+    def _artifacts(self, params, *, deadline=None):
+        return self._workspace_read(params, 'artifacts',deadline=deadline)
 
-    def _export(self, params):
-        return self._workspace_read(params, 'export')
+    def _export(self, params, *, deadline=None):
+        return self._workspace_read(params, 'export',deadline=deadline)
+
+    def _artifact_changes(self, params, *, deadline=None):
+        task=self._scoped_artifact_task(params,deadline)
+        return _workspace_module.changes(self._workspace_read(params,'manifest',deadline=deadline),task['artifactBaseline'],task['bindingId'],task['executionId'],task['artifactTurnId'])
 
     def _connect(self, params):
         config = _configuration(params)
@@ -220,6 +272,10 @@ class CodexNativeController:
         if thread_id and any(t.get('threadId') == thread_id and t['instanceId'] == instance['config']['instanceId'] for t in self.tasks.values()):
             raise NativeFailure('thread already bound to another task')
         task = {'taskId': task_id, 'instanceId': instance['config']['instanceId'], 'threadId': thread_id, 'turnId': None, 'verified': False, 'generation': instance['generation'], 'messages': set(), 'uncertain': False, 'buffer': [], 'bufferBytes': 0, 'status': {'type': 'unknown'}, 'cancelWaiter': None, 'interruptRequestedTurn': None, 'terminalTurns': {}}
+        task.update(bindingId=str(uuid.uuid4()),executionId=None,artifactTurnId=None,artifactBaseline=None)
+        fd=self._open_workspace(instance['config']['workspace'])
+        try:task['workspaceIdentity']=_workspace_module.identity(os.fstat(fd))
+        finally:os.close(fd)
         self.tasks[task_id] = task
         return task
 
@@ -251,13 +307,21 @@ class CodexNativeController:
         text = _text(params.get('text'), 'prompt', 256 * 1024)
         message_id = _text(params.get('clientUserMessageId'), 'message id')
         if message_id in task['messages']: raise NativeFailure('message was already submitted')
+        task['executionId']=str(uuid.uuid4())
+        task['artifactTurnId']=None
+        task['artifactBaseline']=None
+        task['artifactBaseline']=self._workspace_read(params,'manifest')
+        if self.audit:self.audit.record(task['taskId'],'operation.artifactBaseline',bindingId=task['bindingId'],executionId=task['executionId'],fileCount=len(task['artifactBaseline']['files']),inventoryComplete=task['artifactBaseline']['inventoryComplete'],hashComplete=task['artifactBaseline']['hashComplete'],reason=task['artifactBaseline'].get('reason'))
         task['messages'].add(message_id)
         task['uncertain'] = True
         instance = self.instances[task['instanceId']]
         result = instance['transport'].request('turn/start', {'threadId': task['threadId'], 'input': [{'type': 'text', 'text': text}], 'clientUserMessageId': message_id, **self._policy(instance)})
         turn_id = _text(result.get('turn', {}).get('id'), 'turn id')
         # A completion event can arrive before this response; do not restore that turn.
-        if task['uncertain']: task.update(turnId=turn_id, uncertain=False)
+        task['artifactTurnId']=turn_id
+        if task['uncertain']:
+            if turn_id in task['terminalTurns']:task.update(turnId=None,uncertain=False,status={'type':'idle'})
+            else:task.update(turnId=turn_id, uncertain=False)
         return {'turnId': turn_id}
 
     def _pages(self, instance, method, params, limit=None, *, validate_scope=None, deadline=None, byte_budget=None):

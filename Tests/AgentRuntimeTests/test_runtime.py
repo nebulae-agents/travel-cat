@@ -87,7 +87,13 @@ class PolicyTests(unittest.TestCase):
 
 class ProcessTests(unittest.TestCase):
     def task(self):
-        return sidecar.Task(str(uuid.uuid4()),dict(image='x@sha256:'+'a'*64,command=['agent']),sidecar.Provider(dict(baseURL='https://example.com/v1',apiKey='canary',model='m',api='responses')),lambda e:self.events.append(e),audit=acknowledged_test_broker())
+        task=sidecar.Task(str(uuid.uuid4()),dict(image='x@sha256:'+'a'*64,command=['agent']),sidecar.Provider(dict(baseURL='https://example.com/v1',apiKey='canary',model='m',api='responses')),lambda e:self.events.append(e),audit=acknowledged_test_broker())
+        # This class uses real ACP stdio without a Docker container. Run the real
+        # trusted workspace reader in a temporary root for prompt baseline scans.
+        import tempfile
+        directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
+        task.workspace=lambda method,**params:sidecar.workspace_io.perform({'method':method,**params},directory.name)
+        return task
     def setUp(self): self.events=[]
     def test_actual_acp_stdio_permissions_updates_cancel(self):
         import subprocess, threading
@@ -170,11 +176,13 @@ for line in sys.stdin:
             self.assertEqual(t.start(),{'sessionId':'real-stdio-session'})
             self.assertNotIn('canary',str(commands))
             self.assertIn('OPENAI_API_KEY=travelcat-placeholder',str(commands))
+            prompt_sent=threading.Event();real_send=t.send
+            def observed_send(process,lock,message):
+                real_send(process,lock,message)
+                if message.get('method')=='session/prompt':prompt_sent.set()
+            t.send=observed_send
             results=[];worker=threading.Thread(target=lambda:results.append(t.prompt('wait')));worker.start()
-            deadline=time.monotonic()+3
-            while not t.turn.locked() and time.monotonic()<deadline: time.sleep(.01)
-            # Wait until the prompt request has been written before cancellation.
-            with t.acp_write: pass
+            self.assertTrue(prompt_sent.wait(3),'the actual ACP prompt must be written before cancellation')
             self.assertFalse(any(e['data'].get('status')=='cancelled' for e in self.events))
             self.assertEqual(t.cancel(),{'requested':True});worker.join(3)
             self.assertEqual(results,[{'stopReason':'cancelled'}])

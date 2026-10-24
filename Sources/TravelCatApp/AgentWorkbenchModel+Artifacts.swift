@@ -2,8 +2,23 @@ import Foundation
 import CoreFoundation
 import Darwin
 
+private struct ArtifactReadBinding: Equatable {
+    let revision: UUID
+    let instanceID: UUID
+    let sessionID: String?
+    let threadID: String?
+    let connectionGeneration: UUID?
+}
+
 @MainActor
 extension AgentWorkbenchModel {
+    func invalidateArtifactReads(_ id: UUID) {
+        artifactReadRevisions[id] = UUID()
+        artifactInventories.removeValue(forKey: id)
+    }
+    func invalidateAllArtifactReads() {
+        for id in Set(artifactReadRevisions.keys).union(liveTasks) { invalidateArtifactReads(id) }
+    }
     private func readableArtifactTask(_ id: UUID) throws -> WorkbenchTask {
         guard isStorageReady, let task = state.tasks.first(where: { $0.id == id }), liveTasks.contains(id),
               task.nativeState == nil || task.nativeState?.connection == .connected,
@@ -12,65 +27,138 @@ extension AgentWorkbenchModel {
         }
         return task
     }
+    private func artifactBinding(_ id: UUID) throws -> ArtifactReadBinding {
+        let task = try readableArtifactTask(id)
+        let revision = artifactReadRevisions[id] ?? UUID(); artifactReadRevisions[id] = revision
+        return .init(revision: revision, instanceID: task.instanceID, sessionID: task.sessionID,
+                     threadID: task.nativeState?.threadID, connectionGeneration: nativeConnectionGenerations[task.instanceID])
+    }
+    private func requireArtifactBinding(_ binding: ArtifactReadBinding, _ id: UUID) throws {
+        guard try artifactBinding(id) == binding else { throw WorkbenchFailure("读取期间任务会话或本轮执行已变化，请刷新后重试。") }
+    }
     private func artifactRecord(_ id: UUID, _ kind: String, fields: [String: Any] = [:]) throws {
         try nativeRecord(id, kind: "artifact." + kind, fields: fields)
     }
     func listArtifacts(taskID: UUID) async throws -> [WorkbenchArtifact] {
-        let task = try readableArtifactTask(taskID)
+        let task = try readableArtifactTask(taskID), binding = try artifactBinding(taskID)
+        guard artifactReadRequests.insert(taskID).inserted else { throw WorkbenchFailure("已有文件读取正在进行，请稍后重试。") }
+        defer { artifactReadRequests.remove(taskID) }
         try artifactRecord(taskID, "list.requested")
-        let result = try await client.request(task.nativeState == nil ? "artifacts" : "native_artifacts", ["taskId": taskID.uuidString])
-        _ = try readableArtifactTask(taskID)
-        guard let files = result["files"] as? [[String:Any]], files.count <= 200 else { throw WorkbenchFailure("文件列表无效或超出数量限制。") }
+        let result = try await client.request(task.nativeState == nil ? "artifact_changes" : "native_artifact_changes", ["taskId": taskID.uuidString], timeout: 15)
+        try requireArtifactBinding(binding,taskID)
+        guard let files = result["files"] as? [[String:Any]], files.count <= 200,
+              let backendBinding = result["bindingId"] as? String, !backendBinding.isEmpty, backendBinding.utf8.count <= 128,
+              let checked = result["checkedAt"] as? NSNumber, CFGetTypeID(checked) != CFBooleanGetTypeID(), checked.doubleValue.isFinite,
+              let inventoryComplete = result["inventoryComplete"] as? Bool, let hashComplete = result["hashComplete"] as? Bool,
+              let baselineInventory = result["baselineInventoryComplete"] as? Bool, let baselineHash = result["baselineHashComplete"] as? Bool else { throw WorkbenchFailure("文件列表或扫描口径无效。") }
+        let execution = result["executionId"] as? String
+        guard execution?.utf8.count ?? 0 <= 128 else { throw WorkbenchFailure("文件执行作用域无效。") }
         var seen = Set<String>()
-        return try files.map { entry in
+        let parsed = try files.map { entry -> WorkbenchArtifact in
             guard let path = entry["path"] as? String, let value = entry["size"] as? NSNumber,
                   CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite,
                   value.doubleValue.rounded() == value.doubleValue, value.doubleValue >= 0,
-                  value.doubleValue <= Double(WorkbenchArtifactLimits.bytes), seen.insert(path).inserted else {
-                throw WorkbenchFailure("文件列表含有无效条目。")
-            }
+                  value.doubleValue <= Double(1 << 50), seen.insert(path).inserted,
+                  let change = entry["change"] as? String, ["new","modified","unchanged","unknown"].contains(change) else { throw WorkbenchFailure("文件列表含有无效条目。") }
             try WorkbenchArtifactLimits.validate(path: path)
-            return WorkbenchArtifact(path:path,size:value.intValue)
+            let sha = entry["sha256"] as? String, reason = entry["reason"] as? String
+            guard (entry["sha256"] == nil || sha.map(WorkbenchArtifactLimits.validSHA) == true),
+                  reason?.utf8.count ?? 0 <= 256, change == "unknown" || sha != nil else { throw WorkbenchFailure("文件 SHA 或变化口径无效。") }
+            return .init(path:path,size:value.intValue,sha256:sha,change:change,reason:reason,bindingID:backendBinding,executionID:execution)
         }.sorted { $0.path < $1.path }
+        let baseline = (result["baselineCapturedAt"] as? NSNumber).flatMap { $0.doubleValue.isFinite ? Date(timeIntervalSince1970:$0.doubleValue) : nil }
+        artifactInventories[taskID] = .init(bindingID:backendBinding,executionID:execution,turnID:result["turnId"] as? String,
+            baselineCapturedAt:baseline,checkedAt:Date(timeIntervalSince1970:checked.doubleValue),inventoryComplete:inventoryComplete,hashComplete:hashComplete,
+            baselineInventoryComplete:baselineInventory,baselineHashComplete:baselineHash,reason:result["reason"] as? String,files:parsed)
+        return parsed
     }
-    func readArtifactBytes(taskID: UUID, path: String, expectedSize: Int?) async throws -> Data {
+    func readArtifactBytes(taskID: UUID, path: String, expectedSize: Int?, expectedArtifact: WorkbenchArtifact? = nil) async throws -> Data {
         try WorkbenchArtifactLimits.validate(path: path)
         guard expectedSize == nil || (0...WorkbenchArtifactLimits.bytes).contains(expectedSize!) else { throw WorkbenchFailure("文件超过 4 MiB 限额。") }
-        let task = try readableArtifactTask(taskID)
+        let task = try readableArtifactTask(taskID), binding = try artifactBinding(taskID)
+        guard artifactReadRequests.insert(taskID).inserted else { throw WorkbenchFailure("已有文件读取正在进行，请稍后重试。") }
+        defer { artifactReadRequests.remove(taskID) }
         try artifactRecord(taskID, "read.requested", fields:["path":path])
-        let result = try await client.request(task.nativeState == nil ? "export" : "native_export", ["taskId":taskID.uuidString,"path":path])
-        _ = try readableArtifactTask(taskID)
+        var params: [String:Any] = ["taskId":taskID.uuidString,"path":path]
+        if let backend = expectedArtifact?.bindingID { params["bindingId"] = backend; params["executionId"] = expectedArtifact?.executionID ?? NSNull() as Any }
+        let result = try await client.request(task.nativeState == nil ? "export" : "native_export", params, timeout: 15)
+        try requireArtifactBinding(binding,taskID)
+        if let backend = expectedArtifact?.bindingID {
+            guard result["bindingId"] as? String == backend, result["executionId"] as? String == expectedArtifact?.executionID else { throw WorkbenchFailure("文件列表属于先前会话或执行，请刷新。") }
+        }
         guard let name = result["name"] as? String, name == path.split(separator:"/").last.map(String.init),
               let encoded = result["base64"] as? String, encoded.utf8.count <= ((WorkbenchArtifactLimits.bytes + 2) / 3) * 4,
               let data = Data(base64Encoded:encoded), data.base64EncodedString() == encoded,
-              data.count <= WorkbenchArtifactLimits.bytes, expectedSize == nil || data.count == expectedSize else {
-            throw WorkbenchFailure("文件内容无效、大小变化或超过 4 MiB，请刷新列表后重新预览。")
-        }
-        try artifactRecord(taskID, "read.completed", fields:["path":path,"bytes":data.count,"sha256":WorkbenchArtifactPreview.digest(data)])
+              data.count <= WorkbenchArtifactLimits.bytes, expectedSize == nil || data.count == expectedSize else { throw WorkbenchFailure("文件内容无效、大小变化或超过 4 MiB，请刷新列表后重新预览。") }
+        let sha = WorkbenchArtifactPreview.digest(data)
+        if let expectedSHA = expectedArtifact?.sha256, sha != expectedSHA { throw WorkbenchFailure("文件内容已变化，请刷新列表后重新预览。") }
+        try artifactRecord(taskID, "read.completed", fields:["path":path,"bytes":data.count,"sha256":sha])
         return data
     }
     func loadArtifact(taskID: UUID, artifact: WorkbenchArtifact) async throws -> WorkbenchArtifactPreview {
-        let bytes = try await readArtifactBytes(taskID:taskID,path:artifact.path,expectedSize:artifact.size)
+        guard artifact.readable else { throw WorkbenchFailure("此文件只提供元数据，超过限额或不是可安全读取的普通文件。") }
+        let bytes = try await readArtifactBytes(taskID:taskID,path:artifact.path,expectedSize:artifact.size,expectedArtifact:artifact)
         return WorkbenchArtifactPreview(artifact:artifact,bytes:bytes)
     }
     func confirmArtifact(taskID: UUID, preview: WorkbenchArtifactPreview) async throws {
         try WorkbenchArtifactLimits.validate(preview)
-        _ = try readableArtifactTask(taskID)
+        let binding = try artifactBinding(taskID)
         try artifactRecord(taskID, "confirm.requested", fields:["path":preview.artifact.path,"sha256":preview.sha256])
         let current = try await readArtifactBytes(taskID:taskID,path:preview.artifact.path,expectedSize:nil)
-        guard WorkbenchArtifactPreview.digest(current) == preview.sha256 else { throw WorkbenchFailure("文件已变化，请刷新并重新预览，再确认新版本。") }
+        try requireArtifactBinding(binding,taskID)
+        guard WorkbenchArtifactPreview.digest(current) == preview.sha256 else { throw WorkbenchFailure("文件已变化，请读取新版本，再确认。") }
         var next = state
         guard let index = next.tasks.firstIndex(where: { $0.id == taskID }) else { throw WorkbenchFailure("任务已不存在。") }
         var reviews = next.tasks[index].artifactReviews ?? []
-        reviews.removeAll { $0.path == preview.artifact.path }
-        reviews.append(.init(path:preview.artifact.path,sha256:preview.sha256,reviewedAt:Date()))
+        if !reviews.contains(where: { $0.path == preview.artifact.path && $0.sha256 == preview.sha256 }) {
+            reviews.append(.init(path:preview.artifact.path,sha256:preview.sha256,reviewedAt:Date()))
+        }
         next.tasks[index].artifactReviews = reviews
         try artifactRecord(taskID, "confirm.verified", fields:["path":preview.artifact.path,"sha256":preview.sha256])
-        try store.save(next)
-        state = next
+        try store.save(next); state = next
     }
     func isArtifactConfirmed(taskID: UUID, preview: WorkbenchArtifactPreview) -> Bool {
         state.tasks.first(where: { $0.id == taskID })?.artifactReviews?.contains(where: { $0.path == preview.artifact.path && $0.sha256 == preview.sha256 }) == true
+    }
+    func artifactHistory(taskID: UUID, path: String) -> [WorkbenchArtifactVersion] {
+        (state.tasks.first(where: { $0.id == taskID })?.artifactVersions ?? []).filter { $0.path == path }.reversed()
+    }
+    func viewSavedArtifactVersion(taskID: UUID, version: WorkbenchArtifactVersion, present: (WorkbenchArtifactPreview) -> Void) throws {
+        guard isStorageReady,
+              let stored = artifactHistory(taskID:taskID,path:version.path).first(where: { $0.sha256 == version.sha256 }),
+              let text = stored.text else { throw WorkbenchFailure("此历史正文已不在最近两次查看记录中，或只保存了元数据。") }
+        let bytes = Data(text.utf8)
+        let saved = WorkbenchArtifactPreview(artifact:.init(path:stored.path,size:bytes.count),bytes:bytes)
+        try WorkbenchArtifactLimits.validate(saved)
+        guard saved.sha256 == stored.sha256, bytes.count == stored.size else { throw WorkbenchFailure("历史正文校验失败，未替换当前预览。") }
+        present(saved)
+        // A successful re-open is a new actual view. Preserve the displayed bytes
+        // if persistence fails, while propagating the failure to the UI notice.
+        try rememberArtifactPreview(taskID:taskID,preview:saved)
+    }
+    func rememberArtifactPreview(taskID: UUID, preview: WorkbenchArtifactPreview) throws {
+        // Called only after the UI actually presents the immutable bytes.
+        try WorkbenchArtifactLimits.validate(preview)
+        guard isStorageReady, store.keyData != nil, let index = state.tasks.firstIndex(where: { $0.id == taskID }) else { throw WorkbenchFailure("加密存储不可用，未保存已查看文件历史。") }
+        var next = state, versions = state.tasks[index].artifactVersions ?? []
+        let path = preview.artifact.path
+        let paths = Set(versions.map(\.path))
+        guard paths.contains(path) || paths.count < 16 else { artifactHistoryNotice[taskID] = "每个任务最多保存 16 个文件路径的历史；新预览未保存，不会清除已有数据。"; return }
+        versions.removeAll { $0.path == path && $0.sha256 == preview.sha256 }
+        // Roll only this path's two viewed versions. Confirmation SHA records remain independent.
+        let samePath = versions.filter { $0.path == path }
+        if samePath.count >= 2, let oldest = samePath.first { versions.removeAll { $0.id == oldest.id } }
+        let otherTasks = next.tasks.enumerated().filter { $0.offset != index }.flatMap { $0.element.artifactVersions ?? [] }
+        guard otherTasks.count + versions.count < 128 else { artifactHistoryNotice[taskID] = "文件历史达到 128 条元数据限额；新预览未保存，不会清除已有数据。"; return }
+        var text = WorkbenchArtifactText.savedText(preview)
+        var reason: String?
+        if text == nil { reason = preview.bytes.count > WorkbenchArtifactText.limit ? "正文超过 256 KiB，只保存 SHA 和大小。" : "二进制、图片、PDF 或非 UTF-8 文本，只保存 SHA 和大小。" }
+        let total = (otherTasks + versions).compactMap(\.text).reduce(0) { $0 + $1.utf8.count }
+        if let value = text, total + value.utf8.count > 2 * 1024 * 1024 { text = nil; reason = "已保存正文达到 2 MiB 限额，本版本只保存 SHA 和大小；未清除其它历史。" }
+        versions.append(.init(path:path,sha256:preview.sha256,size:preview.bytes.count,viewedAt:Date(),text:text,reason:reason))
+        next.tasks[index].artifactVersions = versions
+        try store.save(next); state = next
+        artifactHistoryNotice[taskID] = reason
     }
     func downloadArtifactPreview(taskID: UUID, preview: WorkbenchArtifactPreview, to destination: URL) throws {
         guard state.tasks.contains(where: { $0.id == taskID }), isStorageReady else { throw WorkbenchFailure("任务已不存在或存储不可用。") }

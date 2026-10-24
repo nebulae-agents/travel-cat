@@ -150,7 +150,7 @@ class SubmissionTests(unittest.TestCase):
    records.append(event['data']['record']);self.broker.ack(event['data']['receiptId'],True)
   self.broker.emit=emit
   data=b'original selected bytes';files=[{'name':'input.txt','base64':base64.b64encode(data).decode()}]
-  with patch.object(sidecar,'run_docker',return_value='{}'):self.task.workspace('import',files=files)
+  with patch.object(sidecar,'run_docker',return_value='{"imported":1,"rootIdentity":[1,2]}'):self.task.workspace('import',files=files)
   self.assertEqual(records[0]['files'],[{'name':'input.txt','bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}])
   self.assertNotIn(files[0]['base64'],str(records))
  def test_start_record_identifies_runtime_and_sandbox(self):
