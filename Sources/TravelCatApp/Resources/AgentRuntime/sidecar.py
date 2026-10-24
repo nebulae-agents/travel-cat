@@ -241,7 +241,7 @@ class Task:
             if not isinstance(self.session,str) or not self.session: raise RuntimeFailure('adapter returned invalid session')
             threading.Thread(target=self.expire,daemon=True).start()
             threading.Thread(target=self.sweep_permissions,daemon=True).start()
-            return {'sessionId':self.session}
+            return {'sessionId':self.session,'containerName':self.name}
         except Exception:
             self.stop()
             self.cleanup()
@@ -417,6 +417,14 @@ class Task:
         finally:self.artifact_read_slot.release()
     def artifact_changes(self):return self.artifact_read('manifest')
     def model_permission(self,call_id,request_hash,allow):
+        # Swift UUID.uuidString uses uppercase; identify the same UUID without
+        # relaxing its task-local request hash, deadline or one-shot binding.
+        try:
+            canonical=str(uuid.UUID(call_id))
+            if canonical!=call_id.lower(): raise ValueError()
+        except (ValueError,TypeError,AttributeError):
+            raise RuntimeFailure('model permission stale or mismatched') from None
+        call_id=canonical
         with self.lock:
             entry=self.model_permissions.get(call_id)
             if not entry or entry['hash']!=request_hash or entry['event'].is_set() or time.monotonic()>entry['deadline'] or self.stopped.is_set():

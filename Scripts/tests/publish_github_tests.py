@@ -466,13 +466,17 @@ class PublishArtifactsTests(unittest.TestCase):
         job_environment, steps = workflow.split("    steps:", 1)
         self.assertNotIn("${{ runner.temp }}", job_environment)
         self.assertIn('echo "TRAVEL_CAT_SCRATCH_ROOT=$RUNNER_TEMP/travel-cat-swift" >> "$GITHUB_ENV"', steps)
-        for name in ("Python source contracts", "Upload tooling contracts", "Plugin contracts",
+        for name in ("Python source contracts", "Agent runtime contracts", "Upload tooling contracts", "Plugin contracts",
                      "Skill contracts", "Agent contracts", "Swift tests (UTC)",
                      "Prompt tests (Asia/Shanghai)", "Public upload audit"):
             self.assertIn("- name: " + name, steps)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("runs-on: macos-15", workflow)
         self.assertIn("actions/checkout@v7", workflow)
+        self.assertIn("actions/setup-python@v7", workflow)
+        self.assertIn("python-version: '3.13'", workflow)
+        self.assertIn("assert sys.version_info >= (3, 11)", workflow)
+        self.assertIn("python3 -m unittest discover -s Tests/AgentRuntimeTests -p 'test_*.py'", workflow)
         self.assertIn("/Applications/Xcode_26.2.app/Contents/Developer", workflow)
         self.assertIn("Scripts/travel-cat-swift.sh test", workflow)
         self.assertNotIn("TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE: 1", workflow)
@@ -486,6 +490,7 @@ class PublishArtifactsTests(unittest.TestCase):
             "TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT", "TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT",
             "TRAVELCAT_REVISION_BENCHMARK_PHOTO", "TRAVEL_CAT_LANDMARK_ACCEPTANCE",
             "TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT", "TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE",
+            "TRAVEL_CAT_CODEX_LIVE_TEST", "TRAVEL_CAT_CODEX_LIVE_IMAGE", "TRAVEL_CAT_CODEX_LIVE_CONTEXT",
         }
         offline_unsets = [line.strip().split()[1:] for line in steps.splitlines()
                           if line.strip().startswith("unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE ")]

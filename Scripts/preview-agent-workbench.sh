@@ -2,22 +2,8 @@
 set -euo pipefail
 project_root="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
 preview_root="${TRAVEL_CAT_PREVIEW_ROOT:-$(mktemp -d /tmp/travelcat-agent-preview.XXXXXX)}"
-preview_app="$preview_root/AgentWorkbenchPreview.app"
-mkdir -p "$preview_app/Contents/MacOS" "$preview_app/Contents/Resources"
-cp "$project_root/Sources/TravelUI/Resources/PreviewPostcards/preview-kyoto-lanterns.png" "$preview_app/Contents/Resources/preview.png"
-cat > "$preview_app/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>AgentWorkbenchPreview</string>
-<key>CFBundleIdentifier</key><string>com.nebulae.travelcat.agent-preview</string>
-<key>CFBundleName</key><string>AgentWorkbenchPreview</string>
-<key>CFBundleVersion</key><string>1</string>
-<key>CFBundleShortVersionString</key><string>1.0</string>
-<key>NSPrincipalClass</key><string>NSApplication</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-</dict></plist>
-PLIST
+preview_name="${TRAVEL_CAT_PREVIEW_NAME:-AgentWorkbenchPreview}"
+preview_app="$(python3 "$project_root/Scripts/prepare-agent-preview.py" --project-root "$project_root" --root "$preview_root" --name "$preview_name" --bundle-id "${TRAVEL_CAT_PREVIEW_BUNDLE_ID:-com.nebulae.travelcat.agent-preview}")"
 # Build dependencies through the repository wrapper; all products stay outside the worktree.
 build_args=(--build-system native)
 if [[ -n "${TRAVEL_CAT_PREVIEW_SDK:-}" ]]; then build_args+=(--sdk "$TRAVEL_CAT_PREVIEW_SDK"); fi
@@ -77,6 +63,6 @@ xcrun swiftc -target "$(uname -m)-apple-macos14.0" -swift-version 6 -parse-as-li
   "$project_root/Sources/TravelCatApp/AgentWorkbenchView.swift" \
   "$project_root/Sources/TravelCatApp/ServiceCredentialStore.swift" \
   "$project_root/Tests/ManualAgentWorkbench/${TRAVEL_CAT_PREVIEW_SOURCE:-Preview.swift}" \
-  -o "$preview_app/Contents/MacOS/AgentWorkbenchPreview"
+  -o "$preview_app/Contents/MacOS/$preview_name"
 print -r -- "$preview_app"
-# Caller opens the printed app path; fixture data is removed when its window closes.
+# Caller opens the printed app path. Native fixtures preserve their independent profile and ownership evidence.

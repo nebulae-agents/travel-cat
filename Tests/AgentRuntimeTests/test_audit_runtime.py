@@ -76,6 +76,20 @@ class SubmissionTests(unittest.TestCase):
   self.assertEqual([r['sequence'] for r in fragments],list(range(len(fragments))))
   self.assertEqual(records[-1]['usage']['totalInput'],4)
   self.assertNotIn('private-key',str(records))
+ def test_swift_uppercase_call_uuid_preserves_hash_one_shot_and_deadline_binding(self):
+  call=str(uuid.uuid4());event=threading.Event()
+  entry={'hash':'bound-request-sha','event':event,'allow':False,'deadline':time.monotonic()+1}
+  self.task.model_permissions[call]=entry
+  for identifier,request_hash in [(call.upper(),'wrong-sha'),(str(uuid.uuid4()).upper(),'bound-request-sha')]:
+   with self.assertRaises(sidecar.RuntimeFailure):self.task.model_permission(identifier,request_hash,False)
+  self.assertFalse(event.is_set())
+  try: result=self.task.model_permission(call.upper(),'bound-request-sha',False)
+  except sidecar.RuntimeFailure: self.fail('Swift uuidString upper-case call ID must resolve the same bound approval')
+  self.assertEqual(result,{});self.assertTrue(event.is_set());self.assertFalse(entry['allow'])
+  with self.assertRaises(sidecar.RuntimeFailure):self.task.model_permission(call,'bound-request-sha',True)
+  entry['event']=threading.Event();entry['deadline']=time.monotonic()-1
+  with self.assertRaises(sidecar.RuntimeFailure):self.task.model_permission(call.upper(),'bound-request-sha',True)
+  self.assertFalse(entry['event'].is_set());self.assertEqual(self.network,[])
  def test_denial_never_submits(self):
   self.start();self.wait(lambda:bool(self.events));self.ack(self.events[0])
   self.wait(lambda:any(e['event']=='modelApproval' for e in self.events))
