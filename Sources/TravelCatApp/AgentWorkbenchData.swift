@@ -102,6 +102,7 @@ struct WorkbenchSnapshot: Codable, Sendable {
     var instances: [WorkbenchInstance] = []
     var tasks: [WorkbenchTask] = []
     var pythonPath = "/opt/homebrew/bin/python3"
+    var drafts: WorkbenchDraftCollection? = nil
 }
 
 struct WorkbenchStore {
@@ -120,7 +121,9 @@ struct WorkbenchStore {
             guard FileManager.default.fileExists(atPath: url.path) else { return WorkbenchSnapshot() }
             raw = try Data(contentsOf: url)
         }
+        guard raw.count <= 64 * 1024 * 1024 else { throw WorkbenchFailure("Agent 数据超过保存上限，原文件未覆盖。") }
         var state = try JSONDecoder().decode(WorkbenchSnapshot.self, from: raw)
+        try state.drafts?.validate()
         guard state.schemaVersion == 1 else { throw WorkbenchFailure("不支持的 Agent 配置版本，未覆盖原文件。") }
         for index in state.tasks.indices {
             if state.tasks[index].nativeState != nil { state.tasks[index].nativeState?.connection = .disconnected }
@@ -133,6 +136,7 @@ struct WorkbenchStore {
     }
     func save(_ state: WorkbenchSnapshot) throws {
         guard state.schemaVersion == 1 else { throw WorkbenchFailure("不支持的配置版本。") }
+        try state.drafts?.validate()
         if let keyData {
             try EncryptedWorkbenchStorage(root: root, keyData: keyData).save(JSONEncoder().encode(state))
             return
@@ -140,6 +144,7 @@ struct WorkbenchStore {
         guard !root.resolvingSymlinksInPath().path.hasPrefix("/dev/") else { throw WorkbenchFailure("无效的存储位置。") }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let encoded = try JSONEncoder().encode(state)
+        guard encoded.count <= 64 * 1024 * 1024 else { throw WorkbenchFailure("Agent 数据超过保存上限，原文件未覆盖。") }
         try encoded.write(to: url, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }

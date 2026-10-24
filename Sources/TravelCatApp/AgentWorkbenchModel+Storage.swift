@@ -125,6 +125,7 @@ extension AgentWorkbenchModel {
             savingInstance = true; defer { savingInstance = false }
             guard let instance = state.instances.first(where: { $0.id == instanceID }) else { return }
             guard !state.tasks.contains(where: { $0.instanceID == instanceID && liveTasks.contains($0.id) }) else { throw WorkbenchFailure("请先结束该实例的会话。") }
+            guard draft(for: .new(instanceID)).isEmpty else { throw WorkbenchFailure("该 Agent 还有未发送草稿，请先保留或清空草稿再删除。") }
             guard instance.native == nil || !state.tasks.contains(where: { $0.instanceID == instanceID }) else {
                 throw WorkbenchFailure("此原生实例仍有会话记录，需保留配置以便恢复和控制后台任务。")
             }

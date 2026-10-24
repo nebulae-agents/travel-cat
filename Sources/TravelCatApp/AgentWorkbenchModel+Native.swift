@@ -102,7 +102,7 @@ extension AgentWorkbenchModel {
         }
         try persistNative()
         let result = try await client.request("native_prompt", ["taskId": id.uuidString, "text": text, "clientUserMessageId": messageID], timeout: 90)
-        guard let turn = result["turnId"] as? String, !turn.isEmpty else { throw WorkbenchFailure("本轮提交结果未知，不会自动重发。") }
+        guard let turn = result["turnId"] as? String, !turn.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw WorkbenchFailure("本轮提交结果未知，不会自动重发。") }
         mutate(id) {
             // Completion notifications may arrive before the start response.
             if $0.nativeState?.turnID == nil { $0.nativeState?.turnID = turn }

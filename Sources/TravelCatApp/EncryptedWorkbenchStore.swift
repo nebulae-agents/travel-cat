@@ -87,6 +87,7 @@ struct EncryptedWorkbenchStorage {
         guard bytes.count <= limit else { throw failure() }
         let snapshot = try JSONDecoder().decode(WorkbenchSnapshot.self, from: bytes)
         guard snapshot.schemaVersion == 1 else { throw WorkbenchFailure("不支持的对话版本，未覆盖原数据。") }
+        try snapshot.drafts?.validate()
         return snapshot
     }
 

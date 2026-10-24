@@ -22,19 +22,6 @@ struct WorkbenchModelApproval: Identifiable {
     let model: String
 }
 
-// A revision protects newer edits even when the user changes text back to its old value.
-struct WorkbenchSubmissionDraft: Equatable {
-    var text = "" { didSet { revision = UUID() } }
-    var files: [[String: String]] = [] { didSet { revision = UUID() } }
-    var parentTaskID: UUID? { didSet { revision = UUID() } }
-    private(set) var revision = UUID()
-
-    mutating func clear(ifUnchangedSince submittedRevision: UUID) {
-        guard revision == submittedRevision else { return }
-        text = ""; files = []; parentTaskID = nil
-    }
-}
-
 @MainActor
 final class AgentWorkbenchModel: ObservableObject {
     @Published var state: WorkbenchSnapshot
@@ -89,6 +76,10 @@ final class AgentWorkbenchModel: ObservableObject {
     var isStorageReady: Bool { !loadFailed && storageStatus == .ready && !hasShutdown }
     let client: any AgentRuntimeClient
     private var saveTask: Task<Void, Never>?
+    var draftSaveTask: Task<Void, Never>?
+    var draftsDirty = false
+    @Published var draftSaveNotice: String?
+    @Published var submittingDrafts: [WorkbenchDraftTarget: Set<UUID>] = [:]
     var liveTasks: Set<UUID> = []
     var loadFailed = false
     @Published private var startingSubmissionID: UUID?
@@ -193,6 +184,7 @@ final class AgentWorkbenchModel: ObservableObject {
             error = "请先结束该实例的会话。"; return
         }
         guard let instance = state.instances.first(where: { $0.id == instanceID }) else { return }
+        guard draft(for: .new(instanceID)).isEmpty else { error = "该 Agent 还有未发送草稿，请先保留或清空草稿再删除。"; return }
         guard instance.native == nil || !state.tasks.contains(where: { $0.instanceID == instanceID }) else {
             error = "此原生实例仍有会话记录，需保留配置以便恢复和控制后台任务。"; return
         }
@@ -377,9 +369,12 @@ final class AgentWorkbenchModel: ObservableObject {
                 }
                 mutate(task.id) { $0.sessionID = sessionID; $0.status = .running }
                 startingSubmissionID = nil
-                onStarted?()
                 try await sendPrompt(task.id, instruction)
-            } catch { fail(task.id, error) }
+                onStarted?()
+            } catch {
+                fail(task.id, error)
+                self.error = "提交未成功或结果未确认，请先核对会话；草稿已保留，不会自动重发。"
+            }
         } catch { self.error = error.localizedDescription }
     }
     @discardableResult
@@ -452,7 +447,7 @@ final class AgentWorkbenchModel: ObservableObject {
         try await readArtifactBytes(taskID: id, path: path, expectedSize: nil)
     }
     func shutdown() {
-        saveTask?.cancel(); persist()
+        saveTask?.cancel(); draftSaveTask?.cancel(); persist()
         hasShutdown = true; storageGeneration = UUID(); storageTask?.cancel()
         invalidateAllNativeBackgroundStatus(); nativeBackgroundVisibility.removeAll()
         client.shutdown()
@@ -634,6 +629,13 @@ final class AgentWorkbenchModel: ObservableObject {
     }
     func persist() {
         guard isStorageReady else { return }
-        do { try store.save(state) } catch { self.error = "Agent 记录保存失败，请检查存储目录。" }
+        do {
+            try store.save(state)
+            draftsDirty = false; draftSaveNotice = nil
+            draftSaveTask?.cancel(); draftSaveTask = nil
+        } catch {
+            self.error = "Agent 记录保存失败，请检查存储目录。"
+            if draftsDirty { draftSaveNotice = "草稿尚未保存，仅保留于本次运行。请重试保存后再退出。" + Self.storageFailureDescription(error) }
+        }
     }
 }

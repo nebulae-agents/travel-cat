@@ -1051,3 +1051,32 @@ final class NativeAgentModelTests: XCTestCase {
     }
 
 }
+
+
+extension NativeAgentModelTests {
+    @MainActor func testNativeDraftClearsOnlyAfterValidTurnAcknowledgement() async throws {
+        let (model, runtime, _, _, root, instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let target = WorkbenchDraftTarget.new(instance.id)
+        model.updateDraft(target) { $0.text = "native draft" }
+        runtime.beforeRequest = { method, _ in
+            if method == "native_prompt" { XCTAssertEqual(model.draft(for: target).text, "native draft") }
+        }
+        await model.startDraft(target: target, instanceID: instance.id)
+        XCTAssertTrue(model.draft(for: target).isEmpty)
+        XCTAssertEqual(model.state.tasks.first?.nativeState?.turnID, "native-turn")
+    }
+    @MainActor func testUnknownNativeTurnDoesNotClearDraftOrAutomaticallyReplay() async throws {
+        for result: [String: Any] in [[:], ["turnId": "  "]] {
+            let (model, runtime, _, _, root, instance) = try fixture()
+            defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+            let target = WorkbenchDraftTarget.new(instance.id)
+            model.updateDraft(target) { $0.text = "preserve unknown native draft" }
+            runtime.results["native_prompt"] = result
+            await model.startDraft(target: target, instanceID: instance.id)
+            XCTAssertEqual(model.draft(for: target).text, "preserve unknown native draft")
+            XCTAssertEqual(runtime.requests.filter { $0.0 == "native_prompt" }.count, 1)
+            XCTAssertEqual(model.state.tasks.first?.status, .unknown)
+        }
+    }
+}
