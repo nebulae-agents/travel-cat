@@ -27,6 +27,9 @@ final class AgentSidecarClient: AgentRuntimeClient {
     private var pending: [String: CheckedContinuation<Data, Error>] = [:]
     private var deadlines: [String: Task<Void, Never>] = [:]
     private var generation = UUID()
+    // Transport invalidation can suppress onExit for an old generation. Keep
+    // actual subprocess lifetime independent so EOF is never treated as exit.
+    private var liveChildren: [UUID: Process] = [:]
 
     func launch(python: String) throws {
         if process?.isRunning == true { return }
@@ -52,13 +55,20 @@ final class AgentSidecarClient: AgentRuntimeClient {
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in _ = handle.availableData }
         child.terminationHandler = { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.generation == token else { return }
+                guard let self else { return }
+                self.liveChildren.removeValue(forKey: token)
+                guard self.generation == token else { return }
                 self.disconnected()
             }
         }
         process = child; input = stdinPipe.fileHandleForWriting
         output = stdoutPipe.fileHandleForReading; diagnostics = stderrPipe.fileHandleForReading
-        do { try child.run() } catch { disconnected(); throw WorkbenchFailure("无法启动隔离运行服务，请检查 Python 版本和路径。") }
+        liveChildren[token] = child
+        do { try child.run() }
+        catch {
+            liveChildren.removeValue(forKey: token)
+            disconnected(); throw WorkbenchFailure("无法启动隔离运行服务，请检查 Python 版本和路径。")
+        }
     }
 
     func request(_ method: String, _ params: [String: Any] = [:], timeout: UInt64 = 120) async throws -> [String: Any] {
@@ -91,6 +101,18 @@ final class AgentSidecarClient: AgentRuntimeClient {
     func shutdown() {
         // EOF lets the sidecar stop only containers it owns.
         try? input?.close(); input = nil
+    }
+
+    /// Observe actual child termination without killing it or changing shutdown
+    /// semantics. Public onExit and a closed stdin are not termination receipts.
+    func waitForExit(timeout: Duration) async -> Bool {
+        let clock = ContinuousClock(), deadline = ContinuousClock.now.advanced(by: timeout)
+        while !liveChildren.isEmpty {
+            guard !Task.isCancelled, clock.now < deadline else { return false }
+            do { try await Task.sleep(for: .milliseconds(20)) }
+            catch { return false }
+        }
+        return true
     }
 
     private func receive(_ data: Data) {

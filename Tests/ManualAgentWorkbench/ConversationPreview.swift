@@ -5,6 +5,15 @@ import SwiftUI
 
 extension Bundle { static var module: Bundle { .main } }
 
+// Size buttons describe the production viewport; fixture controls live above it.
+private enum ConversationFixtureViewport {
+    static let controlsHeight: CGFloat = 40
+    static let chromeHeight: CGFloat = 41 // fixed controls + one-point divider
+    static func windowContentSize(_ viewport: NSSize) -> NSSize {
+        .init(width: viewport.width, height: viewport.height + chromeHeight)
+    }
+}
+
 @MainActor private final class ConversationPreviewCredentials: TravelServiceCredentialStoring {
     var values: [String: String] = [:]
     func read(id: String) throws -> String? { values[id] }
@@ -39,16 +48,14 @@ extension Bundle { static var module: Bundle { .main } }
                     model.openConversation(archivedID)
                 }
                 Button("从邮筒打开") {
-                    if let i = model.state.tasks.firstIndex(where: { $0.id == archivedID }) {
-                        model.state.tasks[i].unread = true
-                        openMailbox(archivedID)
-                    }
+                    model.mutate(archivedID) { $0.unread = true }
+                    openMailbox(archivedID)
                 }
                 Button("迟到回复重现", action: lateReply)
                 Toggle("模拟保存失败", isOn: $failing).toggleStyle(.checkbox)
                     .onChange(of: failing) { _, value in model.store = value ? WorkbenchStore(root: URL(fileURLWithPath: "/dev/null")) : savedStore }
-            }.controlSize(.small).padding(8)
-            Divider()
+            }.controlSize(.small).padding(.horizontal, 8).frame(height: ConversationFixtureViewport.controlsHeight)
+            Divider().frame(height: 1)
             AgentWorkbenchView(model: model)
         }
     }
@@ -82,12 +89,12 @@ extension Bundle { static var module: Bundle { .main } }
         model.updateDraft(.task(archived.id)) { $0.text = "归档中也保留的草稿🙂" }
         model.openConversation(first.id); model.persist()
         let savedStore = model.store
-        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1000, height: 740), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1000, height: 740 + ConversationFixtureViewport.chromeHeight), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Travel Cat · 会话管理验收（离线夹具）"; window.isReleasedWhenClosed = false
-        window.appearance = NSAppearance(named: .aqua); window.contentMinSize = NSSize(width: 760, height: 600)
+        window.appearance = NSAppearance(named: .aqua); window.contentMinSize = ConversationFixtureViewport.windowContentSize(.init(width: 760, height: 600))
         let launcher = AgentLauncherController(model: model) { window.makeKeyAndOrderFront(nil) }
         let host = NSHostingView(rootView: ConversationPreviewSurface(model: model, archivedID: archived.id, savedStore: savedStore,
-            resize: { window.setContentSize($0) }, openMailbox: { launcher.openEntry("task-\($0)") }, lateReply: {
+            resize: { window.setContentSize(ConversationFixtureViewport.windowContentSize($0)) }, openMailbox: { launcher.openEntry("task-\($0)") }, lateReply: {
                 runtime.onEvent?(["event": "native", "taskId": archived.id.uuidString, "instanceId": instance.id.uuidString,
                     "data": ["method": "item/agentMessage/delta", "params": ["threadId": "fixture-thread", "turnId": "fixture-turn", "itemId": "late-fixture-reply", "delta": "迟到的离线回复🙂\n"]]])
             }))

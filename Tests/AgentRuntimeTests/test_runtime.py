@@ -173,7 +173,7 @@ for line in sys.stdin:
             return subprocess.Popen([sys.executable,'-u','-c',relay if args[-2]=='-c' else acp],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
         def docker(args,*a,**kw): return 'null' if args[0]=='image' else ''
         with patch.object(sidecar,'run_docker',docker),patch.object(t,'spawn',spawn):
-            self.assertEqual(t.start(),{'sessionId':'real-stdio-session'})
+            self.assertEqual(t.start(),{'sessionId':'real-stdio-session','containerName':t.name})
             self.assertNotIn('canary',str(commands))
             self.assertIn('OPENAI_API_KEY=travelcat-placeholder',str(commands))
             prompt_sent=threading.Event();real_send=t.send

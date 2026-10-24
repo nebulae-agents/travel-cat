@@ -325,6 +325,39 @@ final class AgentConversationManagementTests: XCTestCase {
         XCTAssertEqual(WorkbenchConversationPresentation.tasks(model.state.tasks, instanceID: nil).map(\.id), [id])
     }
 
+    @MainActor func testMailboxUnreadMutationRemainsActiveAfterRevealAndMarkRead() throws {
+        let (model, _, _, _, root, id) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        model.state.tasks[0].archivedAt = Date()
+        model.mutate(id) { $0.unread = true } // Same normalized production input used by the repaired fixture.
+        let presentation = AgentWorkbenchPresentation()
+        presentation.scope = .archived; presentation.filterInstanceID = UUID(); presentation.updateQuery("不存在的筛选")
+        let launcher = AgentLauncherController(model: model) {}
+        defer { launcher.hide() }
+        launcher.openEntry("task-\(id)")
+        presentation.reveal(model.state.tasks[0], pendingTaskIDs: model.pendingConversationTaskIDs)
+        XCTAssertEqual(model.selectedTaskID, id); XCTAssertEqual(presentation.scope, .active)
+        model.markRead(id)
+        XCTAssertFalse(model.state.tasks[0].unread)
+        XCTAssertEqual(WorkbenchConversationPresentation.tasks(model.state.tasks, instanceID: presentation.filterInstanceID,
+            query: presentation.query, scope: presentation.scope, pendingTaskIDs: model.pendingConversationTaskIDs).map(\.id), [id])
+    }
+    @MainActor func testQuietArchivedUpstreamOpenRetainsArchivedVisibilityAfterMarkRead() throws {
+        let (model, _, _, _, root, id) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let archivedAt = Date(timeIntervalSince1970: 42)
+        model.state.tasks[0].archivedAt = archivedAt
+        let presentation = AgentWorkbenchPresentation()
+        presentation.filterInstanceID = UUID(); presentation.updateQuery("不存在的筛选")
+        model.openConversation(id) // Same production entry used by upstream navigation; no new activity.
+        presentation.reveal(model.state.tasks[0], pendingTaskIDs: model.pendingConversationTaskIDs)
+        model.markRead(id)
+        XCTAssertEqual(model.selectedTaskID, id); XCTAssertEqual(presentation.scope, .archived)
+        XCTAssertEqual(model.state.tasks[0].archivedAt, archivedAt)
+        XCTAssertEqual(WorkbenchConversationPresentation.tasks(model.state.tasks, instanceID: presentation.filterInstanceID,
+            query: presentation.query, scope: presentation.scope, pendingTaskIDs: model.pendingConversationTaskIDs).map(\.id), [id])
+    }
+
     @MainActor func testLargeSingleGraphemeCannotBypassTitleOrQueryBounds() throws {
         let (model, _, _, _, root, id) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
