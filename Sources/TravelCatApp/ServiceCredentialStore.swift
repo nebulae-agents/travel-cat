@@ -40,13 +40,14 @@ private struct SystemTravelKeychainAccess: TravelKeychainAccess {
 @MainActor
 final class KeychainTravelServiceCredentialStore: TravelServiceCredentialStoring {
     private let access: any TravelKeychainAccess
+    private let service: String
 
-    init() { access = SystemTravelKeychainAccess() }
-    init(access: any TravelKeychainAccess) { self.access = access }
+    init(service: String = "com.nebulae.travelcat.model-services") { access = SystemTravelKeychainAccess(); self.service = service }
+    init(access: any TravelKeychainAccess) { self.access = access; self.service = "com.nebulae.travelcat.model-services" }
 
     private func query(_ id: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: "com.nebulae.travelcat.model-services",
+         kSecAttrService as String: service,
          kSecAttrAccount as String: id,
          kSecAttrSynchronizable as String: false]
     }

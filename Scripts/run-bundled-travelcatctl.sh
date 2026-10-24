@@ -60,6 +60,9 @@ ACTUAL_SHA=$(/usr/bin/shasum -a 256 "$PINNED_BINARY" | /usr/bin/awk '{print $1}'
 [ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] || fail "helper digest does not match provenance"
 
 BUNDLED_RESOURCES_ROOT="$APP_ROOT/Contents/Resources/TravelCat_TravelUI.bundle"
+if [ -d "$BUNDLED_RESOURCES_ROOT/Contents/Resources" ]; then
+    BUNDLED_RESOURCES_ROOT="$BUNDLED_RESOURCES_ROOT/Contents/Resources"
+fi
 
 if [ "$COMMAND" = "install-default-pet" ]; then
     if [ "${CODEX_HOME+x}" = x ]; then

@@ -997,6 +997,27 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.events.isEmpty)
     }
 
+    func testMailboxCanOpenExactNonFirstCardWithoutReadingOthers() {
+        let events = [makeEvent(id: firstID, seconds: 10, status: .ready), makeEvent(id: secondID, seconds: 20, status: .ready)]
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), events: events, defaults: isolatedDefaults())
+        XCTAssertTrue(model.openPostcardFromMailbox(eventID: secondID))
+        XCTAssertEqual(model.presentation, .postcard(secondID))
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID, secondID])
+        XCTAssertFalse(model.openPostcardFromMailbox(eventID: UUID()))
+        XCTAssertEqual(model.presentation, .postcard(secondID))
+        model.postcardFrontDidDisplay(secondID, relativePath: "postcards/\(secondID).png")
+        XCTAssertEqual(model.unreadPostcardIDs, [firstID])
+    }
+
+    func testMailboxDoesNotOpenFutureOrAmbiguousPostcard() {
+        let event = makeEvent(id: firstID, seconds: 10, status: .ready)
+        let model = AppModel(snapshot: makeSnapshot(phase: .resting), events: [event, event], defaults: isolatedDefaults())
+        XCTAssertFalse(model.openPostcardFromMailbox(eventID: firstID))
+        let future = makeEvent(id: secondID, seconds: Date().timeIntervalSince1970 + 3600, status: .ready)
+        model.apply(next: makeSnapshot(version: 2, phase: .resting), events: [future])
+        XCTAssertFalse(model.openPostcardFromMailbox(eventID: secondID))
+    }
+
     private func makeSnapshot(version: Int = 1, phase: TravelPhase) -> TripSnapshot {
         TripSnapshot(
             stateVersion: version,

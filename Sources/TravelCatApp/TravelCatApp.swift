@@ -26,6 +26,9 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private var authorizationTask: Task<Void, Never>?
     private var terminationTask: Task<Void, Never>?
     private var homeLocationTask: Task<Void, Never>?
+    private var agentWorkbench: AgentWorkbenchModel?
+    private lazy var agentWindowController = TravelUtilityWindowController()
+    private var mailboxCoordinator: DesktopMailboxCoordinator?
     private let codexDiagnosticStore = CodexGenerationDiagnosticStore.applicationStore()
     private lazy var codexExecutor = CodexTravelExecutor(diagnostics: { [codexDiagnosticStore] data in
         try? codexDiagnosticStore.record(data)
@@ -115,6 +118,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 self?.performPromptRoute(route)
             }
             refreshMenuState()
+            agentWorkbench = AgentWorkbenchModel(root: applicationSupport.appendingPathComponent("TravelCatAgents", isDirectory: true))
             installDesktopPet(model: model)
             let services = try GenerationServiceController(
                 store: TravelGenerationConfigurationStore(root: rootURL), credentials: serviceCredentials,
@@ -184,6 +188,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func installDesktopPet(model: AppModel, defaults: UserDefaults = .standard) {
+        mailboxCoordinator?.shutdown()
+        mailboxCoordinator = nil
         desktopPetController?.windowController.close()
         let scene = OwnedPetSceneView(
             model: model,
@@ -198,6 +204,12 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         let controller = DesktopPetController(content: AnyView(scene), defaults: defaults)
         desktopPetController = controller
         controller.restoreVisibility()
+        if let agentWorkbench {
+            mailboxCoordinator = DesktopMailboxCoordinator(desktop: controller, pet: model, agents: agentWorkbench,
+                openPostcard: { [weak self] id in self?.showMailboxPostcard(id) },
+                openAlbum: { [weak self] in self?.showLatestAlbum() },
+                openAgents: { [weak self] in self?.showAgentWorkbench() })
+        }
     }
 
     func toggleDesktopPet() {
@@ -217,6 +229,9 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        mailboxCoordinator?.shutdown()
+        mailboxCoordinator = nil
+        agentWorkbench?.shutdown()
         desktopPetController?.windowController.close()
         desktopPetController = nil
         environment?.statusToastController.dismiss()
@@ -281,6 +296,13 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         }
     }
 
+    func showAgentWorkbench() {
+        guard let agentWorkbench else { return }
+        agentWindowController.show(content: AnyView(AgentWorkbenchView(model: agentWorkbench)), size: NSSize(width: 1000, height: 740))
+        agentWindowController.window?.contentMinSize = NSSize(width: 760, height: 600)
+        agentWindowController.window?.title = "Agent 工作台"
+    }
+
     func showCurrentJourney() {
         if let startupError {
             utilityWindowController.show(
@@ -292,6 +314,11 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         guard let model else { return }
         model.openStatusFromMenu()
         show(model: model, size: TravelUtilityWindowController.statusSize)
+    }
+
+    func showMailboxPostcard(_ id: UUID) {
+        guard let model, model.openPostcardFromMailbox(eventID: id) else { return }
+        show(model: model, size: TravelUtilityWindowController.postcardSize)
     }
 
     func showLatestPostcard() {
@@ -809,6 +836,12 @@ struct TravelCatApp: App {
         Settings {
             TravelCatSettingsSceneView(appDelegate: appDelegate)
         }
+        .commands {
+            CommandMenu("Agent") {
+                Button("Agent 工作台…") { appDelegate.showAgentWorkbench() }
+                    .keyboardShortcut("a", modifiers: [.command, .option])
+            }
+        }
     }
 }
 
@@ -822,6 +855,7 @@ private struct TravelCatMenuContentView: View {
         Button("旅行册") { appDelegate.showLatestAlbum() }
             .disabled(!appDelegate.hasLatestAlbum)
         Divider()
+        Button("Agent 工作台…") { appDelegate.showAgentWorkbench() }
         Button("模型与连接…") { appDelegate.showGenerationSetup() }
         Button("用品与陪伴…") { appDelegate.showSupplies() }
         Button("设置…") { appDelegate.showSettings() }
@@ -891,7 +925,7 @@ private struct OwnedPetSceneView: View {
     var body: some View {
         Group {
             if model.characterProfile == .defaultBlackCat {
-                PetHouseView(phase: model.snapshot.phase, hasUnreadPostcard: !model.unreadPostcardIDs.isEmpty,
+                PetHouseView(phase: model.snapshot.phase, hasUnreadPostcard: false,
                              isActive: playbackEnabled, reaction: model.homeCareReaction)
                     .contentShape(Rectangle())
                     .onTapGesture(perform: showHouse)
