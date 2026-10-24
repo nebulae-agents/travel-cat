@@ -104,3 +104,12 @@ Scripts/travel-cat-swift.sh test --filter 'AgentThinkingContentTests|AgentWorkbe
 工具始终只返回台前调度缩略图，两个视口都没有完整窗口布局证据。Tab/粘贴没有产生可用输入结果，因此真实键盘遍历/展开、剪贴板完整字节回读均未计通过；不得以可访问文本或 expected 文件哈希替代。夹具没有隔离的 thought-only 状态及真实交接 handler，菜单边界和实际交接草稿仍只有自动化行为测试证据。上述限制没有被隐藏或升级为通过。
 
 R9R2 与此前 R8R2 的打包 runtime 快照早于第 8 项最终 transport 修复；它们的离线会话视图未调用该 transport，界面证据只对应各自冻结的展示代码。没有正式安装、GitHub 合并、SSH、真实官方 Native 登录/活跃回合中断或模型调用的通过声明。验收 fixture、草稿和期望文件保留。
+
+
+### Follow-up dependency integration: phase-observed keepalive fixture
+
+After the initial PR21 commit `da01196fced91648cdb7550f4c970bf0f52cfd5f`, a local dependency merge integrates PR20 commit `cfad5eb38143639e92f6d8a55ce3be20aacc4e48`. This incoming revision changes only `test_audit_runtime.py` and the PR20 verification document. All 15 PR21 implementation, test and fixture files still match their final R2 freeze hashes; this section records evidence only. No GitHub PR merge or main write occurred.
+
+A controlled 40ms heartbeat gap can exceed the old fixture's artificial 25ms idle limit and produce HTTP 502. That establishes a local test-deadline failure mode, not the unseen CI scheduling cause. The revised fixture retains the production 125-second idle and 30-second audit limits, requiring two heartbeats actually consumed by the real HTTP Handler at each approval, upstream and audit gate. A deterministic unit separately verifies idle-expiry 502 and a fresh full lease after each keepalive. Production source is unchanged. Valid missing-heartbeat, early-header and approval-phase heartbeat-stop mutations fail at their intended assertions with cleanup; the same controlled 40ms gap passes.
+
+Independent specification and quality reviews passed. All 24 audit runtime tests passed in 0.370 seconds, followed by one complete 204-test runtime run in 10.738 seconds with zero successful annotation bytes. Source/evidence hashes are in `/private/tmp/travelcat-r8-keepalive-fixture-freeze.json`; the complete local log is `/private/tmp/travelcat-r8-keepalive-runtime-final.log`. Earlier 203-test pass/failure records and the excluded invalid probe remain retained. This test/document-only revision does not require repeating unchanged Swift and complete Scripts validation above. Remote checks must be read for the new exact head; the UI and official Native acceptance limits remain unchanged.

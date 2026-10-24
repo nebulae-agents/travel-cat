@@ -181,46 +181,168 @@ class SubmissionTests(unittest.TestCase):
   self.assertEqual(record['sandbox']['network'],'none');self.assertEqual(record['sandbox']['hostMounts'],[])
 
  def test_keepalive_spans_permission_upstream_and_audit_without_early_headers(self):
-  import base64,http.client,container_relay
+  import base64,http.client,container_relay,socket
   from unittest.mock import patch
-  server=container_relay.Server(('127.0.0.1',0),container_relay.Handler)
-  server.connections=threading.BoundedSemaphore(8)
-  threading.Thread(target=server.serve_forever,daemon=True).start()
-  results=[];headers=threading.Event();forwarders=[]
+  changed=threading.Condition();phase=['initial'];leases={};lease_packets={};receipts={}
+  headers=threading.Event();upstream_entered=threading.Event();upstream_release=threading.Event();body_done=threading.Event();cleaning=threading.Event()
+  results=[];errors=[];chunks=[];forwarders=[];keepalives=[];clients=[];owned_ids=[];handlers=set()
+  original_queue=container_relay.queue.Queue;original_headers=container_relay.Handler.end_headers
+  class ObservedQueue(original_queue):
+   previous_phase=None
+   def get(queue,*args,**kwargs):
+    # Reaching the next get proves the Handler processed the previous lease.
+    with changed:
+     handlers.add(threading.current_thread())
+     if queue.previous_phase is not None:
+      label=queue.previous_phase;leases[label]=leases.get(label,0)+1;queue.previous_phase=None;changed.notify_all()
+    item=super().get(*args,**kwargs)
+    with changed:
+     packet=lease_packets.pop(id(item),None)
+     if item.get('keepalive') is True and packet is not None and packet[0] is item:queue.previous_phase=packet[1]
+    return item
+  def await_condition(predicate,label):
+   with changed:self.assertTrue(changed.wait_for(predicate,2),label)
+  def await_leases(label):await_condition(lambda:leases.get(label,0)>=2,'Handler must process two leases during '+label)
+  def receipt(kind,index=0):
+   await_condition(lambda:len(receipts.get(kind,[]))>index,'Audit phase must be reached: '+kind)
+   return receipts[kind][index]
+  def no_headers_or_upstream():
+   self.assertFalse(headers.is_set());self.assertFalse(upstream_entered.is_set())
+  def audit_emit(event):
+   kind=event['data']['record']['kind']
+   with changed:
+    entries=receipts.setdefault(kind,[]);label='audit.'+kind+'.'+str(len(entries));phase[0]=label
+    entries.append((event['data']['receiptId'],label));changed.notify_all()
+    reject=cleaning.is_set()
+   if reject:self.broker.ack(event['data']['receiptId'],False)
+  self.broker=sidecar.audit_runtime.AuditBroker(audit_emit) # Production 30s audit receipt boundary.
+  self.task.audit=self.broker
+  keepalive=self.task.relay_keepalive
+  def track_keepalive(*args):
+   with changed:keepalives.append(threading.current_thread())
+   return keepalive(*args)
+  self.task.relay_keepalive=track_keepalive
+  def task_emit(event):
+   with changed:
+    self.events.append(event)
+    if event['event']=='modelApproval':phase[0]='permission'
+    changed.notify_all()
+  self.task.emit=task_emit
   def upstream(frozen,revoked,lock):
-   time.sleep(.07)
+   with changed:phase[0]='upstream';upstream_entered.set();changed.notify_all()
+   self.assertTrue(upstream_release.wait(30),'Owned upstream gate must be released')
+   if revoked():raise sidecar.RuntimeFailure('owned fixture stopped')
    yield {'status':200,'contentType':'application/json'}
    yield {'chunk':base64.b64encode(b'{"output":"ok"}').decode()}
   self.task.provider.stream_frozen=upstream
-  def audit_emit(event):
-   self.events.append(event)
-   threading.Timer(.04,lambda:self.broker.ack(event['data']['receiptId'],True)).start()
-  self.broker.emit=audit_emit
   def relay_emit(obj):
-   self.task.request_slots.acquire()
+   owned_ids.append(obj['id']);self.task.request_slots.acquire()
    worker=threading.Thread(target=self.task.forward,args=(obj,));forwarders.append(worker);worker.start()
   def task_send(process,lock,event):
+   with changed:
+    if event.get('keepalive') is True:lease_packets[id(event)]=(event,phase[0])
+    if 'chunk' in event:chunks.append(event['chunk'])
    with container_relay.lock:target=container_relay.pending.get(event['id'])
    if target:target.put(event)
   self.task.send=task_send
+  def observe_headers(handler):
+   result=original_headers(handler);headers.set();return result
+  server=container_relay.Server(('127.0.0.1',0),container_relay.Handler)
+  server.connections=threading.BoundedSemaphore(8)
+  server_worker=threading.Thread(target=lambda:server.serve_forever(poll_interval=.01),daemon=True);server_worker.start()
   def request():
-   conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=2)
-   conn.request('POST','/responses',b'{"input":"hello"}',{'Content-Type':'application/json'})
-   response=conn.getresponse();headers.set();results.append((response.status,response.read()));conn.close()
+   conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=30);clients.append(conn)
+   try:
+    conn.request('POST','/responses',b'{"input":"hello"}',{'Content-Type':'application/json'})
+    response=conn.getresponse();results.append((response.status,response.read()));body_done.set()
+   except Exception as error:errors.append(type(error).__name__)
+   finally:conn.close()
+  worker=threading.Thread(target=request)
   try:
-   with patch.object(sidecar,'KEEPALIVE_SECONDS',.005,create=True),patch.object(container_relay,'RESPONSE_IDLE_TIMEOUT',.025,create=True),patch.object(container_relay,'emit',relay_emit):
-    worker=threading.Thread(target=request);worker.start()
-    self.wait(lambda:any(e['event']=='modelApproval' for e in self.events));time.sleep(.07)
-    self.assertFalse(headers.is_set())
+   # Use the production 125s idle lease. Positive consumed-heartbeat evidence,
+   # rather than a 25ms scheduling window, is the behavior under test.
+   with patch.object(sidecar,'KEEPALIVE_SECONDS',.005),patch.object(container_relay.queue,'Queue',ObservedQueue),patch.object(container_relay,'emit',relay_emit),patch.object(container_relay.Handler,'end_headers',observe_headers):
+    worker.start()
+    request_receipt,label=receipt('model.request');await_leases(label);no_headers_or_upstream()
+    self.assertTrue(self.broker.ack(request_receipt,True))
+    await_condition(lambda:any(e['event']=='modelApproval' for e in self.events),'Bound approval must be published')
+    await_leases('permission');no_headers_or_upstream()
     approval=next(e['data'] for e in self.events if e['event']=='modelApproval')
     self.task.model_permission(approval['callId'],approval['requestHash'],True)
-    time.sleep(.04);self.assertFalse(headers.is_set())
-    worker.join(2)
-    self.assertEqual(results,[(200,b'{"output":"ok"}')])
+    decision_receipt,label=receipt('model.decision');await_leases(label);no_headers_or_upstream()
+    self.assertTrue(self.broker.ack(decision_receipt,True))
+    self.assertTrue(upstream_entered.wait(2));await_leases('upstream');self.assertFalse(headers.is_set())
+    upstream_release.set()
+    accepted=0
+    while True:
+     await_condition(lambda:len(receipts.get('model.response',[]))>accepted or bool(receipts.get('model.completed')),'Response or completion audit must be reached')
+     if len(receipts.get('model.response',[]))>accepted:
+      response_receipt,label=receipts['model.response'][accepted];await_leases(label)
+      self.assertTrue(headers.is_set(),'Buffered response metadata precedes response-fragment auditing')
+      self.assertEqual(len(chunks),accepted,'Current response fragment must wait for its durable receipt')
+      self.assertFalse(body_done.is_set());self.assertTrue(self.broker.ack(response_receipt,True));accepted+=1
+     else:
+      complete_receipt,label=receipts['model.completed'][0];await_leases(label)
+      self.assertFalse(body_done.is_set());self.assertTrue(self.broker.ack(complete_receipt,True));break
+    worker.join(2);self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
+    self.assertEqual(results,[(200,b'{"output":"ok"}')]);self.assertGreater(accepted,0)
   finally:
-   self.task.stopped.set()
-   for worker in forwarders:worker.join(1)
-   server.shutdown();server.server_close()
+   with changed:cleaning.set()
+   self.task.stopped.set();upstream_release.set()
+   with self.broker.lock:pending=list(self.broker.pending)
+   for receipt_id in pending:self.broker.ack(receipt_id,False)
+   # Wake only this test's Handler, including a failed phase/heartbeat mutation.
+   with container_relay.lock:targets=[container_relay.pending.get(rid) for rid in owned_ids]
+   for target in targets:
+    if target is not None:
+     try:target.put({'error':'owned fixture cleanup'},timeout=.5)
+     except container_relay.queue.Full:
+      for _ in range(16):
+       try:target.get_nowait()
+       except container_relay.queue.Empty:break
+      target.put_nowait({'error':'owned fixture cleanup'})
+   for forwarder in forwarders:forwarder.join(2);self.assertFalse(forwarder.is_alive())
+   for heartbeat in keepalives:heartbeat.join(2);self.assertFalse(heartbeat.is_alive())
+   for conn in clients:
+    if conn.sock:
+     try:conn.sock.shutdown(socket.SHUT_RDWR)
+     except OSError:pass
+    conn.close()
+   if worker.ident is not None:worker.join(2);self.assertFalse(worker.is_alive())
+   server.shutdown();server.server_close();server_worker.join(2)
+   for handler in handlers:
+    if handler is not threading.current_thread():handler.join(2);self.assertFalse(handler.is_alive())
+   self.assertFalse(server_worker.is_alive())
+
+ def test_relay_idle_expiry_and_control_lease_renewal_are_header_silent(self):
+  import base64,io,container_relay
+  from email.message import Message
+  from unittest.mock import patch
+  for renewals,complete in ((0,False),(2,False),(2,True)):
+   with self.subTest(renewals=renewals,complete=complete):
+    statuses=[];failures=[];waits=[]
+    handler=container_relay.Handler.__new__(container_relay.Handler)
+    handler.connection=type('Connection',(),{'settimeout':lambda *_:None})()
+    handler.path='/responses';handler.headers=Message();handler.headers['Content-Length']='2'
+    handler.rfile=io.BytesIO(b'{}');handler.wfile=io.BytesIO()
+    handler.send_response=lambda status:statuses.append(status)
+    handler.send_header=lambda *_:None;handler.end_headers=lambda:None
+    handler.send_error=lambda status,*_:failures.append(status)
+    items=[{'keepalive':True} for _ in range(renewals)]
+    if complete:items.extend([{'status':200,'contentType':'application/json'},{'chunk':base64.b64encode(b'ok').decode()},{'done':True}])
+    class ScriptedQueue:
+     def __init__(queue,*args,**kwargs):pass
+     def get(queue,timeout):
+      waits.append(timeout)
+      if not items:raise container_relay.queue.Empty
+      item=items.pop(0)
+      if item.get('keepalive'):self.assertEqual(statuses,[])
+      return item
+    with patch.object(container_relay.queue,'Queue',ScriptedQueue),patch.object(container_relay,'emit',lambda _:None):handler.do_POST()
+    self.assertEqual(waits,[125]*(renewals+3 if complete else renewals+1),'Every consumed lease starts a fresh full idle wait')
+    self.assertEqual(failures,[] if complete else [502])
+    self.assertEqual(statuses,[200] if complete else [])
+    self.assertEqual(handler.wfile.getvalue(),b'ok' if complete else b'')
 
  def test_tool_permission_details_are_persisted_and_scrubbed_before_ui(self):
   from unittest.mock import patch
