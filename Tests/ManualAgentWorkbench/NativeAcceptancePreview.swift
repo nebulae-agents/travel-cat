@@ -13,6 +13,23 @@ private enum NativeFixtureViewport {
         .init(width: viewport.width, height: viewport.height + chromeHeight)
     }
 }
+@MainActor private final class NativeAcceptanceWindowProbe {
+    weak var window: NSWindow?
+    var launchCompleted = false
+    func snapshot() -> [String: Any] {
+        var value: [String: Any] = ["exists": window != nil, "launchCompleted": launchCompleted,
+            "applicationActive": NSApplication.shared.isActive]
+        guard let window else { return value }
+        let content = window.contentRect(forFrameRect: window.frame).size
+        value.merge(["visible": window.isVisible, "miniaturized": window.isMiniaturized,
+            "key": window.isKeyWindow, "frameX": window.frame.minX, "frameY": window.frame.minY,
+            "frameWidth": window.frame.width, "frameHeight": window.frame.height,
+            "contentWidth": content.width, "contentHeight": content.height,
+            "minimumWidth": window.contentMinSize.width, "minimumHeight": window.contentMinSize.height,
+            "screenContainsWindow": window.screen?.visibleFrame.contains(window.frame) ?? false]) { _, new in new }
+        return value
+    }
+}
 @MainActor private final class NativeAcceptanceCredentials: TravelServiceCredentialStoring {
     var values: [String: String] = [:]
     func read(id: String) throws -> String? { values[id] }
@@ -111,6 +128,54 @@ private enum NativeFixtureViewport {
         }.sheet(isPresented: $setup) { NativeAgentSetupView(model: model, instance: model.state.instances.first(where: { $0.id == instance.id }) ?? instance, didSave: { model.preferredInstanceID = $0 }) }
     }
 }
+// Launch Services may start a preview in the background. Present only once AppKit
+// has finished launching, and let a Dock reopen restore the same owned window.
+@MainActor private final class NativeAcceptanceApplication: NSObject, NSApplicationDelegate {
+    let controller: TravelUtilityWindowController
+    let content: AnyView
+    let shutdown: NativeAcceptanceShutdown
+    let probe: NativeAcceptanceWindowProbe
+
+    init(controller: TravelUtilityWindowController, content: AnyView,
+         shutdown: NativeAcceptanceShutdown, probe: NativeAcceptanceWindowProbe) {
+        self.controller = controller; self.content = content
+        self.shutdown = shutdown; self.probe = probe
+        super.init()
+        controller.setCloseHandler { [weak shutdown] in shutdown?.close(app: .shared) }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let menu = NSMenu()
+        let item = NSMenuItem(); menu.addItem(item)
+        let appMenu = NSMenu(); item.submenu = appMenu
+        let show = NSMenuItem(title: "显示独立验收窗口", action: #selector(showWindow), keyEquivalent: "0")
+        show.target = self; appMenu.addItem(show)
+        appMenu.addItem(.separator())
+        let quit = NSMenuItem(title: "关闭独立验收", action: #selector(close), keyEquivalent: "q")
+        quit.target = self; appMenu.addItem(quit)
+        NSApplication.shared.mainMenu = menu
+        controller.show(content: content,
+            size: NativeFixtureViewport.windowContentSize(.init(width: 1000, height: 740)),
+            minimumContentSize: NativeFixtureViewport.windowContentSize(.init(width: 760, height: 600)))
+        controller.window?.title = "Travel Cat · 真实 Native 独立验收"
+        controller.window?.appearance = NSAppearance(named: .aqua)
+        probe.launchCompleted = true
+        shutdown.tick()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow(); return false
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        shutdown.close(app: sender); return .terminateCancel
+    }
+
+    @objc func showWindow() { controller.bringToFront(); shutdown.tick() }
+    @objc func close() { controller.window?.performClose(nil) }
+
+    func finish() { shutdown.appRunReturned(); controller.setCloseHandler(nil) }
+}
 @main @MainActor struct NativeAcceptancePreview {
     static func main() throws {
         let app = NSApplication.shared; app.setActivationPolicy(.regular)
@@ -127,6 +192,7 @@ private enum NativeFixtureViewport {
         let instance = configuredInstance
         try JSONSerialization.data(withJSONObject: ["instanceId": instance.id.uuidString, "workspace": workspace.path,
             "store": model.store.root.path, "executable": instance.native?.executable ?? "", "automaticTask": false], options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("fixture.json"))
+        let windowProbe = NativeAcceptanceWindowProbe()
         let snapshot: @MainActor @Sendable () -> Void = {
             let tasks: [[String: Any]] = model.state.tasks.map { task in
                 let native = task.nativeState
@@ -137,22 +203,20 @@ private enum NativeFixtureViewport {
             }
             let value: [String: Any] = ["recordedAt": Date().timeIntervalSince1970, "clientDetached": false, "sidecarExitConfirmed": false, "sidecarExitStatus": "notObserved", "tasks": tasks,
                 "instanceId": instance.id.uuidString, "authenticated": model.nativeConnections[instance.id]?.authenticated ?? false,
-                "modelCount": model.nativeConnections[instance.id]?.models.count ?? 0]
+                "modelCount": model.nativeConnections[instance.id]?.models.count ?? 0, "window": windowProbe.snapshot()]
             try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("acceptance-metadata.json"), options: .atomic)
         }
-        let window = NSWindow(contentRect: .init(x: 100, y: 100, width: 1000, height: 740 + NativeFixtureViewport.chromeHeight), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "Travel Cat · 真实 Native 独立验收"; window.isReleasedWhenClosed = false
-        window.appearance = NSAppearance(named: .aqua); window.contentMinSize = NativeFixtureViewport.windowContentSize(.init(width: 760, height: 600))
-        let host = NSHostingView(rootView: NativeAcceptanceSurface(model: model, instance: instance, record: {
+        let controller = TravelUtilityWindowController()
+        windowProbe.window = controller.window
+        let content = AnyView(NativeAcceptanceSurface(model: model, instance: instance, record: {
             for task in model.state.tasks where [.completed, .cancelled, .failed].contains(task.status) { await model.refreshNativeBackgroundStatus(task.id) }
             snapshot()
         }))
-        host.sizingOptions = []; window.contentView = host
-        window.center(); window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
         let shutdown = NativeAcceptanceShutdown(root: root, model: model, client: client, snapshot: snapshot)
-        let observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in MainActor.assumeIsolated { shutdown.close(app: app) } }
+        let delegate = NativeAcceptanceApplication(controller: controller, content: content, shutdown: shutdown, probe: windowProbe)
+        app.delegate = delegate
         shutdown.timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak shutdown] _ in MainActor.assumeIsolated { shutdown?.tick() } }
-        snapshot(); app.run(); shutdown.appRunReturned(); NotificationCenter.default.removeObserver(observer)
+        snapshot(); app.run(); delegate.finish()
         // Detach preserves daemon, profile and official login. Use the exact ownership receipt cleanup tool after terminal/background-zero verification.
     }
 }
