@@ -687,15 +687,13 @@ final class TravelUtilityWindowControllerTests: XCTestCase {
         originalWindow.close()
         controller.show(content: AnyView(Text("album")), size: TravelUtilityWindowController.albumSize)
         XCTAssertEqual(ObjectIdentifier(try XCTUnwrap(controller.window)), originalIdentifier)
-        // AppKit may reduce the requested height on small CI displays. Compare
-        // against its screen constraint, not a desktop-specific pixel height.
-        var requestedContent = originalWindow.contentRect(forFrameRect: originalWindow.frame)
-        requestedContent.size = TravelUtilityWindowController.albumSize
-        let requestedFrame = originalWindow.frameRect(forContentRect: requestedContent)
-        let constrainedFrame = originalWindow.constrainFrameRect(
-            requestedFrame, to: originalWindow.screen ?? NSScreen.main
+        // The whole frame must fit the available display, including title chrome.
+        let screen = try XCTUnwrap(originalWindow.screen ?? NSScreen.main)
+        let available = originalWindow.contentRect(forFrameRect: screen.visibleFrame).size
+        let expectedSize = NSSize(
+            width: min(TravelUtilityWindowController.albumSize.width, available.width),
+            height: min(TravelUtilityWindowController.albumSize.height, available.height)
         )
-        let expectedSize = originalWindow.contentRect(forFrameRect: constrainedFrame).size
         XCTAssertEqual(controller.window?.contentView?.frame.size, expectedSize)
     }
 }

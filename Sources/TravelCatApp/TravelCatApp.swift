@@ -299,8 +299,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
 
     func showAgentWorkbench() {
         guard let agentWorkbench else { return }
-        agentWindowController.show(content: AnyView(AgentWorkbenchView(model: agentWorkbench)), size: NSSize(width: 1000, height: 740))
-        agentWindowController.window?.contentMinSize = NSSize(width: 760, height: 600)
+        agentWindowController.show(content: AnyView(AgentWorkbenchView(model: agentWorkbench)),
+            size: NSSize(width: 1000, height: 740), minimumContentSize: NSSize(width: 760, height: 600))
         agentWindowController.window?.title = "Agent 工作台"
     }
 
@@ -353,9 +353,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                     executor: codexExecutor, completed: { [weak self] in
                         self?.generationWindowController.window?.close()
                     })),
-            size: NSSize(width: 640, height: 760))
+            size: NSSize(width: 640, height: 760), minimumContentSize: NSSize(width: 600, height: 630))
         generationWindowController.window?.title = "Travel Cat · 模型与连接"
-        generationWindowController.window?.contentMinSize = NSSize(width: 600, height: 630)
         generationWindowController.bringToFront()
     }
 
