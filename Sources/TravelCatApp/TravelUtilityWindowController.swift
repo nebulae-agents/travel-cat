@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TravelUI
 
 @MainActor
 final class TravelUtilityWindowController: NSWindowController, NSWindowDelegate {
@@ -8,6 +9,8 @@ final class TravelUtilityWindowController: NSWindowController, NSWindowDelegate 
     static let albumSize = NSSize(width: 760, height: 700)
     static let settingsSize = NSSize(width: 480, height: 520)
     private var onWindowClosed: (() -> Void)?
+    private var minimumContentSize = TravelUtilityWindowController.statusSize
+    private var recoveringMinimumSize = false
 
     init() {
         super.init(window: Self.makeWindow(content: AnyView(EmptyView()), size: Self.statusSize))
@@ -39,8 +42,13 @@ final class TravelUtilityWindowController: NSWindowController, NSWindowDelegate 
         return window
     }
 
-    func show(content: AnyView, size: NSSize) {
+    func show(content: AnyView, size: NSSize, minimumContentSize: NSSize? = nil) {
         guard let window else { return }
+        self.minimumContentSize = minimumContentSize ?? NSSize(
+            width: size == Self.albumSize ? Self.albumSize.width : Self.statusSize.width,
+            height: min(size.height, 520)
+        )
+        window.contentMinSize = self.minimumContentSize
         window.delegate = self
         if let hostingView = window.contentView as? NSHostingView<AnyView> {
             hostingView.rootView = content
@@ -50,10 +58,6 @@ final class TravelUtilityWindowController: NSWindowController, NSWindowDelegate 
             window.contentView = hostingView
         }
         window.setContentSize(size)
-        window.contentMinSize = NSSize(
-            width: size == Self.albumSize ? Self.albumSize.width : Self.statusSize.width,
-            height: min(size.height, 520)
-        )
         window.contentView?.frame = NSRect(origin: .zero, size: size)
         clampToVisibleScreen(window)
         guard !NSScreen.screens.isEmpty else { return }
@@ -64,9 +68,10 @@ final class TravelUtilityWindowController: NSWindowController, NSWindowDelegate 
 
     func resize(to size: NSSize) {
         guard let window else { return }
+        minimumContentSize = NSSize(width: size == Self.albumSize ? Self.albumSize.width : Self.statusSize.width,
+                                   height: min(size.height, 520))
+        window.contentMinSize = minimumContentSize
         window.setContentSize(size)
-        window.contentMinSize = NSSize(width: size == Self.albumSize ? Self.albumSize.width : Self.statusSize.width,
-                                      height: min(size.height, 520))
         clampToVisibleScreen(window)
     }
 
@@ -87,7 +92,29 @@ final class TravelUtilityWindowController: NSWindowController, NSWindowDelegate 
 
     private func clampToVisibleScreen(_ window: NSWindow) {
         guard let screen = window.screen ?? NSScreen.main else { return }
-        window.setFrame(window.constrainFrameRect(window.frame, to: screen), display: false)
+        // Keep the whole frame visible, including on displays smaller than the route minimum.
+        window.setFrame(WindowPositionStore.clamp(window.frame, to: [screen.visibleFrame]), display: false)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === self.window,
+              !recoveringMinimumSize else { return }
+        recoveringMinimumSize = true
+        defer { recoveringMinimumSize = false }
+        let repairingMinimum = window.contentMinSize != minimumContentSize
+        if repairingMinimum { window.contentMinSize = minimumContentSize }
+        var minimum = minimumContentSize
+        if let screen = window.screen ?? NSScreen.main {
+            let available = window.contentRect(forFrameRect: screen.visibleFrame).size
+            minimum.width = min(minimum.width, available.width)
+            minimum.height = min(minimum.height, available.height)
+        }
+        var content = window.contentRect(forFrameRect: window.frame)
+        let recovered = NSSize(width: max(content.width, minimum.width), height: max(content.height, minimum.height))
+        guard repairingMinimum || recovered != content.size else { return }
+        content.size = recovered
+        window.setFrame(window.frameRect(forContentRect: content), display: false)
+        clampToVisibleScreen(window)
     }
 
     func windowWillClose(_ notification: Notification) {
