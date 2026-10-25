@@ -22,11 +22,7 @@ struct NativeAgentSetupView: View {
     }
 
     private static func detectedExecutable() -> String {
-        let environmentPaths = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        let paths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] + environmentPaths
-        let candidates = paths.filter { $0.hasPrefix("/") }.map { URL(fileURLWithPath: $0).appendingPathComponent("codex").path }
-            + ["/Applications/Codex.app/Contents/Resources/codex"]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? ""
+        NativeCodexExecutableDiscovery.detect()
     }
 
     private var configuration: NativeRuntimeConfiguration {
@@ -138,6 +134,10 @@ struct NativeAgentSetupView: View {
                     }
                 }
             }.formStyle(.grouped).scrollContentBackground(.hidden)
+            if !isSavedInstance && step == 0 && configuration.executable.isEmpty {
+                Text("未找到本机 Codex。请展开“高级与诊断”选择 Codex 程序后继续。")
+                    .font(.caption).foregroundStyle(CottageTheme.terracotta)
+            }
             if let error { Text(verbatim: error).font(.caption).foregroundStyle(CottageTheme.terracotta).textSelection(.enabled) }
             HStack {
                 Button("取消") {
