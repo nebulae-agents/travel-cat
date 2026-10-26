@@ -178,6 +178,56 @@ final class AgentDraftRecoveryTests: XCTestCase {
 }
 
 extension AgentDraftRecoveryTests {
+    @MainActor func testACPStartDoesNotSendWhenAnotherDraftPreventsSavingSnapshot() async throws {
+        let (model, runtime, _, _, instance) = try fixture(); defer { model.shutdown() }
+        let target = WorkbenchDraftTarget.new(instance.id)
+        model.updateDraft(target) { $0.text = "retain this submission" }; model.retryDraftSave()
+        let original = try Data(contentsOf: model.store.url)
+        model.updateDraft(.new(nil)) { $0.text = String(repeating: "x", count: 100_001) }
+        var acknowledged = false
+        await model.startDraft(target: target, instanceID: instance.id) { acknowledged = true }
+        XCTAssertTrue(runtime.calls.isEmpty, "An unsaved task must never reach the runtime")
+        XCTAssertTrue(model.state.tasks.isEmpty)
+        XCTAssertNil(model.selectedTaskID)
+        XCTAssertEqual(model.draft(for: target).text, "retain this submission")
+        XCTAssertFalse(acknowledged)
+        XCTAssertFalse(model.isStarting)
+        XCTAssertEqual(try Data(contentsOf: model.store.url), original)
+        XCTAssertNotNil(model.error)
+    }
+
+    @MainActor func testACPStartDoesNotPromptIfAcceptedSessionCannotBeSaved() async throws {
+        let (model, runtime, _, _, instance) = try fixture(); defer { model.shutdown() }
+        let target = WorkbenchDraftTarget.new(instance.id)
+        model.updateDraft(target) { $0.text = "retain after session accepted" }; model.retryDraftSave()
+        runtime.beforeStart = { model.updateDraft(.new(nil)) { $0.text = String(repeating: "x", count: 100_001) } }
+        var acknowledged = false
+        await model.startDraft(target: target, instanceID: instance.id) { acknowledged = true }
+        XCTAssertEqual(runtime.calls, ["start"])
+        XCTAssertNil(try model.store.load().tasks.first?.sessionID)
+        XCTAssertEqual(model.draft(for: target).text, "retain after session accepted")
+        XCTAssertFalse(acknowledged)
+        XCTAssertFalse(model.isStarting)
+        XCTAssertNotNil(model.error)
+    }
+
+    @MainActor func testACPFollowUpDoesNotSendOrAppendUserMessageWhenSnapshotCannotBeSaved() async throws {
+        let (model, runtime, _, _, instance) = try fixture(); defer { model.shutdown() }
+        await model.start(instanceID: instance.id, text: "initial")
+        let task = try XCTUnwrap(model.state.tasks.first), target = WorkbenchDraftTarget.task(task.id)
+        model.updateDraft(target) { $0.text = "retain this reply" }; model.retryDraftSave()
+        let original = try Data(contentsOf: model.store.url)
+        model.updateDraft(.new(nil)) { $0.text = String(repeating: "x", count: 100_001) }
+        await model.followUpDraft(taskID: task.id)
+        XCTAssertEqual(runtime.calls, ["start", "prompt"])
+        XCTAssertEqual(model.draft(for: target).text, "retain this reply")
+        XCTAssertFalse(model.state.tasks.first!.messages.contains { $0.role == "user" && $0.text == "retain this reply" })
+        XCTAssertEqual(try Data(contentsOf: model.store.url), original)
+        XCTAssertNotNil(model.error)
+    }
+}
+
+extension AgentDraftRecoveryTests {
     @MainActor func testInvalidInMemoryDraftKeepsPriorCiphertextAndCanBeCorrected() throws {
         let (model, _, _, _, instance) = try fixture(); defer { model.shutdown() }
         model.updateDraft(.new(instance.id)) { $0.text = "saved version" }; model.retryDraftSave()
