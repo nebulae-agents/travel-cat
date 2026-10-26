@@ -239,3 +239,19 @@ extension AgentWorkbenchSubmissionTests {
         XCTAssertEqual(model.state.tasks.first?.status, .unknown)
     }
 }
+
+extension AgentWorkbenchSubmissionTests {
+    @MainActor func testACPTaskAndSessionAreDurableBeforePromptReachesRuntime() async throws {
+        let (model, runtime, _, root, id) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        runtime.duringPrompt = {
+            do {
+                let saved = try XCTUnwrap(model.store.load().tasks.first)
+                XCTAssertEqual(saved.sessionID, "session", "Recovery needs the accepted session before content is sent")
+                XCTAssertEqual(saved.messages.first?.text, "durable submission")
+            } catch { XCTFail("Task checkpoint missing before prompt: \(error)") }
+        }
+        await model.start(instanceID: id, text: "durable submission")
+        XCTAssertEqual(runtime.calls, ["start", "prompt"])
+    }
+}

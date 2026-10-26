@@ -368,7 +368,10 @@ final class AgentWorkbenchModel: ObservableObject {
             task.parentTaskID = parentTaskID; task.modelPolicy = modelPolicy
             task.messages.append(.init(role: "user", text: text))
             if !files.isEmpty { task.messages.append(.init(role: "system", text: "已选择输入文件：" + files.compactMap { $0["name"] }.joined(separator: "、"))) }
-            state.tasks.insert(task, at: 0); preferredInstanceID = instanceID; selectedTaskID = task.id; liveTasks.insert(task.id); persist()
+            var next = state
+            next.tasks.insert(task, at: 0)
+            try persistACPSubmission(next)
+            preferredInstanceID = instanceID; selectedTaskID = task.id; liveTasks.insert(task.id)
             let params: [String: Any] = ["taskId": task.id.uuidString,
                 "instance": ["name": instance.name, "image": instance.image, "command": instance.command, "host": instance.host, "dockerContext": instance.dockerContext],
                 "provider": ["baseURL": instance.provider.baseURL, "apiKey": key, "model": instance.provider.model, "api": instance.provider.api.rawValue], "files": files, "modelPolicy": modelPolicy]
@@ -400,11 +403,30 @@ final class AgentWorkbenchModel: ObservableObject {
             do { try await promptNative(taskID, text: text, addUserMessage: true); return true }
             catch { nativeFailure(taskID, error); return false }
         }
-        mutate(taskID) { $0.status = .running; $0.messages.append(.init(role: "user", text: text)); $0.unread = false }
-        do { try await sendPrompt(taskID, text); return true }
+        var next = state
+        guard let index = next.tasks.firstIndex(where: { $0.id == taskID }) else { return false }
+        next.tasks[index].status = .running
+        next.tasks[index].messages.append(.init(role: "user", text: text))
+        next.tasks[index].unread = false
+        do { try persistACPSubmission(next) }
+        catch { self.error = error.localizedDescription; return false }
+        do { try await sendPrompt(taskID, text, checkpointSaved: true); return true }
         catch { fail(taskID, error); return false }
     }
-    private func sendPrompt(_ id: UUID, _ text: String) async throws {
+    private func persistACPSubmission(_ snapshot: WorkbenchSnapshot) throws {
+        try requireStorageReady()
+        do { try store.save(snapshot) }
+        catch {
+            if draftsDirty { draftSaveNotice = "草稿尚未保存，仅保留于本次运行。请重试保存后再退出。" + Self.storageFailureDescription(error) }
+            throw WorkbenchFailure("Agent 记录保存失败，本次内容未发送；请检查存储目录，草稿已保留。")
+        }
+        state = snapshot
+        draftsDirty = false; draftSaveNotice = nil
+        draftSaveTask?.cancel(); draftSaveTask = nil
+    }
+    private func sendPrompt(_ id: UUID, _ text: String, checkpointSaved: Bool = false) async throws {
+        // The accepted session must be recoverable before any user content leaves the app.
+        if !checkpointSaved { try persistACPSubmission(state) }
         invalidateArtifactReads(id)
         _ = try await client.request("prompt", ["taskId": id.uuidString, "text": text], timeout: 3600)
         mutate(id) { if $0.status == .running { $0.status = .completed }; $0.unread = true }
