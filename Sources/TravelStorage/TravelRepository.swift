@@ -22,6 +22,7 @@ public enum RepositoryError: Error, Sendable {
     case malformedImageRetryState
     case narrativeChanged(UUID)
     case unsafePostcardPath
+    case unsafeExportDestination
     case catIsAway
     case clearHistoryResetFailed(backupPath: String, reason: String)
 }
@@ -61,6 +62,8 @@ extension RepositoryError: CustomStringConvertible {
             "published narrative changed for postcard event: \(id.uuidString)"
         case .unsafePostcardPath:
             "postcard path must be a safe relative path beneath postcards"
+        case .unsafeExportDestination:
+            "export destination must be outside the repository"
         case .catIsAway:
             "carried item can only change while the cat is resting or preparing"
         case let .clearHistoryResetFailed(backupPath, reason):
@@ -348,10 +351,46 @@ public final class TravelRepository: @unchecked Sendable {
         return []
     }
 
+    private func validateExportDestination(_ destination: URL) throws {
+        guard destination.isFileURL else { throw RepositoryError.unsafeExportDestination }
+        var rootInfo = stat()
+        guard stat(root.path, &rootInfo) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        // Compare physical directory identities, including symlink and case aliases.
+        // Validate before staging exists, otherwise characters can copy staging into itself.
+        var path = destination.path
+        // Resolve the nearest existing ancestor using POSIX semantics. Foundation
+        // can preserve /var aliases and URL parent traversal can extend / into /... .
+        while true {
+            if let resolved = realpath(path, nil) {
+                path = String(cString: resolved)
+                free(resolved)
+                break
+            }
+            let code = errno
+            guard code == ENOENT else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+            let parent = (path as NSString).deletingLastPathComponent
+            guard parent != path else { throw RepositoryError.unsafeExportDestination }
+            path = parent
+        }
+        while true {
+            var info = stat()
+            guard stat(path, &info) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            if info.st_dev == rootInfo.st_dev && info.st_ino == rootInfo.st_ino {
+                throw RepositoryError.unsafeExportDestination
+            }
+            let parent = (path as NSString).deletingLastPathComponent
+            guard parent != path else { return }
+            path = parent
+        }
+    }
+
     public func export(to destination: URL) throws -> URL {
         try withExclusiveLock {
             let fileManager = FileManager.default
             let final = destination.standardizedFileURL
+            try validateExportDestination(final)
             guard !fileManager.fileExists(atPath: final.path) else { throw CocoaError(.fileWriteFileExists) }
             let temporary = final.deletingLastPathComponent().appendingPathComponent(
                 ".\(final.lastPathComponent).\(UUID().uuidString).export.tmp",
