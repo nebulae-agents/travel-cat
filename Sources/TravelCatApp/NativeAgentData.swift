@@ -1,5 +1,25 @@
 import Foundation
 
+/// Find a local Codex without invoking a shell or reading any account state.
+enum NativeCodexExecutableDiscovery {
+    static func detect(environmentPath: String = ProcessInfo.processInfo.environment["PATH"] ?? "",
+                       applicationDirectories: [URL] = [URL(fileURLWithPath: "/Applications"),
+                           FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")],
+                       isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }) -> String {
+        let directories = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+            + environmentPath.split(separator: ":").map(String.init)
+        let candidates = directories.filter { $0.hasPrefix("/") }.map {
+            URL(fileURLWithPath: $0).appendingPathComponent("codex").path
+        } + applicationDirectories.flatMap { directory in
+            ["Codex.app/Contents/Resources/codex",
+             "ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"].map {
+                directory.appendingPathComponent($0).path
+            }
+        }
+        return candidates.first(where: isExecutable) ?? ""
+    }
+}
+
 /// The product contract is independent of a runtime's transport and authentication.
 enum WorkbenchRuntimeKind: String, Codable, Sendable {
     case acpDocker, codexNative
