@@ -1137,3 +1137,81 @@ extension NativeAgentModelTests {
         XCTAssertEqual(runtime.requests.filter { $0.0 == "native_prompt" }.count, 1)
     }
 }
+
+extension NativeAgentModelTests {
+    @MainActor func testLateConnectionDoesNotStartAfterAgentDeletedAsynchronously() async throws {
+        let (model, runtime, _, _, root, instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let target = WorkbenchDraftTarget.new(instance.id)
+        model.updateDraft(target) { $0.text = "pending submission" }
+        runtime.duringRequest = { method, _ in
+            guard method == "native_connect" else { return }
+            model.updateDraft(target) { $0.text = "" }
+            await model.removeInstance(instanceID: instance.id)
+        }
+        var acknowledged = false
+        await model.startDraft(target: target, instanceID: instance.id) { acknowledged = true }
+        XCTAssertFalse(model.state.instances.contains { $0.id == instance.id })
+        XCTAssertTrue(model.state.tasks.isEmpty)
+        XCTAssertEqual(runtime.requests.map(\.0), ["native_connect"])
+        XCTAssertTrue(try model.store.load().tasks.isEmpty)
+        XCTAssertFalse(acknowledged)
+        XCTAssertFalse(model.isStarting)
+    }
+
+    @MainActor func testLateConnectionDoesNotStartAfterAgentDeletedSynchronously() async throws {
+        let (model, runtime, _, _, root, instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        runtime.duringRequest = { method, _ in
+            if method == "native_connect" { model.remove(instanceID: instance.id) }
+        }
+        await model.start(instanceID: instance.id, text: "pending submission")
+        XCTAssertFalse(model.state.instances.contains { $0.id == instance.id })
+        XCTAssertTrue(model.state.tasks.isEmpty)
+        XCTAssertEqual(runtime.requests.map(\.0), ["native_connect"])
+    }
+
+    @MainActor func testLateConnectionKeepsDraftWhenAgentConfigurationChanges() async throws {
+        let (model, runtime, _, _, root, instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let target = WorkbenchDraftTarget.new(instance.id)
+        model.updateDraft(target) { $0.text = "pending submission" }
+        runtime.duringRequest = { method, _ in
+            guard method == "native_connect" else { return }
+            var changed = instance; changed.role = "updated role"
+            try model.save(instance: changed, newKey: "")
+        }
+        await model.startDraft(target: target, instanceID: instance.id)
+        XCTAssertEqual(model.state.instances.first?.role, "updated role")
+        XCTAssertTrue(model.state.tasks.isEmpty)
+        XCTAssertEqual(runtime.requests.map(\.0), ["native_connect"])
+        XCTAssertEqual(model.draft(for: target).text, "pending submission")
+        XCTAssertNotNil(model.error)
+    }
+
+    @MainActor func testLateConnectionDoesNotInsertTaskAfterShutdown() async throws {
+        let (model, runtime, _, _, root, instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        runtime.duringRequest = { method, _ in
+            if method == "native_connect" { model.shutdown() }
+        }
+        await model.start(instanceID: instance.id, text: "pending submission")
+        XCTAssertTrue(model.hasShutdown)
+        XCTAssertTrue(model.state.tasks.isEmpty)
+        XCTAssertEqual(runtime.requests.map(\.0), ["native_connect"])
+        XCTAssertFalse(model.isStarting)
+    }
+
+    @MainActor func testLateConnectionDoesNotStartCancelledSubmission() async throws {
+        let (model, runtime, _, _, root, instance) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        runtime.duringRequest = { method, _ in
+            if method == "native_connect" { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        let submission = Task { await model.start(instanceID: instance.id, text: "pending submission") }
+        await submission.value
+        XCTAssertTrue(model.state.tasks.isEmpty)
+        XCTAssertEqual(runtime.requests.map(\.0), ["native_connect"])
+        XCTAssertFalse(model.isStarting)
+    }
+}
