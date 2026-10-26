@@ -145,15 +145,8 @@ private enum NativeFixtureViewport {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let menu = NSMenu()
-        let item = NSMenuItem(); menu.addItem(item)
-        let appMenu = NSMenu(); item.submenu = appMenu
-        let show = NSMenuItem(title: "显示独立验收窗口", action: #selector(showWindow), keyEquivalent: "0")
-        show.target = self; appMenu.addItem(show)
-        appMenu.addItem(.separator())
-        let quit = NSMenuItem(title: "关闭独立验收", action: #selector(close), keyEquivalent: "q")
-        quit.target = self; appMenu.addItem(quit)
-        NSApplication.shared.mainMenu = menu
+        NSApplication.shared.mainMenu = AcceptanceApplicationMenu.make(
+            target: self, show: #selector(showWindow), close: #selector(close))
         controller.show(content: content,
             size: NativeFixtureViewport.windowContentSize(.init(width: 1000, height: 740)),
             minimumContentSize: NativeFixtureViewport.windowContentSize(.init(width: 760, height: 600)))

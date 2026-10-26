@@ -64,6 +64,7 @@ xcrun swiftc -target "$(uname -m)-apple-macos14.0" -swift-version 6 -parse-as-li
   "$project_root/Sources/TravelCatApp/AgentArtifactsView.swift" \
   "$project_root/Sources/TravelCatApp/AgentWorkbenchView.swift" \
   "$project_root/Sources/TravelCatApp/ServiceCredentialStore.swift" \
+  "$project_root/Tests/TravelCatAppTests/Support/AcceptanceApplicationMenu.swift" \
   "$project_root/Tests/ManualAgentWorkbench/${TRAVEL_CAT_PREVIEW_SOURCE:-Preview.swift}" \
   -o "$preview_app/Contents/MacOS/$preview_name"
 print -r -- "$preview_app"
