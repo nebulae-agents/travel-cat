@@ -70,6 +70,11 @@ extension AgentWorkbenchModel {
         try instance.validate()
         guard files.isEmpty else { throw WorkbenchFailure("原生任务请在选定工作目录中准备文件，再在任务正文中引用路径。") }
         let info = try await connectNative(instance: instance)
+        try Task.checkCancellation()
+        try requireStorageReady()
+        guard state.instances.first(where: { $0.id == instance.id }) == instance else {
+            throw WorkbenchFailure("Agent 配置已变更或已删除，请确认当前配置后重试；草稿已保留。")
+        }
         guard info.authenticated, let config = instance.native,
               info.models.contains(where: { $0.model == config.model }) else { throw WorkbenchFailure("请先完成官方登录，并在实例设置中选择当前可用模型。") }
         var task = WorkbenchTask(instanceID: instance.id, title: String(text.prefix(64)))
