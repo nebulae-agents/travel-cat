@@ -73,6 +73,9 @@ final class AgentWorkbenchModel: ObservableObject {
     let synchronousCredentials: (any TravelServiceCredentialStoring)?
     let credentialStores: AgentWorkbenchCredentialStores?
     @Published var storageStatus: AgentWorkbenchStorageStatus = .loading
+    @Published var storageLoadPhase: AgentStorageLoadPhase = .conversations
+    @Published var storageLoadStartedAt: Date?
+    @Published var storageCancellationRequested = false
     @Published var savingInstance = false
     var storageTask: Task<Void, Never>?
     var storageGeneration = UUID()
@@ -504,6 +507,7 @@ final class AgentWorkbenchModel: ObservableObject {
         saveTask?.cancel(); draftSaveTask?.cancel(); persist()
         invalidateAllArtifactReads()
         hasShutdown = true; storageGeneration = UUID(); storageTask?.cancel()
+        storageLoadStartedAt = nil; storageCancellationRequested = false
         invalidateAllNativeBackgroundStatus(); nativeBackgroundVisibility.removeAll()
         client.shutdown()
     }

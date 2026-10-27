@@ -317,3 +317,68 @@ extension AgentWorkbenchRecoveryTests {
         model.shutdown()
     }
 }
+
+extension AgentWorkbenchRecoveryTests {
+    @MainActor func testCancelContentLoadingKeepsSingleFlightUntilSystemRequestSettlesThenCanRetry() async throws {
+        let root = root(); defer { try? FileManager.default.removeItem(at: root) }
+        let (original, keys, bytes) = try savedSnapshot(at: root)
+        let credentials = RecoveryAsyncCredentials(values: keys)
+        await credentials.pause("workbench-content-v1")
+        let model = asyncModel(root, credentials); defer { model.shutdown() }
+        let opening = Task { await model.loadStorage() }
+        await credentials.waitUntilReadStarts()
+        XCTAssertEqual(model.storageLoadPhase, .conversations)
+        let began = try XCTUnwrap(model.storageLoadStartedAt)
+        XCTAssertEqual(model.storageLoadingElapsed(at: began.addingTimeInterval(21)), 21, accuracy: 0.01)
+        XCTAssertEqual(model.storageLoadingElapsed(at: began.addingTimeInterval(-1)), 0)
+        model.cancelStorageLoading()
+        XCTAssertTrue(model.storageCancellationRequested)
+        XCTAssertFalse(model.canRetryStorage)
+        await model.loadStorage()
+        let pendingReads = await credentials.reads
+        XCTAssertEqual(pendingReads, ["workbench-content-v1"])
+        await credentials.resumeRead(); await opening.value
+        XCTAssertFalse(model.isStorageReady)
+        XCTAssertTrue(model.storageStatus.message?.contains("取消") == true)
+        XCTAssertTrue(model.canRetryStorage)
+        XCTAssertNil(model.storageLoadStartedAt)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("workbench.sealed")), bytes)
+        let writes = await credentials.writes
+        XCTAssertTrue(writes.isEmpty)
+        await model.loadStorage()
+        XCTAssertTrue(model.isStorageReady)
+        XCTAssertEqual(model.state.tasks.first?.id, original.tasks.first?.id)
+    }
+
+    @MainActor func testCancelAuditLoadingDoesNotCreateKeyOrPublishReadyState() async throws {
+        let root = root(); defer { try? FileManager.default.removeItem(at: root) }
+        let key = Data(repeating: 17, count: 32)
+        let store = WorkbenchStore(root: root, keyData: key)
+        try store.save(WorkbenchSnapshot())
+        let bytes = try Data(contentsOf: store.url)
+        let values = ["workbench-content-v1": key.base64EncodedString()]
+        let credentials = RecoveryAsyncCredentials(values: values)
+        await credentials.pause("audit-journal-v1")
+        let model = asyncModel(root, credentials); defer { model.shutdown() }
+        let opening = Task { await model.loadStorage() }
+        await credentials.waitUntilReadStarts()
+        XCTAssertEqual(model.storageLoadPhase, .audit)
+        model.cancelStorageLoading()
+        await credentials.resumeRead(); await opening.value
+        XCTAssertFalse(model.isStorageReady)
+        XCTAssertTrue(model.canRetryStorage)
+        XCTAssertTrue(model.storageStatus.message?.contains("取消") == true)
+        let writes = await credentials.writes, after = await credentials.contents()
+        XCTAssertTrue(writes.isEmpty)
+        XCTAssertEqual(after, values)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("audit-v1").path))
+        XCTAssertEqual(try Data(contentsOf: store.url), bytes)
+        await model.loadStorage()
+        XCTAssertTrue(model.isStorageReady)
+        model.cancelStorageLoading()
+        XCTAssertFalse(model.storageCancellationRequested)
+        XCTAssertFalse(model.canRetryStorage)
+        model.shutdown()
+        XCTAssertFalse(model.canRetryStorage)
+    }
+}
