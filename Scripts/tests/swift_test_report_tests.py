@@ -33,6 +33,11 @@ class SwiftTestReportTests(unittest.TestCase):
         self.assertEqual(c.swift_testing, {'testCount': 36, 'outcome': 'passed'})
         c.consume('✘ Test run with 36 tests failed after 0.123 seconds with 1 issue.')
         self.assertEqual(c.swift_testing, {'testCount': 72, 'outcome': 'failed'})
+    def test_actual_single_suite_summary_is_recorded(self):
+        c = self.collector()
+        c.consume('✔ Test run with 36 tests in 1 suite passed after 2.461 seconds.')
+        self.assertEqual(c.swift_testing, {'testCount': 36, 'outcome': 'passed'})
+
     def test_bounded_duplicate_or_malformed_results(self):
         c = self.collector(limit=1)
         for _ in range(4): c.consume("Test Case '-[Fixture.FixtureTests testExample]' passed (0.1 seconds).")
