@@ -141,6 +141,8 @@ final class TravelCatEnvironment: ObservableObject {
     var openGenerationSetup: () -> Void = {}
     var postcardBacklogRecovered: () -> Void = {}
     @Published var recoveryNotice: String?
+    lazy var backupExport = BackupExportController(repository: repository)
+    private var selectingExportDestination = false
     @Published var latestCodexDiagnostic: CodexGenerationDiagnostic?
 
     func refreshCodexDiagnostic() {
@@ -279,6 +281,9 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func exportData() {
+        guard !backupExport.isExporting, !selectingExportDestination else { return }
+        selectingExportDestination = true
+        defer { selectingExportDestination = false }
         let now = Date()
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -288,14 +293,7 @@ final class TravelCatEnvironment: ObservableObject {
         panel.nameFieldStringValue = "Travel Cat Export \(formatter.string(from: now))"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let selected = panel.url else { return }
-        do {
-            _ = try repository.export(to: selected)
-            errorMessage = nil
-        } catch RepositoryError.unsafeExportDestination {
-            errorMessage = "请将导出位置选在 Travel Cat 数据目录之外，再重试导出。"
-        } catch {
-            errorMessage = "导出失败：\(error)"
-        }
+        if backupExport.start(to: selected) { errorMessage = nil }
     }
 
     func clearHistory() {
@@ -472,7 +470,7 @@ struct TravelCatSettingsView: View {
             Section("历史相册") {
                 Text("所有旅程和明信片持续保留，新旅行不会清空旧相册。")
                     .font(.caption).foregroundStyle(.secondary)
-                Button("导出备份…") { environment.exportData() }
+                BackupExportView(controller: environment.backupExport, chooseDestination: environment.exportData)
                 if environment.model.postcardWorkError != nil {
                     Text("补卡记录读取异常。恢复会暂停自动旅行，并保留损坏原文件；待补卡任务需重新手动重试，之前已排队的手动重试可能继续。")
                         .font(.caption).foregroundStyle(.secondary)
@@ -618,5 +616,26 @@ private struct HomeLocationSettingsView: View {
             if let error = controller.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
         }
         .onAppear { manualCity = controller.state.location?.city ?? "" }
+    }
+}
+
+@MainActor
+private struct BackupExportView: View {
+    @ObservedObject var controller: BackupExportController
+    let chooseDestination: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button("导出备份…", action: chooseDestination).disabled(controller.isExporting)
+            if controller.isExporting {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(controller.cancellationRequested ? "正在取消导出…" : "正在后台导出备份…")
+                }
+                Text("已复制 \(controller.progress.completedFiles) 个文件 · \(ByteCountFormatter.string(fromByteCount: controller.progress.copiedBytes, countStyle: .file))")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("取消导出") { controller.cancel() }.disabled(controller.cancellationRequested)
+            }
+            if let message = controller.message { Text(message).font(.caption).textSelection(.enabled) }
+        }
     }
 }

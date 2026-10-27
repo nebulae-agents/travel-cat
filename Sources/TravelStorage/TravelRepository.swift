@@ -386,8 +386,9 @@ public final class TravelRepository: @unchecked Sendable {
         }
     }
 
-    public func export(to destination: URL) throws -> URL {
-        try withExclusiveLock {
+    public func export(to destination: URL, control: RepositoryExportControl = .init()) throws -> URL {
+        try control.checkCancellation()
+        return try withExclusiveLock {
             let fileManager = FileManager.default
             let final = destination.standardizedFileURL
             try validateExportDestination(final)
@@ -411,18 +412,20 @@ public final class TravelRepository: @unchecked Sendable {
                 "journal/events.jsonl",
             ] + (try backlogRecoveryFiles()) + (try artworkRevisionFiles()) {
                 let source = root.appendingPathComponent(relative)
-                try copyOptionalRegularFile(source, to: temporary.appendingPathComponent(relative))
+                try control.checkCancellation()
+                try copyOptionalRegularFile(source, to: temporary.appendingPathComponent(relative), exportControl: control)
             }
             try copyTreeWithoutLinks(
                 root.appendingPathComponent("postcards", isDirectory: true),
-                to: temporary.appendingPathComponent("postcards", isDirectory: true)
+                to: temporary.appendingPathComponent("postcards", isDirectory: true), exportControl: control
             )
             try copyOptionalTreeWithoutLinks(
                 root.appendingPathComponent("characters", isDirectory: true),
                 to: temporary.appendingPathComponent("characters", isDirectory: true),
-                skippingTransientFiles: false
+                skippingTransientFiles: false, exportControl: control
             )
-            try fileManager.moveItem(at: temporary, to: final)
+            control.record(forceReport: true)
+            try control.publish { try fileManager.moveItem(at: temporary, to: final) }
             return final
         }
     }
@@ -1645,29 +1648,55 @@ public final class TravelRepository: @unchecked Sendable {
         }
     }
 
-    private func copyRegularFile(_ source: URL, to destination: URL) throws {
+    private func copyRegularFile(_ source: URL, to destination: URL, exportControl: RepositoryExportControl? = nil) throws {
         var info = stat()
         guard lstat(source.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
             throw RepositoryError.unsafePostcardPath
         }
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: source, to: destination)
+        if let exportControl {
+            try copyExportFile(source, to: destination, control: exportControl)
+        } else { try FileManager.default.copyItem(at: source, to: destination) }
     }
 
-    private func copyOptionalRegularFile(_ source: URL, to destination: URL) throws {
+    private func copyExportFile(_ source: URL, to destination: URL, control: RepositoryExportControl) throws {
+        try control.checkCancellation()
+        let descriptor = open(source.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw RepositoryError.unsafePostcardPath }
+        let input = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? input.close() }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { throw RepositoryError.unsafePostcardPath }
+        let target = open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard target >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        let output = FileHandle(fileDescriptor: target, closeOnDealloc: true)
+        defer { try? output.close() }
+        while true {
+            try control.checkCancellation()
+            guard let bytes = try input.read(upToCount: 1024 * 1024), !bytes.isEmpty else { break }
+            try output.write(contentsOf: bytes)
+            control.record(bytes: Int64(bytes.count))
+        }
+        try control.checkCancellation()
+        try output.close()
+        control.record(fileCompleted: true)
+    }
+
+    private func copyOptionalRegularFile(_ source: URL, to destination: URL, exportControl: RepositoryExportControl? = nil) throws {
         try requireRealDirectoryChain(to: source.deletingLastPathComponent())
         var info = stat()
         if lstat(source.path, &info) != 0 {
             guard errno == ENOENT else { throw RepositoryError.unsafePostcardPath }
             return
         }
-        try copyRegularFile(source, to: destination)
+        try copyRegularFile(source, to: destination, exportControl: exportControl)
     }
 
     private func copyOptionalTreeWithoutLinks(
         _ source: URL,
         to destination: URL,
-        skippingTransientFiles: Bool
+        skippingTransientFiles: Bool,
+        exportControl: RepositoryExportControl? = nil
     ) throws {
         try requireRealDirectoryChain(to: source.deletingLastPathComponent())
         var info = stat()
@@ -1678,7 +1707,7 @@ public final class TravelRepository: @unchecked Sendable {
         try copyTreeWithoutLinks(
             source,
             to: destination,
-            skippingTransientFiles: skippingTransientFiles
+            skippingTransientFiles: skippingTransientFiles, exportControl: exportControl
         )
     }
 
@@ -1706,7 +1735,8 @@ public final class TravelRepository: @unchecked Sendable {
     private func copyTreeWithoutLinks(
         _ source: URL,
         to destination: URL,
-        skippingTransientFiles: Bool = true
+        skippingTransientFiles: Bool = true,
+        exportControl: RepositoryExportControl? = nil
     ) throws {
         let fileManager = FileManager.default
         var info = stat()
@@ -1715,6 +1745,7 @@ public final class TravelRepository: @unchecked Sendable {
         }
         try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
         for item in try fileManager.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
+            try exportControl?.checkCancellation()
             let name = item.lastPathComponent
             if skippingTransientFiles, (name.hasPrefix(".") || name.hasSuffix(".tmp")) { continue }
             var childInfo = stat()
@@ -1725,10 +1756,10 @@ public final class TravelRepository: @unchecked Sendable {
                 try copyTreeWithoutLinks(
                     item,
                     to: target,
-                    skippingTransientFiles: skippingTransientFiles
+                    skippingTransientFiles: skippingTransientFiles, exportControl: exportControl
                 )
             case S_IFREG:
-                try copyRegularFile(item, to: target)
+                try copyRegularFile(item, to: target, exportControl: exportControl)
             default:
                 throw RepositoryError.unsafePostcardPath
             }
