@@ -291,6 +291,8 @@ final class TravelCatEnvironment: ObservableObject {
         do {
             _ = try repository.export(to: selected)
             errorMessage = nil
+        } catch RepositoryError.unsafeExportDestination {
+            errorMessage = "请将导出位置选在 Travel Cat 数据目录之外，再重试导出。"
         } catch {
             errorMessage = "导出失败：\(error)"
         }

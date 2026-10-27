@@ -263,6 +263,16 @@ public final class AppModel: ObservableObject {
         presentation = .postcard(id)
     }
 
+    /// Exact mailbox navigation never marks read; the visible postcard still acknowledges display.
+    @discardableResult
+    public func openPostcardFromMailbox(eventID: UUID) -> Bool {
+        let matches = arrivedEvents().filter { $0.id == eventID && isPostcard($0) }
+        guard matches.count == 1 else { return false }
+        postcardReturnPresentation = .status
+        presentation = .postcard(eventID)
+        return true
+    }
+
     public func openHouseFromDesktop() {
         openStatusFromMenu()
         guard let id = nextUnreadPostcardID else { return }

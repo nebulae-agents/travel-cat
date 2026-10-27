@@ -60,10 +60,10 @@ final class PackagingContractTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(script.contains("test -f \"$RESOURCE_BUNDLE/$preview_asset\""))
-        XCTAssertTrue(script.contains(
-            "test -f \"$STAGING/Contents/Resources/TravelCat_TravelUI.bundle/$preview_asset\""
-        ))
+        XCTAssertTrue(script.contains("RESOURCE_FILES=$(bundle_resources \"$RESOURCE_BUNDLE\")"))
+        XCTAssertTrue(script.contains("STAGED_RESOURCE_FILES=$(bundle_resources"))
+        XCTAssertTrue(script.contains("test -f \"$RESOURCE_FILES/$preview_asset\""))
+        XCTAssertTrue(script.contains("test -f \"$STAGED_RESOURCE_FILES/$preview_asset\""))
         XCTAssertFalse(script.contains("TravelCat_TravelUI.bundle/PreviewPostcards/$preview_asset"))
     }
 
@@ -81,10 +81,8 @@ final class PackagingContractTests: XCTestCase {
             XCTAssertTrue(script.contains(name), name)
         }
         XCTAssertTrue(script.contains("for cat_asset in"))
-        XCTAssertTrue(script.contains("test -f \"$RESOURCE_BUNDLE/$cat_asset\""))
-        XCTAssertTrue(script.contains(
-            "test -f \"$STAGING/Contents/Resources/TravelCat_TravelUI.bundle/$cat_asset\""
-        ))
+        XCTAssertTrue(script.contains("test -f \"$RESOURCE_FILES/$cat_asset\""))
+        XCTAssertTrue(script.contains("test -f \"$STAGED_RESOURCE_FILES/$cat_asset\""))
         XCTAssertFalse(script.contains("TravelCat_TravelUI.bundle/PreviewBlackCat/$cat_asset"))
     }
 

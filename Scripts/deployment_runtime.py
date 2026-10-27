@@ -110,6 +110,9 @@ class Runtime:
         if info.get("TravelCatDataRoot") != config["dataRoot"]:
             raise ValueError("Built app album path mismatch")
         resources = app / "Contents/Resources/TravelCat_TravelUI.bundle"
+        native_resources = resources / "Contents/Resources"
+        if native_resources.is_dir():
+            resources = native_resources
         for source in PET_FILES.values():
             if file_bytes(resources / Path(source).name) != file_bytes(repository / source):
                 raise ValueError("Built app bundled pet asset mismatch")

@@ -596,6 +596,51 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.files.tree_digest(self.app), old_app)
         self.assertEqual(self.files.tree_digest(self.pet), old_pet)
 
+    def test_native_resource_bundle_deploys(self):
+        build = self.runtime.build
+        def native_build(*arguments):
+            candidate = build(*arguments)
+            bundle = candidate / "Contents/Resources/TravelCat_TravelUI.bundle"
+            native = bundle / "Contents/Resources"
+            native.mkdir(parents=True)
+            for source in self.runtime_module.PET_FILES.values():
+                (bundle / Path(source).name).rename(native / Path(source).name)
+            return candidate
+        with mock.patch.object(self.runtime, "build", side_effect=native_build):
+            try:
+                receipt = self.run_deploy()
+            except FileNotFoundError:
+                self.fail("Native SwiftPM bundle resources must pass deployment verification")
+        self.assertEqual(receipt["status"], "complete")
+        self.assertEqual(receipt["stages"], ["prepared", "app-published", "verified", "launched"])
+        installed = self.app / "Contents/Resources/TravelCat_TravelUI.bundle/Contents/Resources"
+        for source in self.runtime_module.PET_FILES.values():
+            self.assertEqual((installed / Path(source).name).read_bytes(), (self.repo / source).read_bytes())
+
+    def test_native_resource_bundle_checks_active_asset_bytes(self):
+        for flat_shadow in (False, True):
+            with self.subTest(flat_shadow=flat_shadow), tempfile.TemporaryDirectory(dir=self.base) as temporary:
+                candidate = Path(temporary) / "candidate.app"
+                self.make_app(candidate, revision=self.revision)
+                bundle = candidate / "Contents/Resources/TravelCat_TravelUI.bundle"
+                native = bundle / "Contents/Resources"
+                native.mkdir(parents=True)
+                for source in self.runtime_module.PET_FILES.values():
+                    old = bundle / Path(source).name
+                    if flat_shadow:
+                        shutil.copy2(old, native / old.name)
+                    else:
+                        old.rename(native / old.name)
+                (native / "pet.json").write_bytes(b"tampered native asset")
+                error = None
+                try:
+                    self.runtime.verify_app(candidate, self.repo, self.revision, self.config)
+                except Exception as caught:
+                    error = caught
+                self.assertIsInstance(error, ValueError, "Verify the active native asset rather than fail on a missing flat file or trust a flat shadow")
+                self.assertIn("asset mismatch", str(error))
+                self.assertNotIn("stop", self.runtime.events)
+
     def test_helper_provenance_and_linked_bundles_are_refused(self):
         with tempfile.TemporaryDirectory(dir=self.base) as temporary:
             candidate = Path(temporary) / "candidate.app"
