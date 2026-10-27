@@ -1,15 +1,21 @@
 import Foundation
 
-struct AppBuildInformation {
+struct AppBuildInformation: Sendable {
     static let current = AppBuildInformation(infoDictionary: Bundle.main.infoDictionary ?? [:])
 
     private let version: String?
     private let build: String?
     private let buildDate: Date?
+    private let sourceRevision: String?
 
     init(infoDictionary: [String: Any]) {
         version = Self.metadataString(infoDictionary["CFBundleShortVersionString"])
         build = Self.metadataString(infoDictionary["CFBundleVersion"])
+        if let revision = infoDictionary["TravelCatSourceRevision"] as? String,
+           [40, 64].contains(revision.utf8.count),
+           revision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) {
+            sourceRevision = revision
+        } else { sourceRevision = nil }
 
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -22,6 +28,8 @@ struct AppBuildInformation {
             buildDate = nil
         }
     }
+
+    var sourceDescription: String { sourceRevision.map { String($0.prefix(12)) } ?? "未记录" }
 
     var versionDescription: String {
         let description = version ?? "未知版本"

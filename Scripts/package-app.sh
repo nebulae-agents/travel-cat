@@ -34,6 +34,14 @@ STAGING="$DIST_DIR/.Travel Cat.app.staging.$$"
 PLIST="$PROJECT_ROOT/packaging/Info.plist"
 SWIFT_WRAPPER="$PROJECT_ROOT/Scripts/travel-cat-swift.sh"
 
+swift_build() {
+    if [ -n "${TRAVEL_CAT_PACKAGE_SDK:-}" ]; then
+        "$SWIFT_WRAPPER" build --sdk "$TRAVEL_CAT_PACKAGE_SDK" "$@"
+    else
+        "$SWIFT_WRAPPER" build "$@"
+    fi
+}
+
 if [ ! -f "$PROJECT_ROOT/Package.swift" ] || [ ! -f "$PLIST" ]; then
     echo "package-app: expected Travel Cat project files are missing" >&2
     exit 1
@@ -57,8 +65,8 @@ esac
 PINNED_CLI=$("$PROJECT_ROOT/Scripts/verify-travelcatctl-release.sh" "$PROVENANCE" "$PROJECT_ROOT" "$PINNED_ROOT")
 BUNDLED_LAUNCHER="$PROJECT_ROOT/Scripts/run-bundled-travelcatctl.sh"
 
-"$SWIFT_WRAPPER" build --disable-sandbox -c release --product TravelCatApp
-BIN_DIR=$("$SWIFT_WRAPPER" build --disable-sandbox -c release --show-bin-path)
+swift_build --disable-sandbox -c release --product TravelCatApp
+BIN_DIR=$(swift_build --disable-sandbox -c release --show-bin-path)
 if [ ! -d "$BIN_DIR" ] || [ -L "$BIN_DIR" ]; then
     echo "package-app: release bin directory is missing or unsafe" >&2
     exit 1
@@ -71,13 +79,34 @@ esac
 EXECUTABLE="$BIN_DIR/TravelCatApp"
 RESOURCE_BUNDLE="$BIN_DIR/TravelCat_TravelUI.bundle"
 GENERATION_BUNDLE="$BIN_DIR/TravelCat_TravelCatApp.bundle"
+bundle_resources() {
+    if [ -d "$1/Contents/Resources" ]; then
+        printf '%s/Contents/Resources\n' "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+RESOURCE_FILES=$(bundle_resources "$RESOURCE_BUNDLE")
+GENERATION_FILES=$(bundle_resources "$GENERATION_BUNDLE")
+for mailbox_asset in pet-mailbox.png; do
+    test -f "$RESOURCE_FILES/$mailbox_asset" || {
+        echo "package-app: missing mailbox resource: $mailbox_asset" >&2
+        exit 1
+    }
+done
+for agent_asset in sidecar.py container_relay.py audit_runtime.py audit_payload.py workspace_io.py runtime_discovery.py codex_native.py codex_native_transport.py; do
+    test -f "$GENERATION_FILES/AgentRuntime/$agent_asset" || {
+        echo "package-app: missing agent resource: $agent_asset" >&2
+        exit 1
+    }
+done
 for generation_asset in narrative.schema.json image.schema.json front.png side.png sitting.png identity.json; do
-    test -f "$GENERATION_BUNDLE/Generation/$generation_asset" || {
+    test -f "$GENERATION_FILES/Generation/$generation_asset" || {
         echo "package-app: missing generation resource: $generation_asset" >&2
         exit 1
     }
 done
-if [ ! -x "$EXECUTABLE" ] || [ ! -d "$RESOURCE_BUNDLE" ] || [ ! -f "$RESOURCE_BUNDLE/cute-black-cat-spritesheet.webp" ] ||
+if [ ! -x "$EXECUTABLE" ] || [ ! -d "$RESOURCE_BUNDLE" ] || [ ! -f "$RESOURCE_FILES/cute-black-cat-spritesheet.webp" ] ||
     [ ! -x "$PINNED_CLI" ] || [ -L "$PINNED_CLI" ] || [ ! -x "$BUNDLED_LAUNCHER" ] || [ -L "$BUNDLED_LAUNCHER" ]; then
     echo "package-app: release executable or TravelUI resources are missing" >&2
     exit 1
@@ -89,7 +118,7 @@ for preview_asset in \
     preview-iceland-aurora.png \
     preview-hangzhou-garden.png \
     preview-paris-dusk.png; do
-    test -f "$RESOURCE_BUNDLE/$preview_asset" || {
+    test -f "$RESOURCE_FILES/$preview_asset" || {
         echo "package-app: missing preview postcard asset: $preview_asset" >&2
         exit 1
     }
@@ -98,7 +127,7 @@ for cat_asset in \
     preview-cat-front.png \
     preview-cat-side.png \
     preview-cat-sitting.png; do
-    test -f "$RESOURCE_BUNDLE/$cat_asset" || {
+    test -f "$RESOURCE_FILES/$cat_asset" || {
         echo "package-app: missing preview cat asset: $cat_asset" >&2
         exit 1
     }
@@ -121,13 +150,23 @@ if [ -n "$DATA_ROOT" ]; then
 fi
 cp -R "$RESOURCE_BUNDLE" "$STAGING/Contents/Resources/TravelCat_TravelUI.bundle"
 cp -R "$GENERATION_BUNDLE" "$STAGING/Contents/Resources/TravelCat_TravelCatApp.bundle"
+STAGED_RESOURCE_FILES=$(bundle_resources "$STAGING/Contents/Resources/TravelCat_TravelUI.bundle")
+STAGED_GENERATION_FILES=$(bundle_resources "$STAGING/Contents/Resources/TravelCat_TravelCatApp.bundle")
+# Python import caches are generated state and can change after signing.
+# Keep only source resources inside the sealed app.
+find "$STAGED_GENERATION_FILES/AgentRuntime" -type f -name "*.pyc" -delete
+find "$STAGED_GENERATION_FILES/AgentRuntime" -type d -name __pycache__ -empty -delete
 
 test -x "$STAGING/Contents/MacOS/TravelCatApp"
 test -x "$STAGING/Contents/Resources/run-travelcatctl"
 test -x "$STAGING/Contents/Helpers/travelcatctl"
 test -f "$STAGING/Contents/Resources/travelcatctl-release.provenance"
 test -f "$STAGING/Contents/Info.plist"
-test -f "$STAGING/Contents/Resources/TravelCat_TravelUI.bundle/cute-black-cat-spritesheet.webp"
+test -f "$STAGED_RESOURCE_FILES/cute-black-cat-spritesheet.webp"
+test -f "$STAGED_RESOURCE_FILES/pet-mailbox.png"
+for agent_asset in sidecar.py container_relay.py audit_runtime.py audit_payload.py workspace_io.py runtime_discovery.py codex_native.py codex_native_transport.py; do
+    test -f "$STAGED_GENERATION_FILES/AgentRuntime/$agent_asset"
+done
 for preview_asset in \
     preview-kamakura-coast.png \
     preview-kyoto-lanterns.png \
@@ -135,7 +174,7 @@ for preview_asset in \
     preview-iceland-aurora.png \
     preview-hangzhou-garden.png \
     preview-paris-dusk.png; do
-    test -f "$STAGING/Contents/Resources/TravelCat_TravelUI.bundle/$preview_asset" || {
+    test -f "$STAGED_RESOURCE_FILES/$preview_asset" || {
         echo "package-app: staged preview postcard asset is missing: $preview_asset" >&2
         exit 1
     }
@@ -144,7 +183,7 @@ for cat_asset in \
     preview-cat-front.png \
     preview-cat-side.png \
     preview-cat-sitting.png; do
-    test -f "$STAGING/Contents/Resources/TravelCat_TravelUI.bundle/$cat_asset" || {
+    test -f "$STAGED_RESOURCE_FILES/$cat_asset" || {
         echo "package-app: staged preview cat asset is missing: $cat_asset" >&2
         exit 1
     }

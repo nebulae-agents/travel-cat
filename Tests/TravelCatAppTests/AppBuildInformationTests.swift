@@ -3,7 +3,7 @@ import XCTest
 @testable import TravelCatApp
 
 final class AppBuildInformationTests: XCTestCase {
-    func testSourcePackagingBuildDistinguishesUpdateFromBuild31() throws {
+    func testSourcePackagingBuildDoesNotDowngradeCurrentMainline() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -13,24 +13,33 @@ final class AppBuildInformationTests: XCTestCase {
             PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         )
         let build = try XCTUnwrap(Int(try XCTUnwrap(info["CFBundleVersion"] as? String)))
-        XCTAssertGreaterThan(build, 31)
+        XCTAssertGreaterThanOrEqual(build, 42)
+    }
+
+    func testSourceRevisionUsesOnlyValidatedPackagedMetadata() {
+        let revision = String(repeating: "a1", count: 20)
+        XCTAssertEqual(AppBuildInformation(infoDictionary: ["TravelCatSourceRevision": revision]).sourceDescription, "a1a1a1a1a1a1")
+        XCTAssertEqual(AppBuildInformation(infoDictionary: ["TravelCatSourceRevision": String(repeating: "b2", count: 32)]).sourceDescription, "b2b2b2b2b2b2")
+        for value: Any in [revision + "\n", String(repeating: "A", count: 40), String(repeating: "a", count: 39), String(repeating: "a", count: 41), String(repeating: "a", count: 63), String(repeating: "a", count: 65), "private-account/path", "https://example.com/token", String(repeating: "z", count: 40), 42, NSNull()] {
+            XCTAssertEqual(AppBuildInformation(infoDictionary: ["TravelCatSourceRevision": value]).sourceDescription, "未记录")
+        }
     }
 
     func testVersionDescriptionIncludesVersionAndBuild() {
         let information = AppBuildInformation(infoDictionary: [
             "CFBundleShortVersionString": "1.4.1",
-            "CFBundleVersion": "32",
+            "CFBundleVersion": "42",
         ])
 
-        XCTAssertEqual(information.versionDescription, "1.4.1（构建32）")
+        XCTAssertEqual(information.versionDescription, "1.4.1（构建42）")
     }
 
     func testMissingFieldsKeepAvailableVersionOrBuild() {
         XCTAssertEqual(AppBuildInformation(infoDictionary: [:]).versionDescription, "未知版本")
         XCTAssertEqual(AppBuildInformation(infoDictionary: [:]).buildDateDescription(), "未记录")
         XCTAssertEqual(
-            AppBuildInformation(infoDictionary: ["CFBundleVersion": "32"]).versionDescription,
-            "未知版本（构建32）"
+            AppBuildInformation(infoDictionary: ["CFBundleVersion": "42"]).versionDescription,
+            "未知版本（构建42）"
         )
         XCTAssertEqual(
             AppBuildInformation(infoDictionary: ["CFBundleShortVersionString": "1.4.1"]).versionDescription,
@@ -74,9 +83,9 @@ final class AppBuildInformationTests: XCTestCase {
         XCTAssertEqual(
             AppBuildInformation(infoDictionary: [
                 "CFBundleShortVersionString": " ",
-                "CFBundleVersion": "32",
+                "CFBundleVersion": "42",
             ]).versionDescription,
-            "未知版本（构建32）"
+            "未知版本（构建42）"
         )
         XCTAssertEqual(
             AppBuildInformation(infoDictionary: [

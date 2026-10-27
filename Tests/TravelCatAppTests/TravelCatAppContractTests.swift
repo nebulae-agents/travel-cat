@@ -291,16 +291,26 @@ final class TravelCatAppSourceContractTests: XCTestCase {
     func testMenuActionsUseDedicatedJourneySettingsAndAlbumPreviewWindows() throws {
         let source = try appSource()
 
-        XCTAssertEqual(source.components(separatedBy: "TravelUtilityWindowController()").count - 1, 5)
+        XCTAssertEqual(source.components(separatedBy: "TravelUtilityWindowController()").count - 1, 6)
         XCTAssertTrue(source.contains("private lazy var utilityWindowController"))
         XCTAssertTrue(source.contains("private lazy var settingsWindowController"))
         XCTAssertTrue(source.contains("private lazy var generationWindowController"))
         XCTAssertTrue(source.contains("private lazy var albumPreviewWindowController"))
         XCTAssertTrue(source.contains("private lazy var journeyTestWindowController"))
+        XCTAssertTrue(source.contains("private lazy var agentWindowController"))
+        XCTAssertTrue(source.contains("AgentWorkbenchView(model: agentWorkbench)"))
         XCTAssertTrue(source.contains("model.openStatusFromMenu()"))
         XCTAssertTrue(source.contains("model.openLatestPostcardFromMenu()"))
         XCTAssertTrue(source.contains("model.openLatestAlbumFromMenu()"))
         XCTAssertTrue(source.contains("StartupErrorView(message:"))
+    }
+
+    func testInstalledDesktopPetWiresMailboxAlongsideExistingScene() throws {
+        let source = try appSource()
+        XCTAssertTrue(source.contains("mailboxCoordinator = DesktopMailboxCoordinator(desktop: controller"))
+        XCTAssertTrue(source.contains("PetHouseView(phase: model.snapshot.phase, hasUnreadPostcard: false"))
+        XCTAssertTrue(source.contains("openPostcard: { [weak self] id in self?.showMailboxPostcard(id) }"))
+        XCTAssertTrue(source.contains("model.openPostcardFromMailbox(eventID: id)"))
     }
 
     func testApplicationTerminationWaitsForOwnedTestProcessToDrain() throws {
@@ -677,15 +687,13 @@ final class TravelUtilityWindowControllerTests: XCTestCase {
         originalWindow.close()
         controller.show(content: AnyView(Text("album")), size: TravelUtilityWindowController.albumSize)
         XCTAssertEqual(ObjectIdentifier(try XCTUnwrap(controller.window)), originalIdentifier)
-        // AppKit may reduce the requested height on small CI displays. Compare
-        // against its screen constraint, not a desktop-specific pixel height.
-        var requestedContent = originalWindow.contentRect(forFrameRect: originalWindow.frame)
-        requestedContent.size = TravelUtilityWindowController.albumSize
-        let requestedFrame = originalWindow.frameRect(forContentRect: requestedContent)
-        let constrainedFrame = originalWindow.constrainFrameRect(
-            requestedFrame, to: originalWindow.screen ?? NSScreen.main
+        // The whole frame must fit the available display, including title chrome.
+        let screen = try XCTUnwrap(originalWindow.screen ?? NSScreen.main)
+        let available = originalWindow.contentRect(forFrameRect: screen.visibleFrame).size
+        let expectedSize = NSSize(
+            width: min(TravelUtilityWindowController.albumSize.width, available.width),
+            height: min(TravelUtilityWindowController.albumSize.height, available.height)
         )
-        let expectedSize = originalWindow.contentRect(forFrameRect: constrainedFrame).size
         XCTAssertEqual(controller.window?.contentView?.frame.size, expectedSize)
     }
 }
