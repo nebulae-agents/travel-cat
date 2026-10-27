@@ -1,5 +1,7 @@
 # CI 构建缓存与并发
 
+本候选依赖 [PR #33](https://github.com/nebulae-agents/travel-cat/pull/33) 的安全测试报告，并合入当前 main。缓存命中仍运行报告适配器、Agent runtime 契约及全部现有检查；两时区报告持续保留。
+
 `Source checks` 保留 `push`、`pull_request` 和 `workflow_dispatch`，使用 macOS 15、Xcode 26.2、只读仓库权限。Python、上传工具、插件、技能、代理、UTC 完整 Swift 回归、上海时区提示测试和公开上传审计仍逐项执行；缓存命中不会跳过任何检查。没有路径过滤。
 
 ## 并发规则
@@ -23,17 +25,17 @@
 精确键为：
 
 ```text
-runner.os-runner.arch-travel-cat-swiftpm-v2-toolchain_sha256-inputs_sha256
+runner.os-runner.arch-travel-cat-swiftpm-v3-toolchain_sha256-inputs_sha256
 ```
 
-`toolchain_sha256` 取以下命令原始输出的 SHA-256：`swift --version`、`xcodebuild -version`、`xcrun --sdk macosx --show-sdk-version` 和 `sw_vers -productVersion`。`inputs_sha256` 使用 `hashFiles` 覆盖 `Package.swift`、存在时的 `Package.resolved`、`Scripts/travel-cat-swift.sh`、`Sources/**` 和 `Tests/**`，包括正式资源和测试夹具。操作系统、架构、工具链或这些输入变化都会生成新键。
+`toolchain_sha256` 取以下命令原始输出的 SHA-256：`swift --version`、`xcodebuild -version`、`xcrun --sdk macosx --show-sdk-version` 和 `sw_vers -productVersion`。`inputs_sha256` 使用 `hashFiles` 覆盖 `Package.swift`、存在时的 `Package.resolved`、`Scripts/travel-cat-swift.sh`、`Scripts/swift_test_report.py`、`.github/workflows/ci.yml`、`Sources/**` 和 `Tests/**`，包括正式资源和测试夹具。操作系统、架构、工具链或这些输入变化都会生成新键。
 
-缓存键版本由 `v1` 升为 `v2`，避免恢复时间归一化之前保存的构建数据库。使用固定到 v6.1.0 提交的官方 `actions/cache`，不设置 `restore-keys`。缓存未命中时照常完整构建；命中时仍执行完整回归和所有契约、审计。这一保守范围减少不同源码或资源复用旧产物的机会，也意味着源码或测试修改会重新构建。
+缓存键版本现为 `v3`，不复用此前未覆盖当前 CI 调用与报告适配器的构建数据库。使用固定到 v6.1.0 提交的官方 `actions/cache`，不设置 `restore-keys`。缓存未命中时照常完整构建；命中时仍执行完整回归和所有契约、审计。这一保守范围减少不同源码或资源复用旧产物的机会，也意味着源码或测试修改会重新构建。
 
 ## 验证边界
 
-CI 三处仍明确清除真实提供方、原生验收、地标与计时相关启用变量，保持离线策略。诊断产物仍只保留合成日期、邮票和公共京都地名裁片三天，排除完整画面、姓名、地址和正文。
+CI 三处仍明确清除真实提供方、原生验收、地标与计时相关启用变量，保持离线策略。诊断裁片仍只保留合成日期、邮票和公共京都地名三天，排除完整画面、姓名、地址和正文。#33 的安全测试 JSON 保留七天，排除原始日志和私有路径。另有独立的 `swift-cache-observation-<run>-<attempt>` 三天记录，仅包含源码版本和精确缓存命中布尔值，不包含缓存内容、路径或任意环境变量。
 
-测量时应对同一提交分别记录缓存未命中与命中的远端耗时，核对缓存保存、恢复日志和各检查步骤，不能预先保证提速幅度。并发规则另以开发分支连续运行、main 和 tag 独立保留的实际记录核对。最终结论以当前提交的 GitHub Checks 为准；本机工作流语法和契约检查不能代替远端证据。
+测量时应对同一提交分别记录缓存未命中与命中的远端耗时，核对安全缓存观测 JSON、缓存元数据和各检查步骤状态，不能预先保证提速幅度。并发规则另以开发分支连续运行、main 和 tag 独立保留的实际记录核对。最终结论以当前提交的 GitHub Checks 为准；本机工作流语法和契约检查不能代替远端证据。
 
 行为依据：[GitHub 并发文档](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)、[官方 actions/cache](https://github.com/actions/cache)。

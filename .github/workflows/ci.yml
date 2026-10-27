@@ -24,14 +24,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
       - name: Verify toolchain
         shell: bash
         run: |
           set -euo pipefail
-          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT
           test -d "$DEVELOPER_DIR"
           swift --version
           python3 --version
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), "AgentRuntime requires Python 3.11+"'
           node --version
           echo "TRAVEL_CAT_SCRATCH_ROOT=$RUNNER_TEMP/travel-cat-swift" >> "$GITHUB_ENV"
       - name: Normalize tracked Swift source timestamps
@@ -88,12 +92,34 @@ jobs:
           )"
           echo "toolchain-hash=$toolchain_hash" >> "$GITHUB_OUTPUT"
       - name: Restore SwiftPM build cache
+        id: swift-cache-restore
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.swift-cache.outputs.scratch-path }}
-          key: ${{ runner.os }}-${{ runner.arch }}-travel-cat-swiftpm-v2-${{ steps.swift-cache.outputs.toolchain-hash }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Scripts/travel-cat-swift.sh', 'Sources/**', 'Tests/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-travel-cat-swiftpm-v3-${{ steps.swift-cache.outputs.toolchain-hash }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Scripts/travel-cat-swift.sh', 'Scripts/swift_test_report.py', '.github/workflows/ci.yml', 'Sources/**', 'Tests/**') }}
+      - name: Record exact cache observation
+        env:
+          TRAVEL_CAT_CACHE_HIT: ${{ steps.swift-cache-restore.outputs.cache-hit }}
+        run: |
+          python3 - <<'CACHE_OBSERVATION'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert len(revision) in (40, 64) and all(c in "0123456789abcdef" for c in revision)
+          value = {"schemaVersion": 1, "cacheHit": os.environ.get("TRAVEL_CAT_CACHE_HIT") == "true", "sourceRevision": revision}
+          target = Path(os.environ["RUNNER_TEMP"]) / "travel-cat-cache-observation.json"
+          target.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+          target.chmod(0o600)
+          CACHE_OBSERVATION
       - name: Python source contracts
         run: python3 -m unittest discover -s Scripts/tests -p '*_tests.py'
+      - name: Agent runtime contracts
+        run: |
+          unset TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT
+          python3 Scripts/run-agent-runtime-contracts.py
       - name: Upload tooling contracts
         run: Scripts/tests/project-upload-tools-tests.sh
       - name: Plugin contracts
@@ -106,14 +132,31 @@ jobs:
         env:
           TZ: UTC
         run: |
-          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE
-          Scripts/travel-cat-swift.sh test
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT
+          python3 Scripts/swift_test_report.py --output "$RUNNER_TEMP/travel-cat-results/utc.json" --selection utc
       - name: Prompt tests (Asia/Shanghai)
         env:
           TZ: Asia/Shanghai
         run: |
-          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE
-          Scripts/travel-cat-swift.sh test --filter PetTravelPromptServiceTests
+          unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT
+          python3 Scripts/swift_test_report.py --output "$RUNNER_TEMP/travel-cat-results/shanghai.json" --selection shanghai -- --filter PetTravelPromptServiceTests
+      - name: Preserve exact cache observation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: swift-cache-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 3
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/travel-cat-cache-observation.json
+      - name: Preserve sanitized Swift test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: swift-test-results-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: ignore
+          # Numeric results and public test identities only; never raw logs.
+          path: ${{ runner.temp }}/travel-cat-results/*.json
       - name: Preserve synthetic date and public-place crops
         if: ${{ always() }}
         uses: actions/upload-artifact@v7.0.2

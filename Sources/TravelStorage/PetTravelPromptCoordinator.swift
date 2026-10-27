@@ -279,6 +279,7 @@ public final class PetTravelPromptCoordinator {
              .malformedImageRetryState,
              .narrativeChanged,
              .unsafePostcardPath,
+             .unsafeExportDestination,
              .catIsAway,
              .clearHistoryResetFailed:
             .repositoryInvalid(repositoryError.description)
