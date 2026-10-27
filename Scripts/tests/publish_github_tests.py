@@ -482,7 +482,11 @@ class PublishArtifactsTests(unittest.TestCase):
         self.assertIn('start_dir=str(ROOT / "Tests/AgentRuntimeTests")', runtime_runner)
         self.assertIn('pattern="test_*.py"', runtime_runner)
         self.assertIn("/Applications/Xcode_26.2.app/Contents/Developer", workflow)
-        self.assertIn("Scripts/travel-cat-swift.sh test", workflow)
+        self.assertIn("python3 Scripts/swift_test_report.py", workflow)
+        report_runner = (ROOT / "Scripts/swift_test_report.py").read_text()
+        self.assertIn("Scripts/travel-cat-swift.sh", report_runner)
+        self.assertIn("'test', *forwarded", report_runner)
+        self.assertIn("Preserve sanitized Swift test results", workflow)
         self.assertNotIn("TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE: 1", workflow)
         # Presence-based opt-ins must be absent, not defined with empty values.
         for variable in ("TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE", "TRAVEL_CAT_LIVE_RENDER_SESSION",
