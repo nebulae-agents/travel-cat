@@ -18,7 +18,7 @@ import threading
 import time
 
 CASE = re.compile(r"^Test Case '-\[[A-Za-z0-9_]+\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' (passed|failed|skipped) \(([0-9.]+) seconds\)\.$")
-AGGREGATE = re.compile(r'^[✔✘] Test run with ([0-9]+) tests(?: in [0-9]+ suites)? (passed|failed) after [0-9.]+ seconds(?: with [0-9]+ issues?)?\.$')
+AGGREGATE = re.compile(r'^[✔✘] Test run with ([0-9]+) tests(?: in [0-9]+ suites?)? (passed|failed) after [0-9.]+ seconds(?: with [0-9]+ issues?)?\.$')
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 MAX_LINE = 8192
 
