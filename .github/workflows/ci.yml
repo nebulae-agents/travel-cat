@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && github.run_id || 'latest' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   source-checks:
     runs-on: macos-15
@@ -34,6 +38,82 @@ jobs:
           python3 -c 'import sys; assert sys.version_info >= (3, 11), "AgentRuntime requires Python 3.11+"'
           node --version
           echo "TRAVEL_CAT_SCRATCH_ROOT=$RUNNER_TEMP/travel-cat-swift" >> "$GITHUB_ENV"
+      - name: Normalize tracked Swift source timestamps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+
+          root = Path.cwd().resolve(strict=True)
+          tracked = subprocess.check_output(
+              ["git", "ls-files", "-z", "--", "Package.swift", "Sources", "Tests"]
+          )
+          sources = []
+          for encoded_path in tracked.split(b"\0"):
+              relative = os.fsdecode(encoded_path)
+              if relative != "Package.swift" and not (
+                  relative.startswith(("Sources/", "Tests/")) and relative.endswith(".swift")
+              ):
+                  continue
+              source = root / relative
+              resolved = source.resolve(strict=True)
+              metadata = source.lstat()
+              if root not in resolved.parents or resolved != source or not stat.S_ISREG(metadata.st_mode):
+                  raise SystemExit(f"Expected a regular, non-symlink source inside checkout: {relative}")
+              commit_time = subprocess.check_output(
+                  ["git", "log", "-1", "--format=%ct", "--", relative], text=True
+              ).strip()
+              if not commit_time.isascii() or not commit_time.isdecimal():
+                  raise SystemExit(f"Missing or invalid Git commit timestamp: {relative}")
+              sources.append((source, metadata.st_atime_ns, int(commit_time) * 1_000_000_000))
+          for source, atime_ns, mtime_ns in sources:
+              os.utime(source, ns=(atime_ns, mtime_ns), follow_symlinks=False)
+          print(f"Normalized {len(sources)} tracked Swift source timestamps")
+          PYTHON
+      - name: Prepare SwiftPM cache
+        id: swift-cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch_path="$(Scripts/travel-cat-swift.sh scratch-path)"
+          echo "scratch-path=$scratch_path" >> "$GITHUB_OUTPUT"
+          toolchain_hash="$(
+            set -e
+            {
+              swift --version
+              xcodebuild -version
+              xcrun --sdk macosx --show-sdk-version
+              sw_vers -productVersion
+            } | shasum -a 256 | awk '{print $1}'
+          )"
+          echo "toolchain-hash=$toolchain_hash" >> "$GITHUB_OUTPUT"
+      - name: Restore SwiftPM build cache
+        id: swift-cache-restore
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.swift-cache.outputs.scratch-path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-travel-cat-swiftpm-v3-${{ steps.swift-cache.outputs.toolchain-hash }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Scripts/travel-cat-swift.sh', 'Scripts/swift_test_report.py', '.github/workflows/ci.yml', 'Sources/**', 'Tests/**') }}
+      - name: Record exact cache observation
+        env:
+          TRAVEL_CAT_CACHE_HIT: ${{ steps.swift-cache-restore.outputs.cache-hit }}
+        run: |
+          python3 - <<'CACHE_OBSERVATION'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert len(revision) in (40, 64) and all(c in "0123456789abcdef" for c in revision)
+          value = {"schemaVersion": 1, "cacheHit": os.environ.get("TRAVEL_CAT_CACHE_HIT") == "true", "sourceRevision": revision}
+          target = Path(os.environ["RUNNER_TEMP"]) / "travel-cat-cache-observation.json"
+          target.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+          target.chmod(0o600)
+          CACHE_OBSERVATION
       - name: Python source contracts
         run: python3 -m unittest discover -s Scripts/tests -p '*_tests.py'
       - name: Agent runtime contracts
@@ -60,6 +140,14 @@ jobs:
         run: |
           unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT
           python3 Scripts/swift_test_report.py --output "$RUNNER_TEMP/travel-cat-results/shanghai.json" --selection shanghai -- --filter PetTravelPromptServiceTests
+      - name: Preserve exact cache observation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: swift-cache-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 3
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/travel-cat-cache-observation.json
       - name: Preserve sanitized Swift test results
         if: ${{ always() }}
         uses: actions/upload-artifact@v7.0.2
