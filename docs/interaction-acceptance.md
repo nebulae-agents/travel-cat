@@ -1,6 +1,6 @@
 # 点击、翻面与原生恢复验收
 
-本文保留 2026-10-14 合并前的交互组件和原生验收记录。最新安装为公开主干 `1ca61a2` 的 1.4.1/build 42；后续独立 Native 与正式版本验收范围见[交付状态](delivery-status.md)。[原始结构化验收记录](interaction-acceptance.json)保持原字节，其中 `publicCandidateInstalled:false` 是当时快照，不是当前安装状态。下文的历史失败和未核实事项保留其原时点含义。
+本文保留 2026-10-14 合并前的交互组件和原生验收记录。2026-10-28 安装为公开主干 `a17b88750548` 的 1.4.1/build 42；后续独立 Native 与正式版本验收范围见[交付状态](delivery-status.md)。[原始结构化验收记录](interaction-acceptance.json)保持原字节，其中 `publicCandidateInstalled:false` 是当时快照，不是当前安装状态。下文的历史失败和未核实事项保留其原时点含义。
 
 卡面和按钮共用翻面动作；UUID阶段、取消和执行时可见性检查保护重入、旧completion和未读状态。系统减少动态效果分支保留。隔离恢复夹具、回环服务与强制根启动器只用于测试，不改变正式启动路径。
 
