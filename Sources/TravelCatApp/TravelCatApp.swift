@@ -134,7 +134,10 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             let generator = ConfiguredTravelContentGenerator(configuration: { services.configuration },
                 credentials: serviceCredentials, codex: CodexTravelContentGenerator(executor: codexExecutor, diagnostics: { [codexDiagnosticStore] data in try? codexDiagnosticStore.record(data) }))
             let worker = AutomaticTravelWorker(repository: repository, generator: generator,
-                didChange: { [weak self] in self?.postcardRecoveryController?.refresh() })
+                didChange: { [weak self] in
+                    self?.postcardRecoveryController?.refresh()
+                    self?.automaticTravelController?.refreshSuccessfulPublicationDate()
+                })
             let recovery = PostcardRecoveryController(repository: repository, model: model, worker: worker,
                 settings: { [weak environment] in environment?.effectiveSettings ?? TravelSettings() },
                 isReady: { [weak services] in services?.isReady ?? false },
@@ -156,13 +159,14 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                         && environment?.selectedCharacterProfile == .defaultBlackCat
                         && environment?.effectiveCharacterProfile == .defaultBlackCat
                 },
-                run: { [weak environment] in
+                runWithProgress: { [weak environment] progress in
                     guard let environment else { throw CancellationError() }
-                    return try await worker.step(settings: environment.effectiveSettings)
-                }, retry: { [weak environment] in
+                    return try await worker.step(settings: environment.effectiveSettings, progress: progress)
+                }, retryWithProgress: { [weak environment] progress in
                     guard let environment else { throw CancellationError() }
-                    return try await worker.step(settings: environment.effectiveSettings, retryFailure: true)
-                })
+                    return try await worker.step(settings: environment.effectiveSettings, retryFailure: true, progress: progress)
+                }, lastSuccessDate: worker.lastSuccessfulPublicationDate(),
+                readLastSuccessDate: { worker.lastSuccessfulPublicationDate() })
             automaticTravelController = automaticTravel
             environment.automaticTravel = automaticTravel
             automaticTravel.start()

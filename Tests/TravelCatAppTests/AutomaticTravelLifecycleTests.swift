@@ -125,10 +125,13 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(card.phase, .postcardReady)
         XCTAssertEqual(card.postcardStatus, .pendingImage)
         XCTAssertEqual(card.occurredAt.timeIntervalSince(generatedAt), 0, accuracy: 0.000001)
+        XCTAssertEqual(try XCTUnwrap(outcome.lastSuccessDate).timeIntervalSince(generatedAt), 0, accuracy: 0.000001)
         f.clock.set(outcome.nextCheckAt.addingTimeInterval(1))
         let imageOutcome = try await f.makeWorker().step(settings: .init(mode: .fast))
         XCTAssertNil(imageOutcome.failure)
         XCTAssertEqual(try f.repository.events().last?.postcardStatus, .ready)
+        XCTAssertEqual(try XCTUnwrap(imageOutcome.lastSuccessDate).timeIntervalSince(f.clock.now), 0, accuracy: 0.000001)
+        XCTAssertEqual(f.makeWorker().lastSuccessfulPublicationDate(), imageOutcome.lastSuccessDate)
         XCTAssertEqual(f.generator.imageCalls, 1)
     }
 
@@ -156,6 +159,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         let backlog = try PostcardBacklogStore(root: f.root, clock: f.clock)
         let card = try XCTUnwrap(backlog.supplementalEvents().first)
         XCTAssertEqual(card.tripID, oldTrip)
+        XCTAssertEqual(try XCTUnwrap(outcome.lastSuccessDate).timeIntervalSince(generatedAt), 0, accuracy: 0.000001)
         XCTAssertEqual(card.phase, .postcardReady)
         XCTAssertEqual(card.postcardStatus, .pendingImage)
         XCTAssertEqual(card.occurredAt.timeIntervalSince(generatedAt), 0, accuracy: 0.000001)
@@ -163,6 +167,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         let imageOutcome = try await f.makeWorker().step(settings: .init(mode: .fast))
         XCTAssertNil(imageOutcome.failure)
         XCTAssertEqual(try backlog.supplementalEvents().first?.postcardStatus, .ready)
+        XCTAssertEqual(try XCTUnwrap(imageOutcome.lastSuccessDate).timeIntervalSince(f.clock.now), 0, accuracy: 0.000001)
         XCTAssertEqual(f.generator.imageCalls, 1)
         XCTAssertEqual(try Data(contentsOf: journalURL), originalJournal)
         XCTAssertEqual(try f.repository.loadSnapshot(), snapshot)
@@ -879,12 +884,124 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(retries, 1)
     }
 
+    func testSuccessfulPublicationPersistsTimeButWaitingDoesNot() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        try await f.startOnePostcardTrip()
+        let url = f.root.appendingPathComponent("state/automatic-travel.json")
+        func recorded() throws -> String? {
+            (try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])?["lastSuccessDate"] as? String
+        }
+        let success = try XCTUnwrap(recorded(), "A published narrative must persist its success time")
+        f.clock.advance(1)
+        _ = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertEqual(try recorded(), success)
+    }
+
     private func waitUntil(_ predicate: () -> Bool) async {
         for _ in 0..<1000 {
             if predicate() { return }
             await Task.yield()
         }
         XCTFail("operation never reached suspension point")
+    }
+
+    func testProgressOrderAndFailureWaitingNeverAdvanceSuccess() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        let initial = try await f.worker.step(settings: .init(mode: .fast))
+        XCTAssertNil(initial.lastSuccessDate)
+        f.clock.set(initial.nextCheckAt)
+        var stages: [AutomaticTravelProgress] = []
+        let published = try await f.worker.step(settings: .init(mode: .fast), progress: { stages.append($0) })
+        XCTAssertTrue(stages.contains(.narrativeGeneration))
+        XCTAssertEqual(Array(stages.suffix(2)), [.validation, .publication])
+        let success = try XCTUnwrap(published.lastSuccessDate)
+        f.clock.set(published.nextCheckAt)
+        f.generator.failNarrative = true
+        let failed = try await f.worker.step(settings: .init(mode: .fast))
+        XCTAssertNotNil(failed.failure)
+        XCTAssertEqual(failed.lastSuccessDate, success)
+        let waiting = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertEqual(waiting.lastSuccessDate, success)
+        f.clock.set(failed.nextCheckAt)
+        f.generator.failNarrative = false
+        f.generator.narrativeSummary = ""
+        let invalid = try await f.worker.step(settings: .init(mode: .fast))
+        XCTAssertNotNil(invalid.failure)
+        XCTAssertEqual(invalid.lastSuccessDate, success)
+    }
+
+    func testImageFailureAndManualSuccessUsePublicationTime() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        try await f.startOnePostcardTrip()
+        try await f.reach(.postcardReady)
+        let event = try XCTUnwrap(f.repository.events().last)
+        let success = try XCTUnwrap(f.worker.lastSuccessfulPublicationDate())
+        f.generator.imageWidth = nil
+        f.clock.advance(300)
+        _ = try await f.worker.step(settings: .init(mode: .fast))
+        XCTAssertEqual(f.worker.lastSuccessfulPublicationDate(), success)
+        for _ in 0..<2 {
+            f.clock.advance(300)
+            let work = try XCTUnwrap(f.repository.pendingImages(mode: .fast).first)
+            _ = try f.repository.markImage(.init(eventId: event.id, status: .failed, attemptedAt: f.clock.now,
+                relativePath: nil, reason: "fixture", attemptToken: work.attemptToken,
+                attemptCount: work.imageAttemptCount, publishedNarrativeHash: work.publishedNarrativeHash), mode: .fast)
+        }
+        try f.repository.requestManualImageRetry(eventID: event.id, mode: .fast)
+        f.generator.imageWidth = 1152
+        f.clock.advance(300)
+        var automaticCalls = 0
+        let controller = AutomaticTravelController(isEnabled: { false }, runWithProgress: { _ in
+            automaticCalls += 1
+            throw CancellationError()
+        }, lastSuccessDate: success, readLastSuccessDate: { f.worker.lastSuccessfulPublicationDate() })
+        controller.pause()
+        defer { controller.stop() }
+        let manualWorker = AutomaticTravelWorker(repository: f.repository, generator: f.generator,
+            clock: { f.clock.now }, calendar: { f.calendar },
+            didChange: { controller.refreshSuccessfulPublicationDate() })
+        var stages: [AutomaticTravelProgress] = []
+        let outcome = try await manualWorker.step(settings: .init(mode: .fast, automaticTravelEnabled: false),
+            manualEventID: event.id, progress: { stages.append($0) })
+        XCTAssertEqual(outcome.lastSuccessDate, f.clock.now)
+        XCTAssertEqual(try f.repository.events().last?.postcardStatus, .ready)
+        XCTAssertEqual(stages, [.loadingPlanning, .imageHandling, .validation, .publication, .loadingPlanning])
+        XCTAssertEqual(controller.lastSuccessDate, outcome.lastSuccessDate)
+        XCTAssertEqual(automaticCalls, 0)
+        XCTAssertNil(controller.progress)
+        XCTAssertEqual(controller.message, "自动旅行已暂停")
+    }
+
+    func testOldStateHasUnknownSuccessWithoutRewritingHistory() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        try await f.startOnePostcardTrip()
+        let journal = f.root.appendingPathComponent("journal/events.jsonl")
+        let bytes = try Data(contentsOf: journal)
+        try f.updateState { $0.removeValue(forKey: "lastSuccessDate") }
+        let restored = f.makeWorker()
+        XCTAssertNil(restored.lastSuccessfulPublicationDate())
+        let outcome = try await restored.step(settings: .init(mode: .fast))
+        XCTAssertNil(outcome.lastSuccessDate)
+        XCTAssertEqual(try Data(contentsOf: journal), bytes)
+    }
+
+    func testPublishedSuccessSurvivesSubsequentReconcileFailure() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        let initial = try await f.worker.step(settings: .init(mode: .fast))
+        f.clock.set(initial.nextCheckAt)
+        var injected = false
+        let worker = AutomaticTravelWorker(repository: f.repository, generator: f.generator,
+            clock: { f.clock.now }, calendar: { f.calendar }, didChange: {
+                guard !injected, f.worker.lastSuccessfulPublicationDate() != nil else { return }
+                injected = true
+                try? Data("{invalid fixture".utf8).write(to: f.root.appendingPathComponent("state/postcard-backlog.json"))
+            })
+        let outcome = try await worker.step(settings: .init(mode: .fast))
+        XCTAssertTrue(injected)
+        XCTAssertNotNil(outcome.failure)
+        XCTAssertEqual(try f.repository.events().count, 1)
+        XCTAssertEqual(outcome.lastSuccessDate, f.clock.now)
+        XCTAssertEqual(f.makeWorker().lastSuccessfulPublicationDate(), outcome.lastSuccessDate)
     }
 }
 

@@ -8,15 +8,18 @@ final class AutomaticTravelController: ObservableObject {
     @Published private(set) var message = "正在安排下一次旅行"
     @Published private(set) var nextCheckAt: Date?
     @Published private(set) var isRunning = false
+    @Published private(set) var progress: AutomaticTravelProgress?
+    @Published private(set) var lastSuccessDate: Date?
     @Published private(set) var failure: AutomaticTravelFailure?
     var canRetryFailure: Bool { isEnabled() && !isRunning && task == nil && failure != nil && retry != nil }
     func retryFailure() {
         guard canRetryFailure else { return }
         refresh(retryingFailure: true)
     }
-    private let retry: (() async throws -> AutomaticTravelOutcome)?
+    private let retry: ((@escaping AutomaticTravelProgressHandler) async throws -> AutomaticTravelOutcome)?
     private let isEnabled: () -> Bool
-    private let run: () async throws -> AutomaticTravelOutcome
+    private let readLastSuccessDate: () -> Date?
+    private let run: (@escaping AutomaticTravelProgressHandler) async throws -> AutomaticTravelOutcome
     private var task: Task<Void, Never>?
     private var timer: Timer?
     private var executionToken: UUID?
@@ -24,9 +27,25 @@ final class AutomaticTravelController: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
 
-    init(isEnabled: @escaping () -> Bool, run: @escaping () async throws -> AutomaticTravelOutcome, retry: (() async throws -> AutomaticTravelOutcome)? = nil) {
+    convenience init(isEnabled: @escaping () -> Bool, run: @escaping () async throws -> AutomaticTravelOutcome,
+                     retry: (() async throws -> AutomaticTravelOutcome)? = nil) {
+        self.init(isEnabled: isEnabled, runWithProgress: { _ in try await run() },
+                  retryWithProgress: retry.map { operation in { _ in try await operation() } })
+    }
+
+    init(isEnabled: @escaping () -> Bool,
+         runWithProgress: @escaping (@escaping AutomaticTravelProgressHandler) async throws -> AutomaticTravelOutcome,
+         retryWithProgress: ((@escaping AutomaticTravelProgressHandler) async throws -> AutomaticTravelOutcome)? = nil,
+         lastSuccessDate: Date? = nil, readLastSuccessDate: @escaping () -> Date? = { nil }) {
         self.isEnabled = isEnabled
-        self.run = run; self.retry = retry
+        self.run = runWithProgress; self.retry = retryWithProgress
+        self.lastSuccessDate = lastSuccessDate
+        self.readLastSuccessDate = readLastSuccessDate
+    }
+
+    /// Shared-worker manual image publication can complete while this controller is paused.
+    func refreshSuccessfulPublicationDate() {
+        if let success = readLastSuccessDate() { lastSuccessDate = success }
     }
 
     func start() {
@@ -57,11 +76,18 @@ final class AutomaticTravelController: ObservableObject {
         nextCheckAt = nil
         isRunning = true
         message = "正在查看旅途消息"
+        progress = .loadingPlanning
         task = Task { [weak self] in
             guard let self else { return }
             let outcome: AutomaticTravelOutcome
             var requiresFreshRun = false
-            do { outcome = try await operation() }
+            do {
+                outcome = try await operation { [weak self] stage in
+                    guard let self, self.executionToken == token, self.isRunning,
+                          self.isEnabled(), !Task.isCancelled else { return }
+                    self.progress = stage
+                }
+            }
             catch is CancellationError {
                 outcome = .init(nextCheckAt: Date().addingTimeInterval(60), message: "旅行操作已取消，稍后重试")
             }
@@ -75,6 +101,8 @@ final class AutomaticTravelController: ObservableObject {
             guard isEnabled() else { pause(); return }
             task = nil
             isRunning = false
+            progress = nil
+            if let success = outcome.lastSuccessDate { lastSuccessDate = success }
             message = outcome.message
             failure = outcome.failure
             // A thrown error may occur before the worker persists a retryable failure.
@@ -98,6 +126,7 @@ final class AutomaticTravelController: ObservableObject {
         task?.cancel()
         task = nil
         isRunning = false
+        progress = nil
         nextCheckAt = nil
         message = "自动旅行已暂停"
     }
