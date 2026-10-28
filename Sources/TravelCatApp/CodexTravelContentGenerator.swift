@@ -71,8 +71,12 @@ final class CodexTravelContentGenerator: TravelContentGenerating {
     static func generationResourceRoot(in bundle: Bundle = .main) -> URL? {
         if bundle.bundleURL.pathExtension == "app" {
             guard let resources = bundle.resourceURL else { return nil }
-            let packaged = resources.appendingPathComponent("TravelCat_TravelCatApp.bundle/Generation")
-            return FileManager.default.fileExists(atPath: packaged.path) ? packaged : nil
+            let packagedBundle = resources.appendingPathComponent("TravelCat_TravelCatApp.bundle")
+            // SwiftPM can emit either a flat bundle or a macOS Contents/Resources
+            // bundle. Let Foundation resolve that layout inside the installed app.
+            guard let resourceRoot = Bundle(url: packagedBundle)?.resourceURL else { return nil }
+            let generation = resourceRoot.appendingPathComponent("Generation")
+            return FileManager.default.fileExists(atPath: generation.path) ? generation : nil
         }
         return Bundle.module.resourceURL?.appendingPathComponent("Generation")
     }

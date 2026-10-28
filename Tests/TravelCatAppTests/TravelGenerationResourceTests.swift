@@ -17,6 +17,27 @@ final class TravelGenerationResourceTests: XCTestCase {
         try FileManager.default.removeItem(at: resources)
         XCTAssertNil(CodexTravelContentGenerator.generationResourceRoot(in: bundle), "A broken installed app must not silently read build-machine resources")
     }
+    func testPackagedMacOSResourceBundleUsesItsResourceDirectory() throws {
+        let app = FileManager.default.temporaryDirectory.appendingPathComponent("ResourceProbe-\(UUID().uuidString).app")
+        defer { try? FileManager.default.removeItem(at: app) }
+        let contents = app.appendingPathComponent("Contents")
+        let resourceBundle = contents.appendingPathComponent("Resources/TravelCat_TravelCatApp.bundle")
+        let resources = resourceBundle.appendingPathComponent("Contents/Resources/Generation")
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        let appInfo: [String: Any] = ["CFBundleIdentifier": "com.nebulae.travelcat.resource-test", "CFBundleName": "Probe", "CFBundlePackageType": "APPL"]
+        let resourceInfo: [String: Any] = ["CFBundleIdentifier": "com.nebulae.travelcat.generation-test", "CFBundlePackageType": "BNDL"]
+        try PropertyListSerialization.data(fromPropertyList: appInfo, format: .xml, options: 0).write(to: contents.appendingPathComponent("Info.plist"))
+        try PropertyListSerialization.data(fromPropertyList: resourceInfo, format: .xml, options: 0).write(to: resourceBundle.appendingPathComponent("Contents/Info.plist"))
+        let schema = resources.appendingPathComponent("narrative.schema.json")
+        try Data("{}".utf8).write(to: schema)
+        let bundle = try XCTUnwrap(Bundle(url: app))
+        let resolved = try XCTUnwrap(CodexTravelContentGenerator.generationResourceRoot(in: bundle))
+        XCTAssertEqual(resolved.path, resources.path)
+        XCTAssertEqual(try Data(contentsOf: resolved.appendingPathComponent("narrative.schema.json")), Data("{}".utf8))
+        try FileManager.default.removeItem(at: resources)
+        XCTAssertNil(CodexTravelContentGenerator.generationResourceRoot(in: bundle))
+    }
+
     func testAllRequiredGenerationAssetsAreAvailable() throws {
         let root = try XCTUnwrap(CodexTravelContentGenerator.generationResourceRoot())
         for name in ["narrative.schema.json", "image.schema.json", "front.png", "side.png", "sitting.png", "identity.json"] {
