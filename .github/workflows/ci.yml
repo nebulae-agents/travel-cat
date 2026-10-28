@@ -169,3 +169,37 @@ jobs:
           path: /tmp/travelcat-raster-diagnostics/*.png
       - name: Public upload audit
         run: Scripts/audit-project-upload.sh
+
+  packaged-acceptance:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Package release app
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TRAVEL_CAT_SCRATCH_ROOT="$RUNNER_TEMP/travel-cat-packaged-swift"
+          Scripts/package-app.sh > "$RUNNER_TEMP/travel-cat-package.log" 2>&1
+      - name: Offline relocated packaged-app acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 Scripts/run-packaged-travel-acceptance.py 'dist/Travel Cat.app' | tee "$RUNNER_TEMP/travel-cat-packaged-acceptance.json"
+      - name: Preserve synthetic acceptance result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: packaged-travel-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: ignore
+          # Fixed checks and classifications only; no raw build or provider logs.
+          path: ${{ runner.temp }}/travel-cat-packaged-acceptance.json
