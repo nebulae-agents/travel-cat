@@ -351,8 +351,8 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertTrue(app.contains("petPromptService.retry(settings: environment.effectiveSettings"))
         XCTAssertEqual(
             app.components(separatedBy: "settings: environment.effectiveSettings").count - 1,
-            8,
-            "startup, authorization, watcher and status toast must use effective settings"
+            9,
+            "startup, authorization, watcher, status toast and explicit failure retry must use effective settings"
         )
         XCTAssertTrue(settings.contains("var effectiveSettings: TravelSettings"))
         XCTAssertTrue(settings.contains("var lastPersistedSettings: TravelSettings"))

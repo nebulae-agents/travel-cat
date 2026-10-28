@@ -8,6 +8,13 @@ final class AutomaticTravelController: ObservableObject {
     @Published private(set) var message = "正在安排下一次旅行"
     @Published private(set) var nextCheckAt: Date?
     @Published private(set) var isRunning = false
+    @Published private(set) var failure: AutomaticTravelFailure?
+    var canRetryFailure: Bool { isEnabled() && !isRunning && task == nil && failure != nil && retry != nil }
+    func retryFailure() {
+        guard canRetryFailure else { return }
+        refresh(retryingFailure: true)
+    }
+    private let retry: (() async throws -> AutomaticTravelOutcome)?
     private let isEnabled: () -> Bool
     private let run: () async throws -> AutomaticTravelOutcome
     private var task: Task<Void, Never>?
@@ -16,9 +23,9 @@ final class AutomaticTravelController: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
 
-    init(isEnabled: @escaping () -> Bool, run: @escaping () async throws -> AutomaticTravelOutcome) {
+    init(isEnabled: @escaping () -> Bool, run: @escaping () async throws -> AutomaticTravelOutcome, retry: (() async throws -> AutomaticTravelOutcome)? = nil) {
         self.isEnabled = isEnabled
-        self.run = run
+        self.run = run; self.retry = retry
     }
 
     func start() {
@@ -38,7 +45,7 @@ final class AutomaticTravelController: ObservableObject {
         refresh()
     }
 
-    func refresh() {
+    func refresh(retryingFailure: Bool = false) {
         timer?.invalidate()
         timer = nil
         guard isEnabled() else { pause(); return }
@@ -49,13 +56,14 @@ final class AutomaticTravelController: ObservableObject {
         task = Task { [weak self] in
             guard let self else { return }
             let outcome: AutomaticTravelOutcome
-            do { outcome = try await run() }
+            do { outcome = try await (retryingFailure ? (retry ?? run) : run)() }
             catch is CancellationError { return }
             catch { outcome = .init(nextCheckAt: Date().addingTimeInterval(60), message: "旅行数据暂时无法读取，稍后重试") }
             guard !Task.isCancelled, generation == token else { return }
             task = nil
             isRunning = false
             message = outcome.message
+            failure = outcome.failure
             nextCheckAt = outcome.nextCheckAt
             let timer = Timer(timeInterval: max(1, min(60, outcome.nextCheckAt.timeIntervalSinceNow)), repeats: false) { [weak self] _ in
                 Task { @MainActor in self?.refresh() }

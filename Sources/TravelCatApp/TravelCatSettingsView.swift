@@ -568,6 +568,14 @@ struct AutomaticTravelStatusView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(controller.message).font(.caption).foregroundStyle(.secondary)
+            if let failure = controller.failure {
+                Text("最近失败：\(failure.recordedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Button("重试一次") { controller.retryFailure() }
+                    .disabled(!controller.canRetryFailure)
+                Text("仍会遵守生成间隔；不会重新开始旅程。")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             if let date = controller.nextCheckAt, !controller.isRunning {
                 Text("下次查看：\(date.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption2).foregroundStyle(.secondary)

@@ -569,6 +569,88 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(f.generator.imageCalls, before + 1, "The manual failure cannot start an automatic retry loop")
     }
 
+    func testFailureDiagnosticIsSafePersistedAndManualRetryKeepsCooldownAndHistory() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        try await f.reach(.preparing)
+        f.clock.advance(121)
+        let before = try f.repository.loadContents()
+        f.generator.onNarrative = { throw CodexTravelExecutor.Failure.notLoggedIn }
+        _ = try await f.worker.step(settings: .init(mode: .fast))
+        f.clock.advance(15)
+        let failed = try await f.worker.step(settings: .init(mode: .fast))
+        XCTAssertEqual(failed.failure?.category, .authentication)
+        XCTAssertEqual(failed.failure?.recordedAt, f.clock.now)
+        let calls = f.generator.narrativeCalls
+        let pending = try await f.makeWorker().step(settings: .init(mode: .fast), retryFailure: true)
+        XCTAssertEqual(pending.failure?.category, .authentication)
+        XCTAssertEqual(f.generator.narrativeCalls, calls, "Manual retry must keep the model-action gap")
+        XCTAssertEqual(try f.repository.loadContents().snapshot, before.snapshot)
+        XCTAssertEqual(try f.repository.events(), before.events)
+        f.generator.onNarrative = nil
+        f.clock.advance(15)
+        let success = try await f.makeWorker().step(settings: .init(mode: .fast), retryFailure: true)
+        XCTAssertNil(success.failure)
+        XCTAssertEqual(f.generator.narrativeCalls, calls + 1)
+        XCTAssertEqual(try f.repository.events().count, before.events.count + 1)
+        XCTAssertEqual(try f.repository.events().first, before.events.first)
+    }
+
+    func testFailureClassificationsAndLegacyStateRemainCompatible() async throws {
+        let cases: [(Error, AutomaticTravelFailure.Category)] = [
+            (OpenAICompatibleTravelError.http(401), .authentication),
+            (OpenAICompatibleTravelError.transport, .connection),
+            (OpenAICompatibleTravelError.timedOut, .timedOut),
+            (OpenAICompatibleTravelError.invalidJSON, .invalidOutput),
+            (GenerationSetupError.incomplete, .configuration),
+            (RepositoryError.versionConflict, .storage)]
+        for (error, expected) in cases {
+            XCTAssertEqual(AutomaticTravelFailure(error: error, recordedAt: Date()).category, expected)
+        }
+        let f = try LifecycleFixture(); defer { f.clean() }
+        try await f.reach(.preparing); f.clock.advance(121)
+        f.generator.failNarrative = true
+        _ = try await f.worker.step(settings: .init(mode: .fast))
+        try f.updateState { $0.removeValue(forKey: "lastFailure") }
+        let events = try f.repository.events()
+        _ = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertEqual(try f.repository.events(), events)
+        let files = try FileManager.default.contentsOfDirectory(atPath: f.root.appendingPathComponent("state").path)
+        XCTAssertFalse(files.contains { $0.hasPrefix("automatic-travel.corrupt-") })
+    }
+
+    func testFailureClassificationNeverCopiesFreeFormError() throws {
+        let failure = AutomaticTravelFailure(error: NSError(domain: "private-token-and-path", code: 42,
+            userInfo: [NSLocalizedDescriptionKey: "secret account output"]), recordedAt: Date(timeIntervalSince1970: 42))
+        let text = String(decoding: try JSONEncoder().encode(failure), as: UTF8.self)
+        XCTAssertFalse(text.contains("secret")); XCTAssertFalse(text.contains("private"))
+        XCTAssertEqual(failure.category, .generation)
+    }
+
+    func testFailureRetryControllerCoalescesClicksAndRespectsDisabledState() async throws {
+        var enabled = true
+        var retries = 0
+        var pending: CheckedContinuation<AutomaticTravelOutcome, Never>?
+        let failure = AutomaticTravelFailure(error: CodexTravelExecutor.Failure.timedOut, recordedAt: Date())
+        let controller = AutomaticTravelController(isEnabled: { enabled }, run: {
+            .init(nextCheckAt: Date().addingTimeInterval(60), message: "failed", failure: failure)
+        }, retry: {
+            retries += 1
+            return await withCheckedContinuation { pending = $0 }
+        })
+        defer { controller.stop() }
+        controller.refresh(); await waitUntil { controller.failure != nil }
+        XCTAssertTrue(controller.canRetryFailure)
+        controller.retryFailure(); controller.retryFailure()
+        await waitUntil { retries == 1 }
+        XCTAssertFalse(controller.canRetryFailure)
+        pending?.resume(returning: .init(nextCheckAt: Date().addingTimeInterval(60), message: "done"))
+        await waitUntil { !controller.isRunning }
+        XCTAssertNil(controller.failure)
+        enabled = false
+        controller.retryFailure(); await Task.yield()
+        XCTAssertEqual(retries, 1)
+    }
+
     private func waitUntil(_ predicate: () -> Bool) async {
         for _ in 0..<1000 {
             if predicate() { return }

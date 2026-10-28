@@ -159,6 +159,9 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 run: { [weak environment] in
                     guard let environment else { throw CancellationError() }
                     return try await worker.step(settings: environment.effectiveSettings)
+                }, retry: { [weak environment] in
+                    guard let environment else { throw CancellationError() }
+                    return try await worker.step(settings: environment.effectiveSettings, retryFailure: true)
                 })
             automaticTravelController = automaticTravel
             environment.automaticTravel = automaticTravel

@@ -62,9 +62,57 @@ protocol TravelContentGenerating {
     func image(for work: PendingImageWork, in workspace: URL) async throws -> URL
 }
 
+/// Fixed classifications only: no provider body, prompt, credential or private path.
+struct AutomaticTravelFailure: Codable, Equatable {
+    enum Category: String, Codable { case configuration, authentication, connection, timedOut, invalidOutput, storage, generation }
+    let category: Category
+    let recordedAt: Date
+    @MainActor init(error: Error, recordedAt: Date) {
+        self.recordedAt = recordedAt
+        switch error {
+        case let failure as CodexTravelExecutor.Failure:
+            category = switch failure {
+            case .notInstalled, .incompatibleCLI, .toolUnavailable: .configuration
+            case .notLoggedIn: .authentication
+            case .networkUnavailable: .connection
+            case .timedOut: .timedOut
+            case .invalidOutput: .invalidOutput
+            case .generationFailed: .generation
+            }
+        case let failure as OpenAICompatibleTravelError:
+            category = switch failure {
+            case .invalidAddress, .invalidRequest: .configuration
+            case .transport: .connection
+            case .timedOut: .timedOut
+            case .http(401), .http(403): .authentication
+            case .http: .connection
+            case .tooLarge, .invalidJSON, .invalidImage: .invalidOutput
+            }
+        case is GenerationSetupError: category = .configuration
+        case is DecodingError: category = .invalidOutput
+        case is RepositoryError: category = .storage
+        default: category = .generation
+        }
+    }
+    var message: String {
+        switch category {
+        case .configuration: "请检查模型与连接设置，确认程序、模型和图像工具可用。"
+        case .authentication: "请检查模型服务密钥，或在 Codex 中重新登录。"
+        case .connection: "请检查网络、代理和模型服务连接。"
+        case .timedOut: "生成超时，请检查连接后重试。"
+        case .invalidOutput: "生成内容未通过校验，请检查模型配置后重试。"
+        case .storage: "旅行数据暂时无法写入，请检查数据目录和可用空间。"
+        case .generation: "生成未完成，原因尚未识别；可检查模型与连接后重试。"
+        }
+    }
+}
 struct AutomaticTravelOutcome: Equatable {
     let nextCheckAt: Date
     let message: String
+    let failure: AutomaticTravelFailure?
+    init(nextCheckAt: Date, message: String, failure: AutomaticTravelFailure? = nil) {
+        self.nextCheckAt = nextCheckAt; self.message = message; self.failure = failure
+    }
 }
 
 private struct AutomaticTravelState: Codable {
@@ -75,6 +123,7 @@ private struct AutomaticTravelState: Codable {
     var nextAttemptAt: Date?
     var failures = 0
     var lastFailureMessage: String?
+    var lastFailure: AutomaticTravelFailure?
     var lastActionWasImage = false
     var observedMode: TravelMode?
     var modeActionAt: Date?
@@ -103,7 +152,7 @@ final class AutomaticTravelWorker {
         self.didChange = didChange
     }
 
-    func step(settings: TravelSettings, manualEventID: UUID? = nil) async throws -> AutomaticTravelOutcome {
+    func step(settings: TravelSettings, manualEventID: UUID? = nil, retryFailure: Bool = false) async throws -> AutomaticTravelOutcome {
         let now = clock()
         guard settings.automaticTravelEnabled || manualEventID != nil else {
             return .init(nextCheckAt: now.addingTimeInterval(60), message: "自动旅行已暂停")
@@ -114,6 +163,18 @@ final class AutomaticTravelWorker {
         defer { withExtendedLifetime(ownership) {} }
         let catchUpGap: TimeInterval = settings.mode == .fast ? 15 : 60
         var state = try loadState(recoveryGap: catchUpGap)
+        if retryFailure {
+            guard state.lastFailure != nil else {
+                return .init(nextCheckAt: now.addingTimeInterval(catchUpGap), message: "没有等待重试的旅行故障")
+            }
+            if let cooldown = state.nextModelActionAt, cooldown > now {
+                return .init(nextCheckAt: cooldown, message: "请等待生成间隔结束后重试", failure: state.lastFailure)
+            }
+            // One explicit attempt may skip only the failure backoff, never the model gap,
+            // repository lock, normal itinerary schedule, or image retry limits.
+            state.nextAttemptAt = nil
+            try save(state)
+        }
         var startedModelAction = false
         var progressPlans: [PostcardBacklogPlan] = []
         do {
@@ -216,7 +277,7 @@ final class AutomaticTravelWorker {
             let eventDue = dueAt <= now && !waitingForRetry
             if let cooldown = state.nextModelActionAt, cooldown > now,
                eventDue || historical != nil || (contents.events + supplemental).contains(where: { $0.postcardStatus == .pendingImage }) {
-                return .init(nextCheckAt: cooldown, message: progressMessage("正在依次处理明信片", plans: progressPlans))
+                return .init(nextCheckAt: cooldown, message: progressMessage("正在依次处理明信片", plans: progressPlans), failure: state.lastFailure)
             }
             if (!eventDue && historical == nil) || !state.lastActionWasImage {
                 let journalWork = try repository.pendingImages(mode: settings.mode, matchingCharacterProfile: .defaultBlackCat).first
@@ -272,12 +333,13 @@ final class AutomaticTravelWorker {
                 state.failures = 0
                 state.nextAttemptAt = nil
                 state.lastFailureMessage = nil
+                state.lastFailure = nil
                 try save(state)
                 return .init(nextCheckAt: state.nextModelActionAt!, message: "已补发一封旧旅程来信，等待生成照片")
             }
             guard eventDue else {
                 if waitingForRetry, let retry = state.nextAttemptAt {
-                    return .init(nextCheckAt: min(retry, now.addingTimeInterval(60)), message: progressMessage(state.lastFailureMessage ?? "暂时无法续写旅程，稍后自动重试", plans: progressPlans))
+                    return .init(nextCheckAt: min(retry, now.addingTimeInterval(60)), message: progressMessage(state.lastFailure?.message ?? "暂时无法续写旅程，稍后自动重试", plans: progressPlans), failure: state.lastFailure)
                 }
                 let hasPending = contents.events.contains { $0.postcardStatus == .pendingImage }
                 return .init(nextCheckAt: hasPending ? min(dueAt, now.addingTimeInterval(60)) : dueAt,
@@ -338,6 +400,7 @@ final class AutomaticTravelWorker {
             state.lastActionWasImage = false
             state.failures = 0
             state.lastFailureMessage = nil
+            state.lastFailure = nil
             state.nextAttemptAt = nil
             state.postcardPlan?.reconcile(events: try repository.events())
             progressPlans = try backlog.reconcile(events: try repository.events())
@@ -364,10 +427,10 @@ final class AutomaticTravelWorker {
             state.failures = min(8, state.failures + 1)
             let delay = min(3_600.0, (settings.mode == .fast ? 15.0 : 60.0) * pow(2, Double(state.failures - 1)))
             state.nextAttemptAt = clock().addingTimeInterval(delay)
-            state.lastFailureMessage = (error as? CodexTravelExecutor.Failure)?.errorDescription
-                ?? "暂时无法续写旅程，稍后自动重试"
+            state.lastFailure = AutomaticTravelFailure(error: error, recordedAt: clock())
+            state.lastFailureMessage = state.lastFailure?.message
             try save(state)
-            return .init(nextCheckAt: state.nextAttemptAt!, message: progressMessage(state.lastFailureMessage!, plans: progressPlans))
+            return .init(nextCheckAt: state.nextAttemptAt!, message: progressMessage(state.lastFailureMessage!, plans: progressPlans), failure: state.lastFailure)
         }
     }
 
