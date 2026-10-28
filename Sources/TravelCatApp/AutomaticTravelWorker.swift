@@ -322,9 +322,11 @@ final class AutomaticTravelWorker {
                     openHook: narrative.openHook, consumedItemId: nil,
                     postcard: PostcardRequest(required: true, scenePrompt: narrative.scenePrompt))
                 let checked = try AgentEventEnvelope.decode(JSONEncoder.travelCat.encode(candidate))
+                // Both times come from this host clock. Compare the decoded representation
+                // with itself so RFC 3339 round-trip rounding cannot look like future input.
                 let projected = try checked.validatedProjection(previous: context,
                     existingEventIDs: Set((contents.events + supplemental).map(\.id)),
-                    mode: settings.mode, calendar: calendar(), now: generatedAt)
+                    mode: settings.mode, calendar: calendar(), now: checked.occurredAt)
                 // A concurrent explicit history reset invalidates the source trip.
                 guard try repository.events().filter({ $0.tripID == historical.tripID }) == tripEvents else {
                     throw CocoaError(.fileReadCorruptFile)
@@ -391,8 +393,10 @@ final class AutomaticTravelWorker {
             // Reuse the exact structural and continuity boundary used by the CLI. The model
             // cannot choose event identity, timestamps, state versions, or storage paths.
             let checked = try AgentEventEnvelope.decode(JSONEncoder.travelCat.encode(candidate))
+            // The host supplied occurredAt; decoding can round it slightly forward. Use
+            // that same representation for now without relaxing external-event validation.
             let envelope = try checked.validatedProjection(previous: contents.snapshot,
-                existingEventIDs: Set(contents.events.map(\.id)), mode: settings.mode, calendar: calendar(), now: occurredAt)
+                existingEventIDs: Set(contents.events.map(\.id)), mode: settings.mode, calendar: calendar(), now: checked.occurredAt)
             try Task.checkCancellation()
             _ = try repository.publish(event: envelope.event, next: envelope.next, expectedSnapshot: contents.snapshot, expectedCharacterProfile: .defaultBlackCat)
             state.departureAt = nil
