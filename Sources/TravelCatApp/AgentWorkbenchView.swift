@@ -72,13 +72,31 @@ struct AgentWorkbenchView: View {
         VStack(spacing: 18) {
             if model.storageStatus == .loading {
                 ProgressView().controlSize(.large)
-                Text("正在安全加载 Agent 数据").font(.title3.weight(.semibold))
-                Text("如果系统显示钥匙串提示，请解锁并允许 Travel Cat 访问。等待期间可以继续使用桌面小猫。").font(.callout).foregroundStyle(WorkbenchTheme.muted)
+                Text(model.storageLoadPhase.title).font(.title3.weight(.semibold))
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let elapsed = model.storageLoadingElapsed(at: context.date)
+                    VStack(spacing: 12) {
+                        Text("已等待 \(Int(elapsed)) 秒").monospacedDigit().font(.caption).foregroundStyle(WorkbenchTheme.muted)
+                        if elapsed >= 15 {
+                            Text("请查看 macOS 钥匙串授权窗口；若未看到，可从 Dock 切回 Travel Cat。请在系统窗口完成或取消授权，关闭工作台不会关闭系统请求。")
+                                .font(.callout).foregroundStyle(WorkbenchTheme.muted)
+                        }
+                    }
+                }
+                if model.storageCancellationRequested {
+                    Text("已请求取消。请先完成或取消系统弹窗；系统请求结束后可重新加载，原记录会保留。")
+                        .font(.callout).foregroundStyle(WorkbenchTheme.muted)
+                } else {
+                    Text("如果系统显示钥匙串提示，请解锁并允许 Travel Cat 访问。等待期间可以继续使用桌面小猫。")
+                        .font(.callout).foregroundStyle(WorkbenchTheme.muted)
+                }
+                Button(model.storageCancellationRequested ? "正在等待系统请求结束…" : "取消本次加载") { model.cancelStorageLoading() }
+                    .disabled(!model.canCancelStorageLoading)
             } else {
                 Image(systemName: "lock.shield").font(.system(size: 32)).foregroundStyle(CottageTheme.terracotta)
                 Text("安全存储尚未就绪").font(.title3.weight(.semibold))
                 Text(model.storageStatus.message ?? "请完成钥匙串授权后重试。").font(.callout).foregroundStyle(WorkbenchTheme.muted).textSelection(.enabled)
-                Button("重试") { model.retryStorage() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                Button("重试") { model.retryStorage() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!model.canRetryStorage)
                 Text("原有对话、审计记录和密钥会保留。").font(.caption).foregroundStyle(WorkbenchTheme.muted)
             }
         }.multilineTextAlignment(.center).padding(36).frame(maxWidth: .infinity, maxHeight: .infinity).background(WorkbenchTheme.canvas)

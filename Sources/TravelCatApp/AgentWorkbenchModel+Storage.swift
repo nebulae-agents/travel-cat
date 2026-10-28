@@ -17,8 +17,31 @@ enum AgentWorkbenchStorageStatus: Equatable {
     var message: String? { if case let .blocked(message) = self { return message }; return nil }
 }
 
+enum AgentStorageLoadPhase: Equatable {
+    case conversations, audit
+    var title: String {
+        switch self {
+        case .conversations: "正在安全打开对话记录"
+        case .audit: "正在安全打开审计记录"
+        }
+    }
+}
+
 @MainActor
 extension AgentWorkbenchModel {
+    var canRetryStorage: Bool { credentialStores != nil && storageTask == nil && !hasShutdown && !isStorageReady }
+    var canCancelStorageLoading: Bool { storageTask != nil && storageStatus == .loading && !storageCancellationRequested && !hasShutdown }
+    func cancelStorageLoading() {
+        guard canCancelStorageLoading else { return }
+        storageCancellationRequested = true
+        // Security.framework may still be waiting in a protected system dialog.
+        // Retain the owned task until it returns, preventing duplicate authorization.
+        storageTask?.cancel()
+    }
+    func storageLoadingElapsed(at now: Date) -> TimeInterval {
+        max(0, now.timeIntervalSince(storageLoadStartedAt ?? now))
+    }
+
     func requireStorageReady() throws {
         guard isStorageReady else { throw WorkbenchFailure("安全存储尚未就绪，请完成钥匙串授权后重试。") }
     }
@@ -29,6 +52,8 @@ extension AgentWorkbenchModel {
         let generation = UUID()
         storageGeneration = generation
         loadFailed = true; storageStatus = .loading
+        storageLoadStartedAt = Date(); storageLoadPhase = .conversations
+        storageCancellationRequested = false
         error = nil; auditError = nil
         let task = Task { [weak self] in
             guard let self else { return }
@@ -36,11 +61,14 @@ extension AgentWorkbenchModel {
         }
         storageTask = task
         await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
-        if storageGeneration == generation { storageTask = nil }
+        if storageGeneration == generation {
+            storageTask = nil; storageLoadStartedAt = nil
+            storageCancellationRequested = false
+        }
     }
 
     func retryStorage() {
-        guard storageTask == nil, !hasShutdown else { return }
+        guard canRetryStorage else { return }
         Task { [weak self] in await self?.loadStorage() }
     }
 
@@ -57,6 +85,7 @@ extension AgentWorkbenchModel {
             let snapshot = try opened.load()
             // Keep recovered content visible in memory even if audit authorization is denied.
             store = opened; state = snapshot; contentOpened = true
+            storageLoadPhase = .audit
             let audit = try await AgentAuditStore.open(root: store.root.appendingPathComponent("audit-v1"), credentials: credentials.audit)
             try checkStorageAttempt(generation)
             auditStore = audit
