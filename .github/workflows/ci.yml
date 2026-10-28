@@ -53,13 +53,22 @@ jobs:
           TZ: UTC
         run: |
           unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT
-          Scripts/travel-cat-swift.sh test
+          python3 Scripts/swift_test_report.py --output "$RUNNER_TEMP/travel-cat-results/utc.json" --selection utc
       - name: Prompt tests (Asia/Shanghai)
         env:
           TZ: Asia/Shanghai
         run: |
           unset TRAVEL_CAT_LIVE_JOURNEY_ACCEPTANCE TRAVEL_CAT_LIVE_RENDER_SESSION TRAVEL_CAT_LIVE_PRODUCTION_ROOT TRAVEL_CAT_LIVE_GENERATION TRAVEL_CAT_NATIVE_ACCEPTANCE_ROOT TRAVEL_CAT_NATIVE_ACCEPTANCE_PORT TRAVELCAT_REVISION_BENCHMARK_PHOTO TRAVEL_CAT_LANDMARK_ACCEPTANCE TRAVEL_CAT_LANDMARK_ACCEPTANCE_ROOT TRAVEL_CAT_LANDMARK_ACCEPTANCE_CASE TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT
-          Scripts/travel-cat-swift.sh test --filter PetTravelPromptServiceTests
+          python3 Scripts/swift_test_report.py --output "$RUNNER_TEMP/travel-cat-results/shanghai.json" --selection shanghai -- --filter PetTravelPromptServiceTests
+      - name: Preserve sanitized Swift test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: swift-test-results-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: ignore
+          # Numeric results and public test identities only; never raw logs.
+          path: ${{ runner.temp }}/travel-cat-results/*.json
       - name: Preserve synthetic date and public-place crops
         if: ${{ always() }}
         uses: actions/upload-artifact@v7.0.2
