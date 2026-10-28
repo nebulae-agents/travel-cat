@@ -1,0 +1,37 @@
+# 交付状态（2026-10-27）
+
+当前本机安装为公开主干 `1ca61a2c3ddc4550d3fdb0762168232919f356ce` 的 **1.4.1/build 42**。本页将已合并源码、自动测试、安装和客户端操作分别记录；本轮文档更新没有重新安装或运行真实任务。
+
+## 已交付的基线
+
+| 层面 | 证据与范围 |
+| --- | --- |
+| 公开源码 | [PR #27](https://github.com/nebulae-agents/travel-cat/pull/27)、[#28](https://github.com/nebulae-agents/travel-cat/pull/28)、[#29](https://github.com/nebulae-agents/travel-cat/pull/29) 已合入上述主干，分别保护 ACP 保存检查点、导出目标和迟到 Native 连接。 |
+| 远端检查 | 该准确主干的 [Source checks #40287771886](https://github.com/nebulae-agents/travel-cat/actions/runs/40287771886) 成功；本页更新时再次只读核对了提交和结论。 |
+| 本地自动测试 | 合并后记录为 1,568 项 XCTest（17 跳过、0 失败）及 36 项 Swift Testing 通过；这是自动测试证据，不等同于所有系统权限或运行环境验收。 |
+| 安装 | 授权部署已安装 build 42；本页更新时只读核对版本、准确源码标识和严格签名校验，结果一致。没有部署新的候选 PR。 |
+| 正式工作台 | 已完成原有记录加载、四个会话恢复、Native 背景计数为零、输入框多行快捷粘贴/清空而不发送、完整与最小窗口布局及关闭重开的本机核对。 |
+| 正式备份 | 数据目录内部导出被中文提示阻止；外部备份与源文件字节核对一致，未留下本次暂存目录。该结果针对现有同步导出，不是候选后台导出的实机证据。 |
+| 独立 Native 验收 | 独立配置完成官方登录、模型读取和真实文本任务中断，终态与背景计数已核实；随后核对客户端退出。另已通过快捷编辑、最小窗口、最小化/Dock/菜单还原及正常退出。独立配置与正式账户证据分开保留。 |
+
+安装前后已核对正式旅行数据、资源、既有审计记录与历史前缀保留。正常草稿保存和运行时缓存仍可能写入，不能将“保留原记录”误解为整个数据目录永不变化。原始备份、收据、账号状态与验收数据不随源码公开。
+
+## 本轮候选，尚未合并或安装
+
+- [#30](https://github.com/nebulae-agents/travel-cat/pull/30)：安全存储加载阶段、等待时间与单次取消/重试。
+- [#31](https://github.com/nebulae-agents/travel-cat/pull/31)：安全的自动旅行故障诊断与单次重试；依赖 #33 的安全 CI 报告。
+- [#32](https://github.com/nebulae-agents/travel-cat/pull/32)：后台备份导出、数值进度与取消。
+- [#33](https://github.com/nebulae-agents/travel-cat/pull/33)：有限的安全测试结果报告，不归档原始输出。
+- [#7](https://github.com/nebulae-agents/travel-cat/pull/7)：构建时间与安装版本标识；适配时保留主干 build 42。
+- [#8](https://github.com/nebulae-agents/travel-cat/pull/8)：本页及关联说明更新。
+- [#9](https://github.com/nebulae-agents/travel-cat/pull/9)：CI 精确缓存与并发控制，需同时保留新报告及现有离线检查。
+
+候选代码、本地测试、PR Checks、合并主干和安装是不同状态。后续以每个 PR 的准确 head 检查为准；不能把旧 head 的绿色检查用于新提交。本页不冻结这些开放 PR 的瞬时 CI 状态。
+
+## 能力与剩余验收
+
+默认黑猫已有应用内旅行/图片调度、分别配置文本和图片服务及系统钥匙串凭据存储。工作台已有 Native 与 ACP 实现；本轮按用户要求仅验收本机，SSH/Docker 实机、其他账户、全部提供方与真实自定义角色图片效果没有验收。自定义角色自动旅行仍未启用。
+
+多趟旅程、睡眠唤醒与长期调度稳定性需要真实运行证据。旧 heartbeat 的实时启停、所有历史迁移及是否完全消除双执行者没有重新核实；文档或源码更新不授权停止旧调度。
+
+当前仍是 ad-hoc 临时签名开发版，尚未 Developer ID 签名或 Apple 公证。干净环境和跨账户发行验收仍未完成。历史记录继续保留在[合并前记录](merge-readiness.md)、[原生交互记录](interaction-acceptance.md)与[候选发行记录](release-status.md)，不会用当前状态覆盖当时的失败或盲区。
