@@ -278,11 +278,19 @@ public extension JSONDecoder {
 
 private enum TravelCatDateCoding {
     static func string(from date: Date) -> String {
-        let seconds = date.timeIntervalSince1970
-        let wholeSeconds = floor(seconds)
-        let wholeDate = Date(timeIntervalSince1970: wholeSeconds)
+        // Preserve Date's native precision. Adding the Unix epoch offset before
+        // splitting seconds discards a bit and can invent a past/future violation.
+        let seconds = date.timeIntervalSinceReferenceDate
+        var wholeSeconds = floor(seconds)
+        var fractionalSeconds = seconds - wholeSeconds
+        // Tiny negative offsets can round the subtraction up to one. Carry it
+        // rather than dropping that leading digit and moving back a whole second.
+        if fractionalSeconds >= 1 {
+            wholeSeconds += 1
+            fractionalSeconds = 0
+        }
+        let wholeDate = Date(timeIntervalSinceReferenceDate: wholeSeconds)
         let prefix = wholeDate.formatted(Date.ISO8601FormatStyle())
-        let fractionalSeconds = seconds - wholeSeconds
         let fraction = String(
             format: "%.17f",
             locale: Locale(identifier: "en_US_POSIX"),
@@ -304,7 +312,7 @@ private enum TravelCatDateCoding {
                let wholeSecondDate = try? Date.ISO8601FormatStyle().parse(wholeSecondValue),
                let fractionalSeconds = Double("0." + fraction)
             {
-                return Date(timeIntervalSince1970: wholeSecondDate.timeIntervalSince1970 + fractionalSeconds)
+                return Date(timeIntervalSinceReferenceDate: wholeSecondDate.timeIntervalSinceReferenceDate + fractionalSeconds)
             }
         }
 
