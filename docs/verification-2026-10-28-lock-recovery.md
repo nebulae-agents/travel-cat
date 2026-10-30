@@ -1,5 +1,9 @@
 # Repository lock contention recovery verification — 2026-10-28
 
+## Compatibility revalidation — 2026-10-30
+
+Updated onto main `4c9257c88a5ae3e0dfeb809f1bfbdf7fdc235144` through its predecessor PR without rewriting history. PR #42 supplies exact timestamp coding; the obsolete worker comparison workaround is absent. The focused controller/lifecycle/envelope/date and available package/render selection passed 74 tests with zero failures on this adapted tree. The original records below retain their historical scope; no installed app, real provider or formal travel data was used in this adaptation.
+
 ## Change
 
 `AutomaticTravelWorker` treats only `RepositoryError.lockUnavailable` as transient contention. It persists a separate `repositoryLockRetryAt` deadline: 15 seconds in fast mode or 60 seconds in daily mode. Early wakes (including restarted workers) return that deadline without invoking a model. The deadline does not grow after repeated contention.
