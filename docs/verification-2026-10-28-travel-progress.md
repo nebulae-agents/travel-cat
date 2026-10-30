@@ -1,5 +1,9 @@
 # Automatic travel progress and recorded publication time — 2026-10-28
 
+## Compatibility revalidation — 2026-10-30
+
+Updated onto main `4c9257c88a5ae3e0dfeb809f1bfbdf7fdc235144` through its predecessor PR without rewriting history. PR #42 supplies exact timestamp coding; the obsolete worker comparison workaround is absent. The focused controller/lifecycle/envelope/date and available package/render selection passed 91 tests with zero failures on this adapted tree. The original records below retain their historical scope; no installed app, real provider or formal travel data was used in this adaptation.
+
 Automatic travel settings now show the active narrative, image, validation or publication stage and retain concrete waiting reasons between operations. Progress callbacks belong to one worker invocation. The controller accepts only its currently active execution's callback, so paused, replaced and completed operations cannot overwrite a newer status.
 
 The scheduling cache has an optional `lastSuccessDate`. It records host time after acknowledged ordinary or supplemental narrative publication or ready-image persistence, before later reconciliation. Waiting, generation failure, invalid content and failed-image results do not advance it. Existing cache files without the field remain readable. Application initialization restores it without starting generation; shared-worker manual-image completion refreshes it even while automatic travel is paused, without forwarding unrelated stages. Unknown metadata is labeled “暂无已记录的成功发布时间”.
