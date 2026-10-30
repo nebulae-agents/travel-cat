@@ -826,7 +826,6 @@ struct MenuServiceRootView: View {
     }
 }
 
-@main
 struct TravelCatApp: App {
     @NSApplicationDelegateAdaptor(TravelCatAppDelegate.self) private var appDelegate
 

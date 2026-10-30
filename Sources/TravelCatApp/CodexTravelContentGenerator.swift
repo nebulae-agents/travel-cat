@@ -4,10 +4,19 @@ import TravelStorage
 
 @MainActor
 final class CodexTravelContentGenerator: TravelContentGenerating {
-    private let executor: CodexTravelExecutor
+    typealias Execution = @MainActor (String, URL, URL?, [URL]) async throws -> Data
+    private let execute: Execution
     private let diagnostics: @Sendable (Data) -> Void
-    init(executor: CodexTravelExecutor, diagnostics: @escaping @Sendable (Data) -> Void = { _ in }) {
-        self.executor = executor
+    convenience init(executor: CodexTravelExecutor, diagnostics: @escaping @Sendable (Data) -> Void = { _ in }) {
+        self.init(execute: { prompt, workspace, schema, images in
+            try await executor.run(prompt: prompt, workspace: workspace, schema: schema, images: images)
+        }, diagnostics: diagnostics)
+    }
+
+    // Internal execution boundary: offline acceptance still exercises resource copying
+    // and decoding, while the production initializer always uses the real executor.
+    init(execute: @escaping Execution, diagnostics: @escaping @Sendable (Data) -> Void = { _ in }) {
+        self.execute = execute
         self.diagnostics = diagnostics
     }
 
@@ -18,7 +27,7 @@ final class CodexTravelContentGenerator: TravelContentGenerating {
         try JSONEncoder.travelCat.encode(request).write(to: workspace.appendingPathComponent("request.json"))
         let schema = try copyResource("narrative.schema.json", into: workspace)
         let prompt = TravelGenerationPrompts.narrative()
-        let output = try await executor.run(prompt: prompt, workspace: workspace, schema: schema)
+        let output = try await execute(prompt, workspace, schema, [])
         do {
             return try JSONDecoder.travelCat.decode(TravelNarrative.self, from: output)
         } catch {
@@ -34,7 +43,7 @@ final class CodexTravelContentGenerator: TravelContentGenerating {
         let images = try ["front.png", "side.png", "sitting.png"].map { try copyResource($0, into: workspace) }
         _ = try copyResource("identity.json", into: workspace)
         let prompt = TravelGenerationPrompts.codexImage(for: work.event)
-        let output = try await executor.run(prompt: prompt, workspace: workspace, schema: schema, images: images)
+        let output = try await execute(prompt, workspace, schema, images)
         struct Result: Decodable { let status: String; let reason: String }
         let result: Result
         do {
