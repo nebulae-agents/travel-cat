@@ -80,6 +80,15 @@ struct AutomaticTravelFailure: Codable, Equatable {
             case .imageHandling: "照片处理"
             }
         }
+        var progressLabel: String {
+            switch self {
+            case .loadingPlanning: "正在读取并安排旅程"
+            case .narrativeGeneration: "正在生成来信"
+            case .validation: "正在校验生成内容"
+            case .publication: "正在保存旅途消息或照片"
+            case .imageHandling: "正在生成照片"
+            }
+        }
     }
     let category: Category
     let recordedAt: Date
@@ -159,10 +168,14 @@ struct AutomaticTravelFailure: Codable, Equatable {
         }
     }
 }
+typealias AutomaticTravelProgress = AutomaticTravelFailure.Stage
+typealias AutomaticTravelProgressHandler = @MainActor (AutomaticTravelProgress) -> Void
+
 struct AutomaticTravelOutcome: Equatable {
     let nextCheckAt: Date
     let message: String
     let failure: AutomaticTravelFailure?
+    var lastSuccessDate: Date? = nil
     init(nextCheckAt: Date, message: String, failure: AutomaticTravelFailure? = nil) {
         self.nextCheckAt = nextCheckAt; self.message = message; self.failure = failure
     }
@@ -170,6 +183,7 @@ struct AutomaticTravelOutcome: Equatable {
 
 private struct AutomaticTravelState: Codable {
     var schemaVersion = 1
+    var lastSuccessDate: Date?
     var initialSnapshotDate: Date?
     var initialMode: TravelMode?
     var departureAt: Date?
@@ -206,7 +220,25 @@ final class AutomaticTravelWorker {
         self.didChange = didChange
     }
 
-    func step(settings: TravelSettings, manualEventID: UUID? = nil, retryFailure: Bool = false) async throws -> AutomaticTravelOutcome {
+    /// Read-only restoration, including while automatic travel is paused.
+    func lastSuccessfulPublicationDate() -> Date? {
+        guard let data = try? Data(contentsOf: stateURL),
+              let state = try? JSONDecoder.travelCat.decode(AutomaticTravelState.self, from: data),
+              state.schemaVersion == 1 else { return nil }
+        return state.lastSuccessDate
+    }
+
+    func step(settings: TravelSettings, manualEventID: UUID? = nil, retryFailure: Bool = false,
+              progress: @escaping AutomaticTravelProgressHandler = { _ in }) async throws -> AutomaticTravelOutcome {
+        progress(.loadingPlanning)
+        var outcome = try await performStep(settings: settings, manualEventID: manualEventID,
+                                            retryFailure: retryFailure, progress: progress)
+        outcome.lastSuccessDate = lastSuccessfulPublicationDate()
+        return outcome
+    }
+
+    private func performStep(settings: TravelSettings, manualEventID: UUID?, retryFailure: Bool,
+                             progress: @escaping AutomaticTravelProgressHandler) async throws -> AutomaticTravelOutcome {
         let now = clock()
         guard settings.automaticTravelEnabled || manualEventID != nil else {
             return .init(nextCheckAt: now.addingTimeInterval(60), message: "自动旅行已暂停")
@@ -235,7 +267,7 @@ final class AutomaticTravelWorker {
         }
         var startedModelAction = false
         var progressPlans: [PostcardBacklogPlan] = []
-        var stage: AutomaticTravelFailure.Stage = .loadingPlanning
+        var stage: AutomaticTravelFailure.Stage = .loadingPlanning { didSet { progress(stage) } }
         do {
             let contents = try repository.loadContents()
             // Home lookup belongs to application/settings lifecycle. Story work only
@@ -266,7 +298,8 @@ final class AutomaticTravelWorker {
                 startedModelAction = true
                 try save(state)
                 stage = .imageHandling
-                let outcome = try await completeImage(work, mode: settings.mode, backlog: isSupplement ? backlog : nil)
+                let outcome = try await completeImage(work, mode: settings.mode, backlog: isSupplement ? backlog : nil, progress: progress)
+                if outcome.ready { state.lastSuccessDate = clock(); try save(state) }
                 stage = .loadingPlanning
                 state.nextModelActionAt = clock().addingTimeInterval(catchUpGap)
                 try save(state)
@@ -338,7 +371,7 @@ final class AutomaticTravelWorker {
             let eventDue = dueAt <= now && !waitingForRetry
             if let cooldown = state.nextModelActionAt, cooldown > now,
                eventDue || historical != nil || (contents.events + supplemental).contains(where: { $0.postcardStatus == .pendingImage }) {
-                return .init(nextCheckAt: cooldown, message: progressMessage("正在依次处理明信片", plans: progressPlans), failure: state.lastFailure)
+                return .init(nextCheckAt: cooldown, message: progressMessage("等待生成间隔，再继续处理明信片", plans: progressPlans), failure: state.lastFailure)
             }
             if (!eventDue && historical == nil) || !state.lastActionWasImage {
                 let journalWork = try repository.pendingImages(mode: settings.mode, matchingCharacterProfile: .defaultBlackCat).first
@@ -349,7 +382,8 @@ final class AutomaticTravelWorker {
                     startedModelAction = true
                     try save(state)
                     stage = .imageHandling
-                    let imageOutcome = try await completeImage(work, mode: settings.mode, backlog: supplementWork == nil ? nil : backlog)
+                    let imageOutcome = try await completeImage(work, mode: settings.mode, backlog: supplementWork == nil ? nil : backlog, progress: progress)
+                    if imageOutcome.ready { state.lastSuccessDate = clock(); try save(state) }
                     stage = .loadingPlanning
                     state.postcardPlan?.reconcile(events: try repository.events())
                     progressPlans = try backlog.reconcile(events: try repository.events())
@@ -396,6 +430,8 @@ final class AutomaticTravelWorker {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 try backlog.publishSupplement(projected.event, slotID: historical.slotID)
+                state.lastSuccessDate = clock()
+                try save(state)
                 state.failures = 0
                 state.nextAttemptAt = nil
                 state.lastFailureMessage = nil
@@ -465,6 +501,8 @@ final class AutomaticTravelWorker {
             try Task.checkCancellation()
             stage = .publication
             _ = try repository.publish(event: envelope.event, next: envelope.next, expectedSnapshot: contents.snapshot, expectedCharacterProfile: .defaultBlackCat)
+            state.lastSuccessDate = clock()
+            try save(state)
             state.departureAt = nil
             state.modeActionAt = nil
             state.lastActionWasImage = false
@@ -537,7 +575,8 @@ final class AutomaticTravelWorker {
         return parts.joined(separator: " · ")
     }
 
-    private func completeImage(_ work: PendingImageWork, mode: TravelMode, backlog: PostcardBacklogStore? = nil) async throws -> (ready: Bool, message: String) {
+    private func completeImage(_ work: PendingImageWork, mode: TravelMode, backlog: PostcardBacklogStore? = nil,
+                               progress: AutomaticTravelProgressHandler) async throws -> (ready: Bool, message: String) {
         let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("travelcat-image-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -545,6 +584,7 @@ final class AutomaticTravelWorker {
         do {
             let source = try await generator.image(for: work, in: workspace)
             try Task.checkCancellation()
+            progress(.validation)
             guard source.standardizedFileURL == workspace.appendingPathComponent("postcard.png").standardizedFileURL else {
                 throw CocoaError(.fileReadInvalidFileName)
             }
@@ -581,6 +621,7 @@ final class AutomaticTravelWorker {
         }
         // Once handed to markImage, a failed write can already have committed the ready intent.
         // Keep the generated file for repository recovery; never overwrite that intent with failed.
+        progress(.publication)
         let result = ImageResultEnvelope(eventId: work.event.id, status: .ready,
             attemptedAt: clock(), relativePath: path, reason: nil, attemptToken: work.attemptToken,
             attemptCount: work.imageAttemptCount, publishedNarrativeHash: work.publishedNarrativeHash)

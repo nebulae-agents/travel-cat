@@ -570,7 +570,20 @@ struct AutomaticTravelStatusView: View {
     @ObservedObject var controller: AutomaticTravelController
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(controller.message).font(.caption).foregroundStyle(.secondary)
+            if let progress = controller.progress, controller.isRunning {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(progress.progressLabel).font(.caption)
+                }
+            } else {
+                Text(controller.message).font(.caption).foregroundStyle(.secondary)
+            }
+            if let success = controller.lastSuccessDate {
+                Text("最近成功发布：\(success.formatted(date: .abbreviated, time: .standard))")
+                    .font(.caption2).foregroundStyle(.secondary)
+            } else {
+                Text("暂无已记录的成功发布时间").font(.caption2).foregroundStyle(.secondary)
+            }
             if let failure = controller.failure {
                 Text("最近失败：\(failure.recordedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption2).foregroundStyle(.secondary)

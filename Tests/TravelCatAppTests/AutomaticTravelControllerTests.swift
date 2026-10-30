@@ -130,4 +130,33 @@ final class AutomaticTravelControllerTests: XCTestCase {
     private func settle() async {
         for _ in 0..<100 { await Task.yield() }
     }
+
+    func testProgressIsScopedToExecutionAndPreservesSuccessOnFailure() async throws {
+        var callbacks: [AutomaticTravelProgressHandler] = []
+        var pending: [CheckedContinuation<AutomaticTravelOutcome, Error>] = []
+        let success = Date(timeIntervalSince1970: 1_800_000_000)
+        let controller = AutomaticTravelController(isEnabled: { true }, runWithProgress: { report in
+            callbacks.append(report)
+            return try await withCheckedThrowingContinuation { pending.append($0) }
+        }, lastSuccessDate: success)
+        defer { controller.stop() }
+        controller.refresh(); await settle()
+        callbacks[0](.narrativeGeneration)
+        XCTAssertEqual(controller.progress, .narrativeGeneration)
+        controller.pause()
+        callbacks[0](.publication)
+        XCTAssertNil(controller.progress)
+        controller.refresh(); await settle()
+        callbacks[1](.imageHandling)
+        callbacks[0](.validation)
+        pending[0].resume(returning: .init(nextCheckAt: Date(), message: "stale"))
+        await settle()
+        XCTAssertEqual(controller.progress, .imageHandling)
+        XCTAssertTrue(controller.isRunning)
+        pending[1].resume(throwing: CocoaError(.fileReadUnknown)); await settle()
+        XCTAssertNil(controller.progress)
+        XCTAssertEqual(controller.lastSuccessDate, success)
+        callbacks[1](.publication)
+        XCTAssertNil(controller.progress, "Completed executions cannot report further progress")
+    }
 }
