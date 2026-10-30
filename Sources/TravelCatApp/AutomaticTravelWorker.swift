@@ -174,6 +174,7 @@ private struct AutomaticTravelState: Codable {
     var initialMode: TravelMode?
     var departureAt: Date?
     var nextAttemptAt: Date?
+    var repositoryLockRetryAt: Date?
     var failures = 0
     var lastFailureMessage: String?
     var lastFailure: AutomaticTravelFailure?
@@ -216,6 +217,10 @@ final class AutomaticTravelWorker {
         defer { withExtendedLifetime(ownership) {} }
         let catchUpGap: TimeInterval = settings.mode == .fast ? 15 : 60
         var state = try loadState(recoveryGap: catchUpGap)
+        if let retryAt = state.repositoryLockRetryAt, retryAt > now {
+            return .init(nextCheckAt: retryAt, message: "旅行数据正在使用，稍后自动继续", failure: state.lastFailure)
+        }
+        state.repositoryLockRetryAt = nil
         if retryFailure {
             guard state.lastFailure != nil else {
                 return .init(nextCheckAt: now.addingTimeInterval(catchUpGap), message: "没有等待重试的旅行故障")
@@ -481,6 +486,15 @@ final class AutomaticTravelWorker {
                 ? occurredAt.addingTimeInterval(catchUpGap) : envelope.next.nextActionAt
             return .init(nextCheckAt: request.phase == .postcardReady ? occurredAt.addingTimeInterval(catchUpGap) : nextCheck,
                          message: progressMessage("旅程已更新", plans: progressPlans))
+        } catch RepositoryError.lockUnavailable {
+            // Contention is independent of generation failure backoff. In particular,
+            // an early repository read must not shorten an existing nextAttemptAt.
+            let completedAt = clock()
+            if startedModelAction { state.nextModelActionAt = completedAt.addingTimeInterval(catchUpGap) }
+            state.repositoryLockRetryAt = completedAt.addingTimeInterval(catchUpGap)
+            try save(state)
+            return .init(nextCheckAt: state.repositoryLockRetryAt!,
+                         message: progressMessage("旅行数据正在使用，稍后自动继续", plans: progressPlans), failure: state.lastFailure)
         } catch is CancellationError {
             if startedModelAction {
                 state.nextModelActionAt = clock().addingTimeInterval(catchUpGap)

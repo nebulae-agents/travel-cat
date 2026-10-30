@@ -10,6 +10,101 @@ import TravelUI
 
 @MainActor
 final class AutomaticTravelLifecycleTests: XCTestCase {
+    func testRepositoryLockContentionUsesStableShortWaitAcrossRestart() async throws {
+        for mode in [TravelMode.fast, .daily] {
+            let f = try LifecycleFixture(); defer { f.clean() }
+            let initial = try await f.worker.step(settings: .init(mode: mode))
+            f.clock.set(initial.nextCheckAt)
+            let gap: TimeInterval = mode == .fast ? 15 : 60
+            var held = try XCTUnwrap(SingleInstanceLock.acquire(at: f.root.appendingPathComponent(".repository.lock"))) as SingleInstanceLock?
+            defer { held = nil }
+            for _ in 0..<4 {
+                let outcome = try await f.makeWorker().step(settings: .init(mode: mode))
+                XCTAssertEqual(outcome.nextCheckAt, f.clock.now.addingTimeInterval(gap))
+                XCTAssertNil(outcome.failure, "Lock contention alone is a wait, not a retryable generation failure")
+                XCTAssertEqual(f.generator.narrativeCalls, 0)
+                XCTAssertEqual(f.generator.imageCalls, 0)
+                try f.updateState {
+                    XCTAssertEqual($0["failures"] as? Int, 0)
+                    XCTAssertNil($0["nextAttemptAt"])
+                }
+                f.clock.set(outcome.nextCheckAt)
+            }
+            withExtendedLifetime(held) {}
+            held = nil
+            _ = try await f.makeWorker().step(settings: .init(mode: mode))
+            XCTAssertEqual(f.generator.narrativeCalls, 1)
+            XCTAssertEqual(try f.repository.events().count, 1)
+        }
+    }
+
+    func testRepositoryLockContentionPreservesExistingGenerationBackoff() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        try await f.reach(.preparing)
+        f.clock.set(try f.repository.loadSnapshot().nextActionAt)
+        f.generator.failNarrative = true
+        var retry = f.clock.now
+        for delay: TimeInterval in [15, 30, 60, 120] {
+            f.clock.set(retry)
+            retry = try await f.worker.step(settings: .init(mode: .fast)).nextCheckAt
+            XCTAssertEqual(retry, f.clock.now.addingTimeInterval(delay), "Non-lock failures retain exponential backoff")
+        }
+        let calls = f.generator.narrativeCalls
+        var before: [String: Any] = [:]
+        try f.updateState { before = $0 }
+        var held = try XCTUnwrap(SingleInstanceLock.acquire(at: f.root.appendingPathComponent(".repository.lock"))) as SingleInstanceLock?
+        defer { held = nil }
+        let blocked = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertEqual(blocked.nextCheckAt, f.clock.now.addingTimeInterval(15))
+        XCTAssertEqual(blocked.failure?.stage, .narrativeGeneration)
+        try f.updateState {
+            XCTAssertEqual($0["failures"] as? Int, 4)
+            XCTAssertEqual($0["nextAttemptAt"] as? String, before["nextAttemptAt"] as? String)
+            XCTAssertEqual($0["lastFailureMessage"] as? String, before["lastFailureMessage"] as? String)
+        }
+        withExtendedLifetime(held) {}
+        held = nil
+        f.generator.failNarrative = false
+        f.clock.set(blocked.nextCheckAt)
+        _ = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertEqual(f.generator.narrativeCalls, calls)
+        f.clock.set(retry)
+        _ = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertEqual(f.generator.narrativeCalls, calls + 1)
+    }
+
+    func testRepositoryLockAfterGenerationKeepsCompletionCooldownAndJournalUnique() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        try await f.reach(.preparing)
+        f.clock.set(try f.repository.loadSnapshot().nextActionAt)
+        let before = try f.repository.events()
+        var held: SingleInstanceLock?
+        defer { held = nil }
+        f.generator.onNarrative = {
+            f.clock.advance(100)
+            held = try XCTUnwrap(SingleInstanceLock.acquire(at: f.root.appendingPathComponent(".repository.lock")))
+        }
+        let blocked = try await f.worker.step(settings: .init(mode: .fast))
+        let calls = f.generator.narrativeCalls
+        XCTAssertEqual(blocked.nextCheckAt, f.clock.now.addingTimeInterval(15))
+        try f.updateState { XCTAssertEqual($0["failures"] as? Int, 0) }
+        withExtendedLifetime(held) {}
+        held = nil
+        f.generator.onNarrative = nil
+        XCTAssertEqual(try f.repository.events(), before)
+        f.clock.advance(14)
+        let waiting = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertEqual(waiting.nextCheckAt, blocked.nextCheckAt)
+        XCTAssertEqual(f.generator.narrativeCalls, calls)
+        f.clock.set(blocked.nextCheckAt)
+        _ = try await f.makeWorker().step(settings: .init(mode: .fast))
+        let events = try f.repository.events()
+        XCTAssertEqual(events.count, before.count + 1)
+        XCTAssertEqual(Set(events.map(\.id)).count, events.count)
+        XCTAssertEqual(Array(events.prefix(before.count)), before)
+        XCTAssertEqual(f.generator.narrativeCalls, calls + 1, "Unpersisted narrative must be generated again")
+    }
+
     func testPostcardPublishesWithExactHostTimestampAcrossJSONRoundTrip() async throws {
         let generatedAt = Date(timeIntervalSinceReferenceDate: 814003706.03560197)
         let f = try LifecycleFixture(now: Date(timeIntervalSinceReferenceDate: 814000000))
