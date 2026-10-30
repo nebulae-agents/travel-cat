@@ -689,6 +689,76 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(failure.category, .generation)
     }
 
+    func testDetailedDiagnosticsUseOnlyAllowlistedValues() throws {
+        let secret = "secret-provider-token-/private/customer/path"
+        let id = UUID()
+        let cases: [(Error, String, String)] = [
+            (RepositoryError.lockUnavailable, "storage", "lockUnavailable"),
+            (RepositoryError.lockFailure(code: 13), "storage", "ioFailure"),
+            (AtomicFileWriterError.operationFailed(operation: secret, code: 13), "storage", "ioFailure"),
+            (RepositoryError.malformedJournal(line: 42, reason: secret), "storage", "recoveryRequired"),
+            (RepositoryError.recoveryRequired, "storage", "recoveryRequired"),
+            (RepositoryError.brokenJournalChain, "storage", "recoveryRequired"),
+            (RepositoryError.malformedImageRetryState, "storage", "recoveryRequired"),
+            (RepositoryError.clearHistoryResetFailed(backupPath: secret, reason: secret), "storage", "recoveryRequired"),
+            (RepositoryError.versionConflict, "storage", "stateConflict"),
+            (RepositoryError.eventConflict(id), "storage", "stateConflict"),
+            (RepositoryError.continuityConflict, "storage", "stateConflict"),
+            (RepositoryError.duplicateEventID(id), "storage", "stateConflict"),
+            (RepositoryError.eventNotFound(id), "storage", "stateConflict"),
+            (RepositoryError.narrativeChanged(id), "storage", "stateConflict"),
+            (RepositoryError.catIsAway, "storage", "stateConflict"),
+            (RepositoryError.eventInFuture, "storage", "invalidOutput"),
+            (RepositoryError.invalidImageTransition, "storage", "invalidOutput"),
+            (RepositoryError.unsafeExportDestination, "storage", "unsafePath"),
+            (RepositoryError.unsafePostcardPath, "storage", "unsafePath"),
+            (RepositoryError.invalidImageResult, "storage", "invalidOutput"),
+            (AgentEnvelopeError.structural([secret]), "invalidOutput", "invalidStructure"),
+            (AgentEnvelopeError.continuity([secret]), "invalidOutput", "invalidContinuity")]
+        for (error, category, code) in cases {
+            let failure = AutomaticTravelFailure(error: error, recordedAt: Date(timeIntervalSince1970: 42))
+            let data = try JSONEncoder().encode(failure)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(object["category"] as? String, category)
+            XCTAssertEqual(object["code"] as? String, code)
+            let text = String(decoding: data, as: UTF8.self) + failure.message
+            XCTAssertFalse(text.contains(secret)); XCTAssertFalse(text.contains(id.uuidString))
+        }
+    }
+
+    func testOldFailureRecordDecodesWithoutNewFields() throws {
+        let data = Data(#"{"category":"storage","recordedAt":42}"#.utf8)
+        let failure = try JSONDecoder().decode(AutomaticTravelFailure.self, from: data)
+        XCTAssertEqual(failure.category, .storage)
+        XCTAssertEqual(failure.recordedAt, Date(timeIntervalSinceReferenceDate: 42))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(failure)) as? [String: Any])
+        XCTAssertNil(object["stage"]); XCTAssertNil(object["code"])
+    }
+
+    func testWorkerRecordsGenerationAndValidationStagesWithoutPublishing() async throws {
+        for invalidNarrative in [false, true] {
+            let f = try LifecycleFixture(); defer { f.clean() }
+            try await f.reach(.preparing)
+            let before = try f.repository.loadContents()
+            let journalURL = f.root.appendingPathComponent("journal/events.jsonl")
+            let journal = try Data(contentsOf: journalURL)
+            f.clock.set(before.snapshot.nextActionAt.addingTimeInterval(1))
+            if invalidNarrative { f.generator.narrativeSummary = "" }
+            else { f.generator.onNarrative = { throw CodexTravelExecutor.Failure.notLoggedIn } }
+            let result = try await f.worker.step(settings: .init(mode: .fast))
+            let failure = try XCTUnwrap(result.failure)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(failure)) as? [String: Any])
+            XCTAssertEqual(object["stage"] as? String, invalidNarrative ? "validation" : "narrativeGeneration")
+            XCTAssertEqual(failure.category, invalidNarrative ? .invalidOutput : .authentication)
+            XCTAssertTrue(failure.message.contains(invalidNarrative ? "内容校验" : "来信生成"))
+            let state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: f.root.appendingPathComponent("state/automatic-travel.json"))) as? [String: Any])
+            XCTAssertEqual((state["lastFailure"] as? [String: Any])?["stage"] as? String, object["stage"] as? String)
+            XCTAssertEqual(try f.repository.loadContents().snapshot, before.snapshot)
+            XCTAssertEqual(try f.repository.events(), before.events)
+            XCTAssertEqual(try Data(contentsOf: journalURL), journal)
+        }
+    }
+
     func testFailureRetryControllerCoalescesClicksAndRespectsDisabledState() async throws {
         var enabled = true
         var retries = 0
@@ -808,6 +878,7 @@ private final class LifecycleGenerator: TravelContentGenerating {
     var imageWidth: Int? = 1152
     var imageHeight = 768
     var onNarrative: (() throws -> Void)?
+    var narrativeSummary = "黑猫沿着蜿蜒的小路继续旅行，记住沿途的风景，也惦记着温暖的小屋。"
     var failNarrative = false
     var holdNarrative = false
     var pending: CheckedContinuation<Void, Never>?
@@ -818,7 +889,7 @@ private final class LifecycleGenerator: TravelContentGenerating {
         if failNarrative { throw CocoaError(.fileReadUnknown) }
         try onNarrative?()
         return TravelNarrative(
-            summary: "黑猫沿着蜿蜒的小路继续旅行，记住沿途的风景，也惦记着温暖的小屋。",
+            summary: narrativeSummary,
             mood: Mood(level: request.claim.snapshot.mood.level, label: "平静", quote: "今天也有新的风景。"),
             location: [.exploring, .postcardReady].contains(request.phase) ? Location(country: "中国", city: "杭州", place: "沿湖第\(narrativeCalls)站") : nil,
             transport: nil,

@@ -65,10 +65,49 @@ protocol TravelContentGenerating {
 /// Fixed classifications only: no provider body, prompt, credential or private path.
 struct AutomaticTravelFailure: Codable, Equatable {
     enum Category: String, Codable { case configuration, authentication, connection, timedOut, invalidOutput, storage, generation }
+    enum Code: String, Codable {
+        case lockUnavailable, recoveryRequired, stateConflict, invalidOutput, unsafePath, ioFailure
+        case invalidStructure, invalidContinuity
+    }
+    enum Stage: String, Codable {
+        case loadingPlanning, narrativeGeneration, validation, publication, imageHandling
+        var label: String {
+            switch self {
+            case .loadingPlanning: "读取与安排旅程"
+            case .narrativeGeneration: "来信生成"
+            case .validation: "内容校验"
+            case .publication: "发布与保存来信"
+            case .imageHandling: "照片处理"
+            }
+        }
+    }
     let category: Category
     let recordedAt: Date
-    @MainActor init(error: Error, recordedAt: Date) {
+    let code: Code?
+    let stage: Stage?
+    @MainActor init(error: Error, recordedAt: Date, stage: Stage? = nil) {
         self.recordedAt = recordedAt
+        self.stage = stage
+        code = switch error {
+        case let failure as RepositoryError:
+            switch failure {
+            case .lockUnavailable: .lockUnavailable
+            case .lockFailure: .ioFailure
+            case .malformedJournal, .recoveryRequired, .brokenJournalChain, .malformedImageRetryState,
+                 .clearHistoryResetFailed: .recoveryRequired
+            case .versionConflict, .continuityConflict, .duplicateEventID, .eventConflict, .eventNotFound,
+                 .narrativeChanged, .catIsAway: .stateConflict
+            case .eventInFuture, .invalidImageTransition, .invalidImageResult: .invalidOutput
+            case .unsafePostcardPath, .unsafeExportDestination: .unsafePath
+            }
+        case let failure as AgentEnvelopeError:
+            switch failure {
+            case .structural: .invalidStructure
+            case .continuity: .invalidContinuity
+            }
+        case is AtomicFileWriterError: .ioFailure
+        default: nil
+        }
         switch error {
         case let failure as CodexTravelExecutor.Failure:
             category = switch failure {
@@ -89,12 +128,26 @@ struct AutomaticTravelFailure: Codable, Equatable {
             case .tooLarge, .invalidJSON, .invalidImage: .invalidOutput
             }
         case is GenerationSetupError: category = .configuration
-        case is DecodingError: category = .invalidOutput
-        case is RepositoryError: category = .storage
+        case is DecodingError, is AgentEnvelopeError: category = .invalidOutput
+        case is RepositoryError, is AtomicFileWriterError: category = .storage
         default: category = .generation
         }
     }
     var message: String {
+        let action: String
+        switch code {
+        case .lockUnavailable: action = "旅行数据正被其他操作使用，请等待当前操作结束后重试。"
+        case .recoveryRequired: action = "旅行数据需要恢复，请保留现有数据与备份，检查恢复状态后再重试。"
+        case .stateConflict: action = "旅行状态已变化或发生冲突，请刷新旅行册并检查最新记录后重试。"
+        case .invalidOutput, .invalidStructure: action = "返回内容未通过校验，请检查生成配置后重试。"
+        case .invalidContinuity: action = "来信与已有旅程不一致，请检查最新旅行记录后重试。"
+        case .unsafePath: action = "文件位置未通过安全检查，请检查数据目录配置后重试。"
+        case .ioFailure: action = "旅行数据读写失败，请检查数据目录权限与可用空间后重试。"
+        case nil: action = categoryMessage
+        }
+        return stage.map { "\($0.label)阶段遇到问题：\(action)" } ?? action
+    }
+    private var categoryMessage: String {
         switch category {
         case .configuration: "请检查模型与连接设置，确认程序、模型和图像工具可用。"
         case .authentication: "请检查模型服务密钥，或在 Codex 中重新登录。"
@@ -177,6 +230,7 @@ final class AutomaticTravelWorker {
         }
         var startedModelAction = false
         var progressPlans: [PostcardBacklogPlan] = []
+        var stage: AutomaticTravelFailure.Stage = .loadingPlanning
         do {
             let contents = try repository.loadContents()
             // Home lookup belongs to application/settings lifecycle. Story work only
@@ -206,7 +260,9 @@ final class AutomaticTravelWorker {
                 state.nextModelActionAt = now.addingTimeInterval(catchUpGap)
                 startedModelAction = true
                 try save(state)
+                stage = .imageHandling
                 let outcome = try await completeImage(work, mode: settings.mode, backlog: isSupplement ? backlog : nil)
+                stage = .loadingPlanning
                 state.nextModelActionAt = clock().addingTimeInterval(catchUpGap)
                 try save(state)
                 return .init(nextCheckAt: state.nextModelActionAt!, message: outcome.message)
@@ -287,7 +343,9 @@ final class AutomaticTravelWorker {
                     state.nextModelActionAt = now.addingTimeInterval(catchUpGap)
                     startedModelAction = true
                     try save(state)
+                    stage = .imageHandling
                     let imageOutcome = try await completeImage(work, mode: settings.mode, backlog: supplementWork == nil ? nil : backlog)
+                    stage = .loadingPlanning
                     state.postcardPlan?.reconcile(events: try repository.events())
                     progressPlans = try backlog.reconcile(events: try repository.events())
                     state.nextModelActionAt = clock().addingTimeInterval(catchUpGap)
@@ -311,10 +369,12 @@ final class AutomaticTravelWorker {
                 state.nextModelActionAt = now.addingTimeInterval(catchUpGap)
                 startedModelAction = true
                 try save(state)
+                stage = .narrativeGeneration
                 let narrative = try await generator.narrative(for: request)
                 try Task.checkCancellation()
                 let generatedAt = clock()
                 state.nextModelActionAt = generatedAt.addingTimeInterval(catchUpGap)
+                stage = .validation
                 let candidate = AgentEventEnvelope(eventId: historical.slotID, tripId: historical.tripID,
                     previousEventId: previous.id, occurredAt: generatedAt, phase: .postcardReady,
                     location: narrative.location, transport: narrative.transport, summary: narrative.summary,
@@ -325,6 +385,7 @@ final class AutomaticTravelWorker {
                 let projected = try checked.validatedProjection(previous: context,
                     existingEventIDs: Set((contents.events + supplemental).map(\.id)),
                     mode: settings.mode, calendar: calendar(), now: generatedAt)
+                stage = .publication
                 // A concurrent explicit history reset invalidates the source trip.
                 guard try repository.events().filter({ $0.tripID == historical.tripID }) == tripEvents else {
                     throw CocoaError(.fileReadCorruptFile)
@@ -361,10 +422,12 @@ final class AutomaticTravelWorker {
             state.nextModelActionAt = now.addingTimeInterval(catchUpGap)
             startedModelAction = true
             try save(state)
+            stage = .narrativeGeneration
             let narrative = try await generator.narrative(for: request)
             try Task.checkCancellation()
             let occurredAt = clock()
             state.nextModelActionAt = occurredAt.addingTimeInterval(catchUpGap)
+            stage = .loadingPlanning
             if request.phase == .preparing, settings.mode == .daily {
                 let hour = calendar().component(.hour, from: occurredAt)
                 if hour < 8 || hour >= 20 {
@@ -374,6 +437,7 @@ final class AutomaticTravelWorker {
                     return .init(nextCheckAt: state.departureAt!, message: "今晚先休息，明天再出发")
                 }
             }
+            stage = .validation
             let candidate = AgentEventEnvelope(
                 eventId: request.phase == .postcardReady ? (state.postcardPlan?.nextEventID ?? UUID()) : UUID(),
                 tripId: request.phase == .preparing ? state.postcardPlan!.tripID : (contents.snapshot.tripID ?? UUID()),
@@ -394,6 +458,7 @@ final class AutomaticTravelWorker {
             let envelope = try checked.validatedProjection(previous: contents.snapshot,
                 existingEventIDs: Set(contents.events.map(\.id)), mode: settings.mode, calendar: calendar(), now: occurredAt)
             try Task.checkCancellation()
+            stage = .publication
             _ = try repository.publish(event: envelope.event, next: envelope.next, expectedSnapshot: contents.snapshot, expectedCharacterProfile: .defaultBlackCat)
             state.departureAt = nil
             state.modeActionAt = nil
@@ -427,7 +492,7 @@ final class AutomaticTravelWorker {
             state.failures = min(8, state.failures + 1)
             let delay = min(3_600.0, (settings.mode == .fast ? 15.0 : 60.0) * pow(2, Double(state.failures - 1)))
             state.nextAttemptAt = clock().addingTimeInterval(delay)
-            state.lastFailure = AutomaticTravelFailure(error: error, recordedAt: clock())
+            state.lastFailure = AutomaticTravelFailure(error: error, recordedAt: clock(), stage: stage)
             state.lastFailureMessage = state.lastFailure?.message
             try save(state)
             return .init(nextCheckAt: state.nextAttemptAt!, message: progressMessage(state.lastFailureMessage!, plans: progressPlans), failure: state.lastFailure)
