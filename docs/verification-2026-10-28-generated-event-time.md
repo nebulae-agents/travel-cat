@@ -1,6 +1,12 @@
-# Generated event timestamp verification — 2026-10-28
+# Generated event timestamp regression coverage — updated 2026-10-30
 
-## Defect and scope
+## Current scope after PR #42
+
+PR #42 fixed the underlying RFC 3339 date round trip in `DateCoding` and is now merged as `4c9257c88a5ae3e0dfeb809f1bfbdf7fdc235144`. This PR has been updated onto that main commit without rewriting its earlier history. The former worker comparison workaround has been removed: production worker validation again uses the original host clock, exactly as main does.
+
+The remaining change is regression coverage for ordinary and supplemental postcard publication and subsequent image completion. Both cases now require exact `Date` equality across persistence. The external one-floating-point-step future rejection remains covered. The records below describe the original 2026-10-28 implementation, not current installed behavior. On 2026-10-30, the adapted lifecycle, envelope and date-coding selection passed 65 tests with zero failures. Read-only review found no actionable code issue.
+
+## Historical defect and scope
 
 The automatic worker creates event timestamps from its own clock, then encodes and strictly decodes the candidate before validation. The fixed sample `Date(timeIntervalSinceReferenceDate: 814003706.03560197)` decodes slightly later after RFC 3339 serialization. Comparing that decoded event against the original timestamp incorrectly produces `occurredAtAfterNow`.
 

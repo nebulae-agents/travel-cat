@@ -10,7 +10,7 @@ import TravelUI
 
 @MainActor
 final class AutomaticTravelLifecycleTests: XCTestCase {
-    func testPostcardPublishesWhenHostTimestampRoundsForwardDuringJSONRoundTrip() async throws {
+    func testPostcardPublishesWithExactHostTimestampAcrossJSONRoundTrip() async throws {
         let generatedAt = Date(timeIntervalSinceReferenceDate: 814003706.03560197)
         let f = try LifecycleFixture(now: Date(timeIntervalSinceReferenceDate: 814000000))
         defer { f.clean() }
@@ -29,7 +29,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(card.id, slotID)
         XCTAssertEqual(card.phase, .postcardReady)
         XCTAssertEqual(card.postcardStatus, .pendingImage)
-        XCTAssertEqual(card.occurredAt.timeIntervalSince(generatedAt), 0, accuracy: 0.000001)
+        XCTAssertEqual(card.occurredAt, generatedAt)
         f.clock.set(outcome.nextCheckAt.addingTimeInterval(1))
         let imageOutcome = try await f.makeWorker().step(settings: .init(mode: .fast))
         XCTAssertNil(imageOutcome.failure)
@@ -37,7 +37,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(f.generator.imageCalls, 1)
     }
 
-    func testSupplementPublishesWhenHostTimestampRoundsForwardDuringJSONRoundTrip() async throws {
+    func testSupplementPublishesWithExactHostTimestampAcrossJSONRoundTrip() async throws {
         let generatedAt = Date(timeIntervalSinceReferenceDate: 814003706.03560197)
         let f = try LifecycleFixture(now: Date(timeIntervalSinceReferenceDate: 814000000))
         defer { f.clean() }
@@ -63,7 +63,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(card.tripID, oldTrip)
         XCTAssertEqual(card.phase, .postcardReady)
         XCTAssertEqual(card.postcardStatus, .pendingImage)
-        XCTAssertEqual(card.occurredAt.timeIntervalSince(generatedAt), 0, accuracy: 0.000001)
+        XCTAssertEqual(card.occurredAt, generatedAt)
         f.clock.set(outcome.nextCheckAt.addingTimeInterval(1))
         let imageOutcome = try await f.makeWorker().step(settings: .init(mode: .fast))
         XCTAssertNil(imageOutcome.failure)
