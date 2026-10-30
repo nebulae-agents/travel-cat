@@ -19,7 +19,8 @@ final class AutomaticTravelController: ObservableObject {
     private let run: () async throws -> AutomaticTravelOutcome
     private var task: Task<Void, Never>?
     private var timer: Timer?
-    private var generation = UUID()
+    private var executionToken: UUID?
+    private var failureRequiresFreshRun = false
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
 
@@ -50,23 +51,40 @@ final class AutomaticTravelController: ObservableObject {
         timer = nil
         guard isEnabled() else { pause(); return }
         guard task == nil else { return }
-        let token = generation
+        let operation = retryingFailure && !failureRequiresFreshRun ? (retry ?? run) : run
+        let token = UUID()
+        executionToken = token
+        nextCheckAt = nil
         isRunning = true
         message = "正在查看旅途消息"
         task = Task { [weak self] in
             guard let self else { return }
             let outcome: AutomaticTravelOutcome
-            do { outcome = try await (retryingFailure ? (retry ?? run) : run)() }
-            catch is CancellationError { return }
-            catch { outcome = .init(nextCheckAt: Date().addingTimeInterval(60), message: "旅行数据暂时无法读取，稍后重试") }
-            guard !Task.isCancelled, generation == token else { return }
+            var requiresFreshRun = false
+            do { outcome = try await operation() }
+            catch is CancellationError {
+                outcome = .init(nextCheckAt: Date().addingTimeInterval(60), message: "旅行操作已取消，稍后重试")
+            }
+            catch {
+                requiresFreshRun = true
+                outcome = .init(nextCheckAt: Date().addingTimeInterval(60), message: "旅行数据暂时无法读取，稍后重试",
+                    failure: AutomaticTravelFailure(error: error, recordedAt: Date()))
+            }
+            // A paused/replaced execution cannot finalize the current run or install its timer.
+            guard executionToken == token else { return }
+            guard isEnabled() else { pause(); return }
             task = nil
             isRunning = false
             message = outcome.message
             failure = outcome.failure
+            // A thrown error may occur before the worker persists a retryable failure.
+            failureRequiresFreshRun = requiresFreshRun
             nextCheckAt = outcome.nextCheckAt
             let timer = Timer(timeInterval: max(1, min(60, outcome.nextCheckAt.timeIntervalSinceNow)), repeats: false) { [weak self] _ in
-                Task { @MainActor in self?.refresh() }
+                Task { @MainActor in
+                    guard let self, self.executionToken == token, self.task == nil else { return }
+                    self.refresh()
+                }
             }
             self.timer = timer
             RunLoop.main.add(timer, forMode: .common)
@@ -74,7 +92,7 @@ final class AutomaticTravelController: ObservableObject {
     }
 
     func pause() {
-        generation = UUID()
+        executionToken = nil
         timer?.invalidate()
         timer = nil
         task?.cancel()
