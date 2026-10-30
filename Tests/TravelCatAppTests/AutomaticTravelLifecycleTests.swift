@@ -10,6 +10,69 @@ import TravelUI
 
 @MainActor
 final class AutomaticTravelLifecycleTests: XCTestCase {
+    func testPostcardPublishesWithExactHostTimestampAcrossJSONRoundTrip() async throws {
+        let generatedAt = Date(timeIntervalSinceReferenceDate: 814003706.03560197)
+        let f = try LifecycleFixture(now: Date(timeIntervalSinceReferenceDate: 814000000))
+        defer { f.clean() }
+        try await f.startOnePostcardTrip()
+        try await f.reach(.exploring)
+        let slotID = try XCTUnwrap(f.plan().nextEventID)
+        // The worker samples this exact host time; persistence happens afterwards.
+        f.clock.set(generatedAt.addingTimeInterval(1))
+        let worker = AutomaticTravelWorker(repository: f.repository, generator: f.generator,
+            clock: { generatedAt }, calendar: { f.calendar })
+
+        let outcome = try await worker.step(settings: .init(mode: .fast))
+
+        XCTAssertNil(outcome.failure)
+        let card = try XCTUnwrap(f.repository.events().last)
+        XCTAssertEqual(card.id, slotID)
+        XCTAssertEqual(card.phase, .postcardReady)
+        XCTAssertEqual(card.postcardStatus, .pendingImage)
+        XCTAssertEqual(card.occurredAt, generatedAt)
+        f.clock.set(outcome.nextCheckAt.addingTimeInterval(1))
+        let imageOutcome = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertNil(imageOutcome.failure)
+        XCTAssertEqual(try f.repository.events().last?.postcardStatus, .ready)
+        XCTAssertEqual(f.generator.imageCalls, 1)
+    }
+
+    func testSupplementPublishesWithExactHostTimestampAcrossJSONRoundTrip() async throws {
+        let generatedAt = Date(timeIntervalSinceReferenceDate: 814003706.03560197)
+        let f = try LifecycleFixture(now: Date(timeIntervalSinceReferenceDate: 814000000))
+        defer { f.clean() }
+        try await f.startOnePostcardTrip()
+        try await f.publishPhase(.transit)
+        try await f.publishPhase(.returning)
+        try await f.publishPhase(.resting)
+        let oldTrip = try XCTUnwrap(f.repository.loadSnapshot().tripID)
+        try await f.publishPhase(.preparing)
+        let snapshot = try f.repository.loadSnapshot()
+        let journalURL = f.root.appendingPathComponent("journal/events.jsonl")
+        let originalJournal = try Data(contentsOf: journalURL)
+        // The worker samples this exact host time; persistence happens afterwards.
+        f.clock.set(generatedAt.addingTimeInterval(1))
+        let worker = AutomaticTravelWorker(repository: f.repository, generator: f.generator,
+            clock: { generatedAt }, calendar: { f.calendar })
+
+        let outcome = try await worker.step(settings: .init(mode: .fast))
+
+        XCTAssertNil(outcome.failure)
+        let backlog = try PostcardBacklogStore(root: f.root, clock: f.clock)
+        let card = try XCTUnwrap(backlog.supplementalEvents().first)
+        XCTAssertEqual(card.tripID, oldTrip)
+        XCTAssertEqual(card.phase, .postcardReady)
+        XCTAssertEqual(card.postcardStatus, .pendingImage)
+        XCTAssertEqual(card.occurredAt, generatedAt)
+        f.clock.set(outcome.nextCheckAt.addingTimeInterval(1))
+        let imageOutcome = try await f.makeWorker().step(settings: .init(mode: .fast))
+        XCTAssertNil(imageOutcome.failure)
+        XCTAssertEqual(try backlog.supplementalEvents().first?.postcardStatus, .ready)
+        XCTAssertEqual(f.generator.imageCalls, 1)
+        XCTAssertEqual(try Data(contentsOf: journalURL), originalJournal)
+        XCTAssertEqual(try f.repository.loadSnapshot(), snapshot)
+    }
+
     func testOnePostcardPlanRetiresLegacyEmptySlotsButPreservesEveryPublishedBinding() throws {
         let trip = UUID(uuidString: "02000000-0000-4000-8000-000000000001")!
         var plan = TripPostcardPlan(tripID: trip)
@@ -663,7 +726,7 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
 @MainActor
 private final class LifecycleFixture {
     let root: URL
-    let clock = LifecycleClock(Date(timeIntervalSince1970: 1_800_000_000))
+    let clock: LifecycleClock
     let repository: TravelRepository
     let generator = LifecycleGenerator()
     var calendar: Calendar {
@@ -672,7 +735,8 @@ private final class LifecycleFixture {
         return value
     }
     lazy var worker = makeWorker()
-    init() throws {
+    init(now: Date = Date(timeIntervalSince1970: 1_800_000_000)) throws {
+        clock = LifecycleClock(now)
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         repository = try TravelRepository(root: root, clock: clock)
     }

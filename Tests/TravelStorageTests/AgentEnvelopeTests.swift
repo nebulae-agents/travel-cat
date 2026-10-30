@@ -114,6 +114,17 @@ final class AgentEnvelopeTests: XCTestCase {
         XCTAssertNil(result.publishEnvelope)
     }
 
+    func testExternalCandidateEvenOneFloatingPointStepInFutureIsRejected() throws {
+        let candidate = try AgentEventEnvelope.decode(candidateData())
+        let now = Date(timeIntervalSinceReferenceDate: candidate.occurredAt.timeIntervalSinceReferenceDate.nextDown)
+        let result = candidate.validationResult(
+            previous: .empty(now: now), mode: .fast, calendar: utcCalendar(), now: now)
+
+        XCTAssertFalse(result.valid)
+        XCTAssertEqual(result.violations, ["occurredAtAfterNow"])
+        XCTAssertNil(result.publishEnvelope)
+    }
+
     func testStrictDecoderRejectsUnknownMissingMalformedAndWhitespaceFields() throws {
         assertStructural(candidateData(extraTopLevel: "\"surprise\":true,"), "unknownKey:surprise")
         assertStructural(candidateData(extraMood: ",\"surprise\":true"), "unknownKey:mood.surprise")
