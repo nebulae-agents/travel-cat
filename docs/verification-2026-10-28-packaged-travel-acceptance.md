@@ -1,5 +1,9 @@
 # Packaged offline travel acceptance — 2026-10-28
 
+## Compatibility revalidation — 2026-10-30
+
+Updated onto main `4c9257c88a5ae3e0dfeb809f1bfbdf7fdc235144` through its predecessor PR without rewriting history. PR #42 supplies exact timestamp coding; the obsolete worker comparison workaround is absent. The focused controller/lifecycle/envelope/date and available package/render selection passed 84 tests with zero failures on this adapted tree. The original records below retain their historical scope; no installed app, real provider or formal travel data was used in this adaptation.
+
 ## Change
 
 The release `TravelCatApp` now has a fixed `--offline-packaged-acceptance` entry handled before SwiftUI constructs the normal application delegate. Acceptance-prefixed malformed or mixed arguments fail with a fixed JSON error. Unrelated ordinary launch arguments retain their previous path. Non-app executables are rejected before synthetic work.

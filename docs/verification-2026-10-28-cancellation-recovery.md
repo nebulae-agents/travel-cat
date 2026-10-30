@@ -1,5 +1,9 @@
 # Automatic travel cancellation recovery — 2026-10-28
 
+## Compatibility revalidation — 2026-10-30
+
+Updated onto main `4c9257c88a5ae3e0dfeb809f1bfbdf7fdc235144` through its predecessor PR without rewriting history. PR #42 supplies exact timestamp coding; the obsolete worker comparison workaround is absent. The focused controller/lifecycle/envelope/date and available package/render selection passed 80 tests with zero failures on this adapted tree. The original records below retain their historical scope; no installed app, real provider or formal travel data was used in this adaptation.
+
 ## Change
 
 An independently thrown `CancellationError` previously returned before releasing the controller task, leaving automatic travel stuck as running. Current executions now clear running state and schedule a retry in 60 seconds. Disabled controllers remain paused. A UUID for each invocation isolates old completions and queued timer callbacks after pause, resume or settings changes.

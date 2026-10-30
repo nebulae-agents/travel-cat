@@ -1,5 +1,9 @@
 # Automatic travel failure diagnostics verification — 2026-10-28
 
+## Compatibility revalidation — 2026-10-30
+
+Updated onto main `4c9257c88a5ae3e0dfeb809f1bfbdf7fdc235144` through its predecessor PR without rewriting history. PR #42 supplies exact timestamp coding; the obsolete worker comparison workaround is absent. The focused controller/lifecycle/envelope/date and available package/render selection passed 71 tests with zero failures on this adapted tree. The original records below retain their historical scope; no installed app, real provider or formal travel data was used in this adaptation.
+
 ## Scope and behavior
 
 `AutomaticTravelFailure` retains its category values and adds optional fixed-enum `code` and `stage` fields. Old failure JSON without those fields continues to decode. Repository diagnostics distinguish lock contention, recovery needs, state conflicts, invalid output, unsafe paths and lock I/O failures. Atomic writer failures are storage/I/O failures. Structural and continuity envelope errors now report invalid output with distinct fixed codes.
