@@ -86,6 +86,18 @@ final class AgentEnvelopeTests: XCTestCase {
         XCTAssertNil(result.publishEnvelope)
     }
 
+    func testGeneratedTimestampRoundTripDoesNotInventPastOrFutureViolation() throws {
+        let base = 814_967_620.0
+        for index in 0..<16 {
+            let now = Date(timeIntervalSinceReferenceDate: base + Double(index) * base.ulp)
+            let timestamp = try JSONDecoder().decode(String.self, from: JSONEncoder.travelCat.encode(now))
+            let candidate = try AgentEventEnvelope.decode(candidateData(occurredAt: timestamp))
+            let result = candidate.validationResult(previous: .empty(now: now), mode: .fast,
+                                                    calendar: utcCalendar(), now: now)
+            XCTAssertTrue(result.valid, "step \(index): \(result.violations)")
+        }
+    }
+
     func testFutureCandidateHasStableViolationAndNoPublishEnvelope() throws {
         let candidate = try AgentEventEnvelope.decode(candidateData())
         let previous = TripSnapshot.empty(now: occurredAt)
