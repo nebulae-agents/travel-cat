@@ -103,11 +103,26 @@ extension AgentWorkbenchModel {
               !nativeBusy.contains(task.instanceID), nativeReconciliationRequests[id] == nil,
               !isDraftSubmitting(.task(id)) else { return "会话操作尚未确认，请稍后再归档。" }
         if let native = task.nativeState {
-            guard native.connection == .connected, let turn = native.turnID,
-                  native.turnStatuses?[turn] == [.completed: "completed", .cancelled: "interrupted", .failed: "failed"][task.status],
-                  native.pendingOperation == nil || [.confirmed, .rejected].contains(native.pendingOperation!.status),
-                  WorkbenchConversationPresentation.processItems(task).allSatisfy(\.hasTerminalEvidence) else {
-                return "请先连接并核对本轮和过程记录的最终状态，再归档。"
+            guard native.connection == .connected else {
+                return "会话连接已断开，请先恢复连接，再归档。"
+            }
+            guard let turn = native.turnID,
+                  native.turnStatuses?[turn] == [.completed: "completed", .cancelled: "interrupted", .failed: "failed"][task.status] else {
+                return "本轮最终状态尚未核实，请在“对话详情”中核对执行记录。"
+            }
+            guard native.pendingOperation == nil || [.confirmed, .rejected].contains(native.pendingOperation!.status) else {
+                return "会话操作尚未确认，请稍后再归档。"
+            }
+            // Archiving only changes visibility. A terminal historical turn plus the
+            // fresh zero-background check below is sufficient; do not rewrite uncertain
+            // process evidence or require an unavailable historical completion event.
+            let unresolved = WorkbenchConversationPresentation.processItems(task).filter { item in
+                if item.hasTerminalEvidence { return false }
+                guard let itemTurn = item.turnID, itemTurn != turn else { return true }
+                return !NativeTaskState.terminalTurnStatuses.contains(native.turnStatuses?[itemTurn] ?? "")
+            }
+            guard unresolved.isEmpty else {
+                return "仍有 \(unresolved.count) 条过程记录的结束状态待核实，请在“对话详情”中核对执行记录。"
             }
             guard let observation = freshNativeBackgroundObservation(id, now: now), observation.count == 0 else {
                 return "请先核对后台命令为 0，再归档；归档不会停止或断开会话。"

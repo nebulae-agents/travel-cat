@@ -235,6 +235,25 @@ final class AgentConversationManagementTests: XCTestCase {
         try model.setConversationArchived(id, archived: true, now: now)
         XCTAssertEqual(runtime.calls, calls)
     }
+    @MainActor func testArchiveAllowsUnresolvedHistoricalItemsOnlyAfterTheirTurnEnds() throws {
+        let (model, runtime, _, _, root, id) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let now = Date()
+        try nativeSafe(model, id, now: now)
+        let item = NativeTimelineItem(id: "old-command", turnID: "old-turn", kind: "commandExecution", title: "cmd", detail: "original", status: "inProgress")
+        model.state.tasks[0].nativeState?.items = [item]
+        XCTAssertNotNil(model.archiveBlockReason(id, now: now))
+        model.state.tasks[0].nativeState?.recordTurnStatus("old-turn", status: "interrupted")
+        XCTAssertNil(model.archiveBlockReason(id, now: now))
+        let calls = runtime.calls
+        try model.setConversationArchived(id, archived: true, now: now)
+        XCTAssertEqual(runtime.calls, calls)
+        let saved = try XCTUnwrap(model.state.tasks[0].nativeState?.items.first)
+        XCTAssertFalse(saved.hasTerminalEvidence)
+        XCTAssertEqual(saved.status, "inProgress")
+        XCTAssertEqual(saved.detail, "original")
+        XCTAssertNotNil(model.archiveBlockReason(id, now: now.addingTimeInterval(11)))
+    }
     @MainActor func testIncomingAttentionReappearsEvenWhenMetadataCannotSave() throws {
         let (model, runtime, audit, _, root, id) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
