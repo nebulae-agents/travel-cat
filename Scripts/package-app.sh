@@ -32,6 +32,8 @@ DIST_DIR="$PROJECT_ROOT/dist"
 APP="$DIST_DIR/Travel Cat.app"
 STAGING="$DIST_DIR/.Travel Cat.app.staging.$$"
 PLIST="$PROJECT_ROOT/packaging/Info.plist"
+APP_ICON="$PROJECT_ROOT/Assets/AppIcon/AgentX.icns"
+[ -f "$APP_ICON" ] && [ ! -L "$APP_ICON" ] || { echo "package-app: application icon is missing or unsafe" >&2; exit 1; }
 SWIFT_WRAPPER="$PROJECT_ROOT/Scripts/travel-cat-swift.sh"
 
 swift_build() {
@@ -144,6 +146,7 @@ install -m 555 "$BUNDLED_LAUNCHER" "$STAGING/Contents/Resources/run-travelcatctl
 install -m 555 "$PINNED_CLI" "$STAGING/Contents/Helpers/travelcatctl"
 install -m 444 "$PROVENANCE" "$STAGING/Contents/Resources/travelcatctl-release.provenance"
 install -m 644 "$PLIST" "$STAGING/Contents/Info.plist"
+install -m 644 "$APP_ICON" "$STAGING/Contents/Resources/AgentX.icns"
 /usr/bin/plutil -insert TravelCatBuildTimestamp -string "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" "$STAGING/Contents/Info.plist"
 if [ -n "$DATA_ROOT" ]; then
     /usr/bin/plutil -insert TravelCatDataRoot -string "$DATA_ROOT" "$STAGING/Contents/Info.plist"

@@ -20,6 +20,7 @@ struct WorkbenchProvider: Codable, Equatable, Sendable {
     var model = ""
     var api: WorkbenchAPI = .responses
     var credentialID = UUID().uuidString
+    var agentXProviderID: String?
     func validate() throws {
         guard let url = URLComponents(string: baseURL), url.scheme == "https",
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil,

@@ -26,16 +26,18 @@ struct TravelServiceConfiguration: Codable, Equatable, Sendable {
     var credentialID: String
     var jsonMode: Bool
     var useImageEdits: Bool
+    var agentXProviderID: String?
 
     init(kind: TravelServiceKind = .codex, baseURL: String = "https://api.openai.com/v1",
          model: String = "", credentialID: String = UUID().uuidString,
-         jsonMode: Bool = true, useImageEdits: Bool = true) {
+         jsonMode: Bool = true, useImageEdits: Bool = true, agentXProviderID: String? = nil) {
         self.kind = kind
         self.baseURL = baseURL
         self.model = model
         self.credentialID = credentialID
         self.jsonMode = jsonMode
         self.useImageEdits = useImageEdits
+        self.agentXProviderID = agentXProviderID
     }
 
     func validatedBaseURL() throws -> URL {
@@ -66,6 +68,10 @@ struct TravelServiceConfiguration: Codable, Equatable, Sendable {
     func validate() throws {
         guard UUID(uuidString: credentialID) != nil else {
             throw TravelServiceConfigurationError.invalidCredentialID
+        }
+        if let agentXProviderID {
+            guard !agentXProviderID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AgentXProviderResolutionError.unavailable }
+            return
         }
         guard kind == .openAICompatible else { return }
         _ = try validatedBaseURL()

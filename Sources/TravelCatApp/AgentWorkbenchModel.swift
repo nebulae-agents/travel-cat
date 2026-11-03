@@ -31,6 +31,7 @@ final class AgentWorkbenchModel: ObservableObject {
     @Published var auditRevision = 0
     @Published private(set) var storageNotice: String?
     var auditStore: (any AgentAuditStoring)?
+    var historicalAuditStore: (any AgentAuditStoring)?
     var nativeDeciding: Set<String> = []
     @Published var nativeRecovering: Set<UUID> = []
     @Published var nativeDetaching: Set<UUID> = []
@@ -97,7 +98,12 @@ final class AgentWorkbenchModel: ObservableObject {
     var isStarting: Bool { startingSubmissionID != nil }
     var attentionCount: Int { permissions.count + modelApprovals.count + state.tasks.filter(\.unread).count }
 
-    init(root: URL, credentials: any TravelServiceCredentialStoring, client: (any AgentRuntimeClient)? = nil, auditStore: (any AgentAuditStoring)? = nil) {
+    let managedRoot: URL?
+    let providerResolver: AgentXProviderResolver?
+
+    init(root: URL, managedRoot: URL? = nil, credentials: any TravelServiceCredentialStoring, client: (any AgentRuntimeClient)? = nil, auditStore: (any AgentAuditStoring)? = nil, providerResolver: AgentXProviderResolver? = nil) {
+        self.managedRoot = managedRoot
+        self.providerResolver = providerResolver
         let contentStore: WorkbenchStore
         var contentError: Error?
         do { contentStore = try WorkbenchStore.encrypted(root: root, credentials: credentials) }
@@ -114,7 +120,10 @@ final class AgentWorkbenchModel: ObservableObject {
             Logger(subsystem: "com.nebulae.travelcat", category: "AgentStorage").error("Content storage open failed: \(reason, privacy: .public)")
         }
         do {
-            self.auditStore = try auditStore ?? AgentAuditStore.open(root: root.appendingPathComponent("audit-v1"), credentials: credentials)
+            if let historical = try historicalAuditRoot() {
+                historicalAuditStore = try AgentAuditStore.open(root: historical, credentials: credentials, readOnly: true)
+            }
+            self.auditStore = try auditStore ?? AgentAuditStore.open(root: resolvedAuditRoot(), credentials: credentials)
         } catch {
             let reason = Self.storageFailureDescription(error)
             auditError = "审计存储无法打开，受控调用已阻止。\n" + reason
@@ -128,7 +137,9 @@ final class AgentWorkbenchModel: ObservableObject {
         Task { [weak self] in self?.applyScheduledRetention() }
     }
 
-    init(root: URL, credentialStores: AgentWorkbenchCredentialStores = .system(), client: (any AgentRuntimeClient)? = nil) {
+    init(root: URL, managedRoot: URL? = nil, credentialStores: AgentWorkbenchCredentialStores = .system(), client: (any AgentRuntimeClient)? = nil, providerResolver: AgentXProviderResolver? = nil) {
+        self.managedRoot = managedRoot
+        self.providerResolver = providerResolver
         store = WorkbenchStore(root: root, keyData: Data())
         state = WorkbenchSnapshot()
         synchronousCredentials = nil
@@ -185,12 +196,34 @@ final class AgentWorkbenchModel: ObservableObject {
         if let selection { openConversation(selection) } else { selectedTaskID = nil }
     }
 
+    /// Resolve immediately before submission while retaining the gateway's narrower
+    /// HTTPS and route restrictions. No catalog address is blindly trusted here.
+    func resolveModelProvider(_ reference: WorkbenchProvider) throws -> (configuration: WorkbenchProvider, unified: AgentXProvider?) {
+        guard reference.agentXProviderID != nil else {
+            try reference.validate()
+            return (reference, nil)
+        }
+        guard let providerResolver else { throw AgentXProviderResolutionError.unavailable }
+        let resolved = try providerResolver.resolve(
+            TravelServiceConfiguration(model: reference.model, agentXProviderID: reference.agentXProviderID), category: .chat)
+        var provider = reference
+        provider.baseURL = resolved.provider.baseURL
+        provider.model = resolved.model
+        switch resolved.provider.serviceProtocol {
+        case .openAICompatible: provider.api = .chatCompletions
+        case .responses: provider.api = .responses
+        case .anthropicMessages: provider.api = .messages
+        }
+        try provider.validate()
+        return (provider, resolved.provider)
+    }
+
     func save(instance: WorkbenchInstance, newKey: String) throws {
         guard let credentials = synchronousCredentials else { throw WorkbenchFailure("请使用异步保存，安全存储未确认。") }
         guard isStorageReady else { throw WorkbenchFailure("原数据读取失败，禁止覆盖。") }
         guard !savingInstance else { throw WorkbenchFailure("正在保存 Agent，请稍候。") }
         let next = try snapshotSaving(instance)
-        if instance.native == nil && !newKey.isEmpty { try credentials.save(newKey, id: instance.provider.credentialID) }
+        if instance.native == nil && instance.provider.agentXProviderID == nil && !newKey.isEmpty { try credentials.save(newKey, id: instance.provider.credentialID) }
         try store.save(next); state = next
     }
     func remove(instanceID: UUID) {
@@ -210,7 +243,7 @@ final class AgentWorkbenchModel: ObservableObject {
                 if let remaining = state.instances.first { openInstance(remaining.id) }
                 else { preferredInstanceID = nil; selectedTaskID = nil }
             }
-            if instance.native == nil { try credentials.save(nil, id: instance.provider.credentialID) }
+            if instance.native == nil && instance.provider.agentXProviderID == nil { try credentials.save(nil, id: instance.provider.credentialID) }
         } catch { self.error = "删除实例或清理凭据失败，请重试。" }
     }
     func setPythonPath(_ path: String) {
@@ -357,8 +390,17 @@ final class AgentWorkbenchModel: ObservableObject {
                 try await startNative(instance: instance, text: text, instruction: instruction, files: files, parentTaskID: parentTaskID, onStarted: onStarted)
                 return
             }
-            try instance.validate(); try instance.provider.validate()
-            guard let key = try await readModelCredential(id: instance.provider.credentialID), !key.isEmpty else {
+            try instance.validate()
+            let resolved = try resolveModelProvider(instance.provider)
+            let provider = resolved.configuration
+            let selectedKey: String?
+            if let unified = resolved.unified {
+                guard let providerResolver else { throw AgentXProviderResolutionError.unavailable }
+                selectedKey = try providerResolver.secret(for: unified)
+            } else {
+                selectedKey = try await readModelCredential(id: provider.credentialID)
+            }
+            guard let key = selectedKey, !key.isEmpty else {
                 throw WorkbenchFailure("该实例尚未配置模型凭据，请编辑实例。")
             }
             try Task.checkCancellation()
@@ -377,7 +419,7 @@ final class AgentWorkbenchModel: ObservableObject {
             preferredInstanceID = instanceID; selectedTaskID = task.id; liveTasks.insert(task.id)
             let params: [String: Any] = ["taskId": task.id.uuidString,
                 "instance": ["name": instance.name, "image": instance.image, "command": instance.command, "host": instance.host, "dockerContext": instance.dockerContext],
-                "provider": ["baseURL": instance.provider.baseURL, "apiKey": key, "model": instance.provider.model, "api": instance.provider.api.rawValue], "files": files, "modelPolicy": modelPolicy]
+                "provider": ["baseURL": provider.baseURL, "apiKey": key, "model": provider.model, "api": provider.api.rawValue], "files": files, "modelPolicy": modelPolicy]
             do {
                 let result = try await client.request("start", params, timeout: 180)
                 guard liveTasks.contains(task.id),
@@ -574,7 +616,8 @@ final class AgentWorkbenchModel: ObservableObject {
     func auditRecords(taskID: UUID) -> [[String: Any]] {
         do {
             guard let auditStore else { throw WorkbenchFailure("审计存储不可用。") }
-            return try auditStore.records(taskID: taskID)
+            let historical = try historicalAuditStore?.records(taskID: taskID) ?? []
+            return historical + (try auditStore.records(taskID: taskID))
         } catch { auditError = "审计记录无法读取或验证，受控调用已阻止。"; return [] }
     }
 

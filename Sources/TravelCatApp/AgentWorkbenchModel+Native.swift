@@ -3,8 +3,8 @@ import Foundation
 @MainActor
 extension AgentWorkbenchModel {
     func connectNative(instance: WorkbenchInstance) async throws -> NativeConnectionInfo {
-        guard let configuration = instance.native, isStorageReady else { throw WorkbenchFailure("原生实例配置无效。") }
-        try configuration.validate(requireModel: false)
+        guard isStorageReady else { throw WorkbenchFailure("原生实例配置无效。") }
+        let configuration = try nativeConfiguration(instance: instance, requireModel: false)
         guard !nativeBusy.contains(instance.id) else { throw WorkbenchFailure("正在连接，请稍候。") }
         nativeConnectionGenerations[instance.id] = UUID()
         for task in state.tasks where task.instanceID == instance.id { invalidateNativeBackgroundStatus(task.id) }

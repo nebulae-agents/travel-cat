@@ -81,12 +81,13 @@ class CodexNativeController:
         self.operations = threading.RLock()
         self.background_status_slot = threading.Lock()
         self.closed = threading.Event()
+        self.offline_sealed = False
         self.sweeper = threading.Thread(target=self._sweep, daemon=True)
         self.sweeper.start()
 
     def handle(self, method, params):
         if not isinstance(params, dict): raise NativeFailure('invalid native parameters')
-        handlers = {'native_connect': self._connect, 'native_login': self._login,
+        handlers = {'native_quiesce': self._quiesce, 'native_connect': self._connect, 'native_login': self._login,
                     'native_login_cancel': self._login_cancel, 'native_start': self._start,
                     'native_prompt': self._prompt, 'native_resume': self._resume,
                     'native_permission': self._permission, 'native_cancel': self._cancel,
@@ -99,7 +100,7 @@ class CodexNativeController:
         if method in ('native_artifacts','native_export','native_artifact_changes'):
             return self._bounded_artifact_read(params, handlers[method])
         with self.operations:
-            if self.closed.is_set(): raise NativeFailure('native controller closed')
+            if self.closed.is_set() or self.offline_sealed: raise NativeFailure('native controller closed')
             return handlers[method](params)
 
     def _emit(self, instance, method, params, task_id=None):
@@ -712,6 +713,21 @@ class CodexNativeController:
                             if decision: instance['transport'].respond(pending['serverId'], {'decision': decision})
                             else: instance['transport'].respond(pending['serverId'], error={'code': -32000, 'message': 'Native approval expired'})
                         except NativeFailure: pass
+
+    def _quiesce(self, params):
+        if params: raise NativeFailure('quiesce does not accept caller authority')
+        self.offline_sealed = True
+        for task in list(self.tasks.values()):
+            if task.get('turnId'):
+                self._cancel({'taskId': task['taskId'], 'turnId': task['turnId']})
+            if task.get('uncertain'): raise NativeFailure('native task terminal state is uncertain')
+            instance = self.instances[task['instanceId']]
+            if self._list_background(instance, task['threadId']):
+                raise NativeFailure('native background commands remain active')
+        for instance in self.instances.values():
+            if instance.get('pendingStart') or instance.get('loginId'): raise NativeFailure('native startup or login pending')
+            _transport_module.stop_managed_daemon(instance['config'])
+        return {'stopped': True}
 
     def close(self):
         if self.closed.is_set(): return

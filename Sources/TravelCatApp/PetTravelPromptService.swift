@@ -221,6 +221,35 @@ final class PetTravelPromptService {
         }
     }
 
+    /// An explicit inbox action is a delivery channel even without a pet or OS notifications.
+    /// Quiet hours suppress unsolicited delivery, not a user opening their own reminder.
+    @discardableResult
+    func openPendingFromInbox() -> Bool {
+        guard storageError == nil else { stateChanged(); return false }
+        do {
+            try appendNext(policy: NotificationPolicy(quietStart: 0, quietEnd: 0), now: clock())
+            guard let next = queue.first else { return false }
+            // Supersede a pending notification callback so it cannot acknowledge twice.
+            let manualAttempt = UUID()
+            attemptID = manualAttempt
+            retryAfterAttemptID = nil
+            isDelivering = true
+            cancelUnavailableRetry()
+            routeHandler(next.route)
+            let acknowledged = acknowledgeSuccessfulDelivery(next, attemptID: manualAttempt)
+            isDelivering = false
+            attemptID = nil
+            stateChanged()
+            return acknowledged
+        } catch let error as PetTravelPromptCoordinatorError {
+            storageError = error
+            stateChanged()
+            return false
+        } catch {
+            preconditionFailure("unexpected prompt coordinator error: \(error)")
+        }
+    }
+
     func ingestCurrent(settings: TravelSettings, now: Date = Date()) {
         updateContext(settings: settings, now: now)
         do {

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "title": "写作间 · 示例应用",
+  "modules": [{
+    "id": "draft", "title": "起草", "kind": "form",
+    "fields": [
+      {"id": "topic", "label": "主题", "multiline": false},
+      {"id": "requirements", "label": "资料与要求", "multiline": true}
+    ],
+    "submit": {"title": "提交给所选实例", "prompt": "请根据资料起草文章。主题：{{topic}}\n资料与要求：\n{{requirements}}"}
+  }]
+}

@@ -10,12 +10,14 @@
 	<string>com.nebulae.travelcat</string>
 	<key>CFBundleName</key>
 	<string>Travel Cat</string>
+	<key>CFBundleIconFile</key>
+	<string>AgentX.icns</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.4.1</string>
 	<key>CFBundleVersion</key>
-	<string>42</string>
+	<string>47</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>

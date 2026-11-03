@@ -60,13 +60,16 @@ final class StandalonePetController: NSWindowController, NSWindowDelegate, NSMen
     private let model: AppModel
     private let scene = StandalonePetSceneState()
     private let routes: [() -> Void]
+    private let disablePet: (() -> Void)?
 
     init(model: AppModel, openJourney: @escaping () -> Void, openPostcard: @escaping () -> Void,
          openAlbum: @escaping () -> Void, openSupplies: @escaping () -> Void,
-         positionStore: WindowPositionStore = WindowPositionStore(), openHouse: (() -> Void)? = nil) {
+         positionStore: WindowPositionStore = WindowPositionStore(), openHouse: (() -> Void)? = nil,
+         openManager: (() -> Void)? = nil, disablePet: (() -> Void)? = nil) {
         self.positionStore = positionStore
         self.model = model
-        routes = [openJourney, openPostcard, openAlbum, openSupplies]
+        routes = [openJourney, openPostcard, openAlbum, openSupplies] + (openManager.map { [$0] } ?? [])
+        self.disablePet = disablePet
         let panel = StandalonePetPanel(contentRect: CGRect(origin: .zero, size: PetWindowController.compactSize),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false
@@ -85,8 +88,9 @@ final class StandalonePetController: NSWindowController, NSWindowDelegate, NSMen
         panel.contentView = hosting
         super.init(window: panel)
         panel.delegate = self
-        panel.primaryAction = openHouse ?? openJourney
-        for (index, title) in ["当前旅程", "最新明信片", "旅行册", "用品"].enumerated() {
+        panel.primaryAction = openManager ?? openHouse ?? openJourney
+        let titles = ["当前旅程", "最新明信片", "旅行册", "用品"] + (openManager == nil ? [] : ["AgentX 管理平台"])
+        for (index, title) in titles.enumerated() {
             let item = NSMenuItem(title: title, action: #selector(performRoute(_:)), keyEquivalent: "")
             item.tag = index
             item.target = self
@@ -127,7 +131,9 @@ final class StandalonePetController: NSWindowController, NSWindowDelegate, NSMen
         scene.isActive = window?.isVisible == true
     }
     func hide() { scene.isActive = false; window?.orderOut(nil) }
-    @objc private func hidePet(_ sender: NSMenuItem) { hide() }
+    @objc private func hidePet(_ sender: NSMenuItem) {
+        if let disablePet { disablePet() } else { hide() }
+    }
     @objc private func performRoute(_ sender: NSMenuItem) {
         guard routes.indices.contains(sender.tag) else { return }
         routes[sender.tag]()

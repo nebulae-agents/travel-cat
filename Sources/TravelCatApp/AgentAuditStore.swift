@@ -25,6 +25,7 @@ final class AgentAuditStore: AgentAuditStoring {
     private let root: URL
     private let key: SymmetricKey
     private let lock = NSLock()
+    private let readOnly: Bool
     private let maximumBytes: Int
     private let maximumRecords: Int
     private struct Entry: Codable {
@@ -51,24 +52,28 @@ final class AgentAuditStore: AgentAuditStoring {
         var checkpoint: Checkpoint?
     }
 
-    init(root: URL, keyData: Data, recordLimit: Int = 4096, byteLimit: Int = 64 * 1024 * 1024) throws {
+    init(root: URL, keyData: Data, recordLimit: Int = 4096, byteLimit: Int = 64 * 1024 * 1024, readOnly: Bool = false) throws {
         guard recordLimit > 32, byteLimit > 512 * 1024 else { throw WorkbenchFailure("审计容量配置无效。") }
         maximumRecords = recordLimit; maximumBytes = byteLimit
         guard keyData.count == 32 else { throw WorkbenchFailure("审计密钥无效，已停止受控调用。") }
-        self.root = root; self.key = SymmetricKey(data: keyData)
+        self.root = root; self.key = SymmetricKey(data: keyData); self.readOnly = readOnly
         if FileManager.default.fileExists(atPath: root.path) {
             guard try root.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey]).isSymbolicLink != true else {
                 throw WorkbenchFailure("审计目录不能是符号链接。")
             }
         }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        if readOnly {
+            guard try root.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw WorkbenchFailure("历史审计目录不存在。") }
+        } else {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        }
         _ = try verify()
-        try cleanupRetired()
+        if !readOnly { try cleanupRetired() }
     }
 
     @MainActor
-    static func open(root: URL, credentials: any AsyncTravelServiceCredentialStoring) async throws -> AgentAuditStore {
+    static func open(root: URL, credentials: any AsyncTravelServiceCredentialStoring, readOnly: Bool = false) async throws -> AgentAuditStore {
         let id = "audit-journal-v1"
         let encoded = try await credentials.read(id: id)
         try Task.checkCancellation()
@@ -77,6 +82,7 @@ final class AgentAuditStore: AgentAuditStoring {
             guard let decoded = Data(base64Encoded: encoded), decoded.count == 32 else { throw WorkbenchFailure("审计密钥无效，原密钥未替换。") }
             data = decoded
         } else {
+            guard !readOnly else { throw WorkbenchFailure("历史审计密钥缺失，未创建替代密钥。") }
             let existing: [URL]
             do { existing = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) }
             catch let error as CocoaError where error.code == .fileReadNoSuchFile { existing = [] }
@@ -89,17 +95,18 @@ final class AgentAuditStore: AgentAuditStoring {
             guard try await credentials.read(id: id) == data.base64EncodedString() else { throw WorkbenchFailure("审计密钥保存未确认，禁止创建日志。") }
             try Task.checkCancellation()
         }
-        return try AgentAuditStore(root: root, keyData: data)
+        return try AgentAuditStore(root: root, keyData: data, readOnly: readOnly)
     }
 
     @MainActor
-    static func open(root: URL, credentials: any TravelServiceCredentialStoring) throws -> AgentAuditStore {
+    static func open(root: URL, credentials: any TravelServiceCredentialStoring, readOnly: Bool = false) throws -> AgentAuditStore {
         let id = "audit-journal-v1"
         let data: Data
         if let encoded = try credentials.read(id: id) {
             guard let decoded = Data(base64Encoded: encoded), decoded.count == 32 else { throw WorkbenchFailure("审计密钥无效，原密钥未替换。") }
             data = decoded
         } else {
+            guard !readOnly else { throw WorkbenchFailure("历史审计密钥缺失，未创建替代密钥。") }
             let existing: [URL]
             do { existing = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) }
             catch let error as CocoaError where error.code == .fileReadNoSuchFile { existing = [] }
@@ -109,10 +116,11 @@ final class AgentAuditStore: AgentAuditStoring {
             try credentials.save(data.base64EncodedString(), id: id)
             guard try credentials.read(id: id) == data.base64EncodedString() else { throw WorkbenchFailure("审计密钥保存未确认，禁止创建日志。") }
         }
-        return try AgentAuditStore(root: root, keyData: data)
+        return try AgentAuditStore(root: root, keyData: data, readOnly: readOnly)
     }
 
     func append(record: [String: Any]) throws {
+        guard !readOnly else { throw WorkbenchFailure("历史审计为只读，禁止写入。") }
         lock.lock(); defer { lock.unlock() }
         guard let eventID = record["eventId"] as? String, UUID(uuidString: eventID) != nil,
               let taskID = record["taskId"] as? String, UUID(uuidString: taskID) != nil,
@@ -229,6 +237,7 @@ final class AgentAuditStore: AgentAuditStoring {
         return .init(removableCount: removable(journal, before: before), head: journal.lastHash)
     }
     func prune(before: Date, expectedHead: String) throws -> Int {
+        guard !readOnly else { throw WorkbenchFailure("历史审计为只读，禁止清理。") }
         lock.lock(); defer { lock.unlock() }
         let journal = try verify()
         guard journal.lastHash == expectedHead else { throw WorkbenchFailure("日志已变化，请重新预览清理范围。") }

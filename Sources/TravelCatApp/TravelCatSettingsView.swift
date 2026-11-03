@@ -146,7 +146,7 @@ final class TravelCatEnvironment: ObservableObject {
     @Published var latestCodexDiagnostic: CodexGenerationDiagnostic?
 
     func refreshCodexDiagnostic() {
-        latestCodexDiagnostic = CodexGenerationDiagnosticStore.applicationStore().latest()
+        latestCodexDiagnostic = CodexGenerationDiagnosticStore(fileURL: repository.root.appendingPathComponent("diagnostics/codex-latest.json")).latest()
     }
 
     func recoverPostcardBacklog() {

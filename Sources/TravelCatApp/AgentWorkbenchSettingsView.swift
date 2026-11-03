@@ -72,7 +72,7 @@ struct AgentWorkbenchSettingsView: View {
         }
         .sheet(item: $editing) { instance in
             let adding = !model.state.instances.contains(where: { $0.id == instance.id })
-            AgentInstanceEditor(instance: instance) { next, key in
+            AgentInstanceEditor(instance: instance, providerResolver: model.providerResolver) { next, key in
                 try await model.saveInstance(instance: next, newKey: key)
                 if adding { didCreate(next.id); dismiss() }
             }

@@ -97,6 +97,24 @@ class NativeControllerTests(unittest.TestCase):
         args = {'taskId': 'task-1', 'requestId': p['requestId'], 'requestHash': p['requestHash'], 'optionId': 'accept'}
         args.update(overrides)
         return self.controller.handle('native_permission', args)
+    def test_offline_quiesce_interrupts_before_stopping_daemon(self):
+        self.prompt()
+        with patch.object(native._transport_module, 'stop_managed_daemon') as stop:
+            result = self.controller.handle('native_quiesce', {})
+            self.assertEqual(result, {'stopped': True})
+            self.assertIsNone(self.controller.tasks['task-1']['turnId'])
+            self.assertTrue(any(method == 'turn/interrupt' for method, _ in self.transport.calls))
+            stop.assert_called_once_with(self.controller.instances[self.instance]["config"])
+            with self.assertRaises(native.NativeFailure):
+                self.controller.handle('native_connect', self.params)
+
+    def test_offline_quiesce_never_stops_uncertain_task_daemon(self):
+        self.start()
+        self.controller.tasks['task-1']['uncertain'] = True
+        with patch.object(native._transport_module, 'stop_managed_daemon') as stop:
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_quiesce', {})
+            stop.assert_not_called()
+
     def test_account_sanitized_and_model_catalog_returned(self):
         self.assertEqual(self.connected['account'], {'authenticated': True, 'authMode': 'chatgpt', 'planType': 'plus'})
         self.assertNotIn('email', json.dumps(self.connected))
