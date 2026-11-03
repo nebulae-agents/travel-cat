@@ -52,7 +52,7 @@ def _read_private(path, maximum=65536):
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > maximum:
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_size > maximum:
                 raise NativeFailure('invalid native state file')
             with os.fdopen(fd, 'rb', closefd=False) as stream: return stream.read(maximum + 1)
         finally: os.close(fd)
@@ -121,11 +121,143 @@ def _socket_info(path):
     return info
 
 
+def _socket_directory(profile):
+    digest = hashlib.sha256(str(profile).encode()).hexdigest()[:24]
+    return Path('/private/tmp' if Path('/private/tmp').is_dir() else '/tmp') / ('tc-native-' + str(os.getuid()) + '-' + digest)
+
+
+def _managed_profile_root(profile):
+    profile = Path(profile)
+    if (not profile.is_absolute() or str(profile.resolve()) != str(profile)
+            or tuple(profile.parts[-6:-1]) != ('apps', 'workbench', 'state', 'runtime', 'native-runtime')):
+        raise NativeFailure('native relocation requires an exact managed profile path')
+    try:
+        if str(uuid.UUID(profile.name)) != profile.name.lower(): raise ValueError()
+    except ValueError:
+        raise NativeFailure('native relocation profile identity is invalid') from None
+    return profile.parents[5]
+
+
+def _confirmed_absent(pid):
+    # ps failure/empty output alone is not proof that an old writer has exited.
+    if _process_identity(pid) is not None: return False
+    try: os.kill(pid, 0)
+    except ProcessLookupError: return True
+    except OSError: return False
+    return False
+
+
+def _rebind_relocated_profile(config, socket_dir):
+    """Rebuild generated bindings only after host-authorized, offline root relocation.
+
+    Login/session files and the source profile are untouched. A moved profile is not
+    authority to change workspace, executable, permissions, or adopt a live daemon.
+    Called under the destination profile's startup lock, before any daemon launch.
+    """
+    profile = Path(config['profileRoot'])
+    receipt_file, config_file = profile / 'travelcat-daemon.json', profile / 'config.toml'
+    if not receipt_file.exists() and not receipt_file.is_symlink(): return False
+    raw_receipt = _read_private(receipt_file)
+    try: receipt = json.loads(raw_receipt)
+    except (ValueError, UnicodeError): raise NativeFailure('invalid native daemon receipt') from None
+    if not isinstance(receipt, dict): raise NativeFailure('invalid native daemon receipt')
+    if receipt.get('profileRoot') == str(profile): return False
+    try:
+        new_root = _managed_profile_root(profile)
+        old_profile = Path(receipt['profileRoot'])
+        old_root = _managed_profile_root(old_profile)
+        if profile.relative_to(new_root) != old_profile.relative_to(old_root) or new_root == old_root:
+            raise ValueError()
+        marker_path = new_root / 'manager/root-relocation.json'
+        if marker_path.parent.resolve() != marker_path.parent: raise ValueError()
+        marker = json.loads(_read_private(marker_path))
+        if not isinstance(marker, dict) or marker.get('version') != 1 or marker.get('destinationRoot') != str(new_root): raise ValueError()
+        sources = marker.get('sourceRoots', [marker.get('sourceRoot')])
+        if (not isinstance(sources, list) or marker.get('sourceRoot') not in sources
+                or not sources or len(sources) > 128
+                or any(not isinstance(item, str) or not Path(item).is_absolute() or str(Path(item).resolve()) != item or item == '/' for item in sources)
+                or str(old_root) not in sources): raise ValueError()
+        old_workspace = Path(receipt['workspace'])
+        relative_workspace = old_workspace.relative_to(old_root)
+        if tuple(relative_workspace.parts[:3]) != ('apps', 'workbench', 'workspace') or '..' in relative_workspace.parts: raise ValueError()
+        if str(new_root / relative_workspace) != config['workspace'] or receipt.get('executable') != config['executable']: raise ValueError()
+        old_socket_dir = _socket_directory(old_profile)
+        if receipt.get('socket') != str(old_socket_dir / 'server.sock') or Path(socket_dir) != _socket_directory(profile): raise ValueError()
+        identity = receipt.get('processIdentity')
+        if not isinstance(identity, str) or 'app-server' not in identity or receipt['socket'] not in identity: raise ValueError()
+        old_config = {'profileRoot': str(old_profile), 'workspace': str(old_workspace), 'executable': receipt['executable']}
+        old_content = _config_text(old_config, old_socket_dir)
+        new_content = _config_text(config, socket_dir)
+        if receipt.get('configHash') != hashlib.sha256(old_content).hexdigest(): raise ValueError()
+        current_content = _read_private(config_file)
+        # The new content plus old receipt is a recoverable interruption between writes.
+        if current_content not in (old_content, new_content): raise ValueError()
+    except (KeyError, TypeError, ValueError, OSError):
+        raise NativeFailure('native root relocation authorization or generated configuration mismatch') from None
+    if not _confirmed_absent(receipt.get('pid')):
+        raise NativeFailure('old native daemon has not been proven stopped; relocation refused')
+    backups = profile / 'travelcat-relocations'
+    _private_directory(backups)
+    name = hashlib.sha256(raw_receipt).hexdigest()
+    for suffix, data in (('.json', raw_receipt), ('.toml', old_content)):
+        backup = backups / (name + suffix)
+        if backup.exists() or backup.is_symlink():
+            if _read_private(backup) != data: raise NativeFailure('native relocation backup conflict')
+        else: _write_new(backup, data)
+    if (not _confirmed_absent(receipt.get('pid')) or _read_private(receipt_file) != raw_receipt
+            or _read_private(config_file) != current_content):
+        raise NativeFailure('native profile changed while preparing relocation')
+    temporary = profile / ('.travelcat-config-' + uuid.uuid4().hex + '.tmp')
+    try:
+        _write_new(temporary, new_content)
+        os.replace(temporary, config_file)
+        if _read_private(receipt_file) != raw_receipt: raise NativeFailure('native receipt changed during relocation')
+        receipt_file.unlink()
+        directory = os.open(profile, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        if temporary.exists(): temporary.unlink()
+    return True
+
+
+def stop_managed_daemon(config):
+    """Only a host-validated quiescent instance may call this identity-bound stop."""
+    profile = Path(config['profileRoot'])
+    _managed_profile_root(profile)
+    receipt_file = profile / 'travelcat-daemon.json'
+    if not receipt_file.exists(): return
+    raw = _read_private(receipt_file)
+    try:
+        receipt = json.loads(raw)
+        directory = _socket_directory(profile)
+        expected = {k: config[k] for k in ('profileRoot', 'workspace', 'executable')}
+        expected.update(socket=str(directory / 'server.sock'), configHash=hashlib.sha256(_config_text(config, directory)).hexdigest())
+        if any(receipt.get(k) != v for k, v in expected.items()): raise ValueError()
+        if hashlib.sha256(_read_private(profile / 'config.toml')).hexdigest() != receipt['configHash']: raise ValueError()
+        pid, identity = receipt['pid'], receipt['processIdentity']
+        if not isinstance(identity, str) or 'app-server' not in identity or receipt['socket'] not in identity: raise ValueError()
+        if _confirmed_absent(pid): return
+        if _process_identity(pid) != identity or _socket_info(Path(receipt['socket'])).st_ino != receipt['socketInode']: raise ValueError()
+        if _read_private(receipt_file) != raw or _process_identity(pid) != identity: raise ValueError()
+        # Reap only the exact Popen child retained by this transport. A zombie still
+        # satisfies kill(pid, 0), so absence cannot precede parent-side collection.
+        owned = next((child for child in _DAEMONS if child.pid == pid and child.returncode is None), None)
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 10
+        while True:
+            if owned is not None: owned.poll()
+            if _confirmed_absent(pid): break
+            if time.monotonic() >= deadline: raise NativeFailure('native daemon exit unconfirmed')
+            time.sleep(.05)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise NativeFailure('native daemon stop identity mismatch') from None
+
+
 def _ensure_daemon(config):
     profile = Path(config['profileRoot'])
     _private_directory(profile)
-    digest = hashlib.sha256(str(profile).encode()).hexdigest()[:24]
-    socket_dir = Path('/private/tmp' if Path('/private/tmp').is_dir() else '/tmp') / ('tc-native-' + str(os.getuid()) + '-' + digest)
+    socket_dir = _socket_directory(profile)
     _private_directory(socket_dir)
     sock = socket_dir / 'server.sock'
     lock_path = profile / 'travelcat-daemon.lock'
@@ -141,6 +273,7 @@ def _ensure_daemon(config):
             except BlockingIOError:
                 if time.monotonic() >= deadline: raise NativeFailure('native daemon startup lock timed out')
                 time.sleep(0.05)
+        _rebind_relocated_profile(config, socket_dir)
         content = _config_text(config, socket_dir)
         config_file = profile / 'config.toml'
         if config_file.exists() or config_file.is_symlink():

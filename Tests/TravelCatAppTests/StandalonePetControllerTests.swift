@@ -7,6 +7,18 @@ import TravelUI
 
 @MainActor
 final class StandalonePetControllerTests: XCTestCase {
+    func testManagerEntryAndPersistentHideCallbackAreIndependentOfTravelRoutes() {
+        let model = AppModel(snapshot: .empty(now: Date()))
+        var opened = 0
+        var hidden = 0
+        let controller = StandalonePetController(model: model, openJourney: {}, openPostcard: {}, openAlbum: {}, openSupplies: {},
+            openManager: { opened += 1 }, disablePet: { hidden += 1 })
+        XCTAssertEqual(controller.contextMenu.items[4].title, "AgentX 管理平台")
+        controller.contextMenu.performActionForItem(at: 4)
+        controller.contextMenu.performActionForItem(at: 6)
+        XCTAssertEqual(opened, 1)
+        XCTAssertEqual(hidden, 1)
+    }
     func testOnlyTravelCatAppBundlesCanPresentDesktopPet() {
         XCTAssertTrue(StandalonePetController.permitsDesktopPresentation(bundleURL: URL(fileURLWithPath: "/Applications/Travel Cat.app"), identifier: "com.nebulae.travelcat"))
         XCTAssertFalse(StandalonePetController.permitsDesktopPresentation(bundleURL: URL(fileURLWithPath: "/tmp/TravelCatPackageTests.xctest"), identifier: "com.apple.dt.xctest.tool"))

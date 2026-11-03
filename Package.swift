@@ -11,6 +11,7 @@ let package = Package(
         .executable(name: "TravelCatApp", targets: ["TravelCatApp"]),
         .executable(name: "travelcatctl", targets: ["TravelCatCLI"]),
     ],
+    dependencies: [.package(url: "https://github.com/jpsim/Yams.git", exact: "6.2.2"), .package(path: "Packages/AgentXAppSDK")],
     targets: [
         .target(name: "TravelCore"),
         .target(
@@ -25,7 +26,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TravelCatApp",
-            dependencies: ["TravelCore", "TravelStorage", "TravelUI"],
+            dependencies: ["TravelCore", "TravelStorage", "TravelUI", .product(name: "Yams", package: "Yams"), .product(name: "AgentXAppSDK", package: "AgentXAppSDK")],
             resources: [.copy("Resources/Generation"), .copy("Resources/AgentRuntime")]
         ),
         .executableTarget(
@@ -37,7 +38,7 @@ let package = Package(
         .testTarget(name: "TravelUITests", dependencies: ["TravelUI"]),
         .testTarget(
             name: "TravelCatAppTests",
-            dependencies: ["TravelCatApp", "TravelUI", "TravelCore", "TravelStorage"]
+            dependencies: ["TravelCatApp", "TravelUI", "TravelCore", "TravelStorage", .product(name: "AgentXAppSDK", package: "AgentXAppSDK")]
         ),
     ]
 )

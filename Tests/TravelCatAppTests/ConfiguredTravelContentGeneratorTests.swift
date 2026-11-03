@@ -112,6 +112,40 @@ private final class ConfiguredClock: TravelClock, @unchecked Sendable {
         let second = try await generator.narrative(for: eventRequest)
         XCTAssertTrue(second.summary.contains("湖岸")); XCTAssertEqual(codex.calls, 1); XCTAssertEqual(credentials.reads, 1)
     }
+    func testUnifiedNarrativeUsesResponsesAndRejectsUnsupportedImageBeforeKeyRead() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var state = AgentXState()
+        state.providers = [.init(id: "shared", name: "Shared", baseURL: "https://unified.example/v1", models: ["text"], serviceProtocol: .responses)]
+        var config = configuration()
+        config.narrative.agentXProviderID = "shared"
+        config.narrative.model = "text"
+        config.image.agentXProviderID = "shared"
+        config.image.model = "text"
+        let credentials = ConfiguredCredentials(), codex = ConfiguredCodex()
+        let resolver = AgentXProviderResolver(state: { state }, credentials: credentials)
+        let catalog = AgentXProviderCatalog(transport: { request in
+            XCTAssertEqual(request.url?.path, "/v1/responses")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-key")
+            let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+            XCTAssertEqual(body["model"] as? String, "text")
+            let input = body["input"] as! [[String: String]]
+            let traditional = try JSONSerialization.data(withJSONObject: ["messages": input])
+            let reply = try JSONSerialization.jsonObject(with: Self.reply(to: traditional, ordinal: 1)) as! [String: Any]
+            let content = (reply["choices"] as! [[String: [String: String]]])[0]["message"]!["content"]!
+            return (try JSONSerialization.data(withJSONObject: ["output": [["type": "message", "content": [["type": "output_text", "text": content]]]]]), 200)
+        })
+        let generator = ConfiguredTravelContentGenerator(configuration: { config }, credentials: credentials, codex: codex,
+            providerResolver: resolver, catalog: catalog)
+        let output = try await generator.narrative(for: request(root: root))
+        XCTAssertTrue(output.summary.contains("湖岸"))
+        XCTAssertEqual(codex.calls, 0)
+        XCTAssertEqual(credentials.reads, 1)
+        do { _ = try await generator.generateImage(service: config.image, scene: "test"); XCTFail("Unsupported image protocol") }
+        catch { XCTAssertTrue(error is AgentXProviderResolutionError) }
+        XCTAssertEqual(credentials.reads, 1)
+    }
+
     nonisolated private static func reply(to body: Data, ordinal: Int) throws -> Data {
         let object = try JSONSerialization.jsonObject(with: body) as! [String: Any]
         let prompt = (object["messages"] as! [[String: String]])[0]["content"]!

@@ -86,8 +86,33 @@ struct GenerationSetupView: View {
 
     private func serviceSection(_ title: String, service: Binding<TravelServiceConfiguration>,
                                 secret: Binding<String>, noKey: Binding<Bool>, isImage: Bool) -> some View {
-        GroupBox {
+        let providers = (try? controller.providerResolver?.providers(category: isImage ? .image : .chat)) ?? []
+        return GroupBox {
             VStack(alignment: .leading, spacing: 9) {
+                Picker("配置来源", selection: Binding(get: { service.wrappedValue.agentXProviderID ?? "" }, set: { id in
+                    service.wrappedValue.agentXProviderID = id.isEmpty ? nil : id
+                    if !id.isEmpty { service.wrappedValue.model = "" }
+                    secret.wrappedValue = ""; noKey.wrappedValue = false
+                })) {
+                    Text("独立配置（原有设置）").tag("")
+                    ForEach(providers) { Text("统一服务 · " + $0.name).tag($0.id) }
+                    if let id = service.wrappedValue.agentXProviderID, !providers.contains(where: { $0.id == id }) {
+                        Text("统一服务不可用 · " + id).tag(id)
+                    }
+                }
+                if let id = service.wrappedValue.agentXProviderID {
+                    if let provider = providers.first(where: { $0.id == id }) {
+                        Picker("模型", selection: service.model) {
+                            Text("跟随服务默认模型").tag("")
+                            ForEach(provider.enabledModels, id: \.self) { Text($0).tag($0) }
+                        }
+                        Text(provider.serviceProtocol.title + " · " + provider.baseURL).font(.caption).foregroundStyle(.secondary)
+                        Text("地址、启用模型和凭据由 AgentX 模型服务统一管理；此处仅保存引用。").font(.caption).foregroundStyle(.secondary)
+                        if isImage { Toggle("使用角色参考图（服务需支持图片编辑接口）", isOn: service.useImageEdits) }
+                    } else {
+                        Text("服务已停用、被删除或不支持该生成类型。请选择其他服务。").foregroundStyle(.red)
+                    }
+                } else {
                 Picker("使用服务", selection: service.kind) {
                     Text("OpenAI 兼容服务 / 本机模型").tag(TravelServiceKind.openAICompatible)
                     Text("Codex（需已安装并登录）").tag(TravelServiceKind.codex)
@@ -124,6 +149,7 @@ struct GenerationSetupView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Link("Codex 安装与登录说明", destination: URL(string: "https://developers.openai.com/codex/cli/")!)
                 }
+                }
                 Button(isImage ? "试生成照片（可能计费）" : "测试文字连接") { probe(isImage: isImage) }
             }.padding(8).disabled(busy)
         } label: { Text(title).font(.headline) }
@@ -140,6 +166,7 @@ struct GenerationSetupView: View {
     }
 
     private func key(for service: TravelServiceConfiguration, isImage: Bool) throws -> String? {
+        if service.agentXProviderID != nil { return nil }
         let noKey = isImage ? imageNoKey : narrativeNoKey
         let secret = isImage ? imageSecret : narrativeSecret
         if noKey { return nil }
@@ -162,18 +189,20 @@ struct GenerationSetupView: View {
                 try service.validate()
                 let client = OpenAICompatibleTravelClient()
                 let data: Data
-                if service.kind == .codex {
+                if service.agentXProviderID == nil && service.kind == .codex {
                     data = try await probeCodex(isImage: isImage)
                 } else if isImage {
                     let generator = ConfiguredTravelContentGenerator(configuration: { draft }, credentials: credentials,
-                        codex: CodexTravelContentGenerator(executor: executor), client: client)
+                        codex: CodexTravelContentGenerator(executor: executor), client: client, providerResolver: controller.providerResolver)
                     data = try await generator.generateImage(service: service,
                         scene: "{\"location\":\"杭州西湖湖边\",\"mood\":\"安静愉快\",\"scene\":\"午后柔和自然光，黑猫回头看向湖面\"}",
                         apiKey: key(for: service, isImage: true), useStoredCredential: false)
                 } else {
-                    data = try await client.text(baseURL: service.validatedBaseURL(), model: service.model,
-                        apiKey: key(for: service, isImage: false),
-                        prompt: "Connection test. Return only the JSON object {\"ok\":true}.", jsonMode: service.jsonMode)
+                    let generator = ConfiguredTravelContentGenerator(configuration: { draft }, credentials: credentials,
+                        codex: CodexTravelContentGenerator(executor: executor), client: client, providerResolver: controller.providerResolver)
+                    data = try await generator.generateText(service: service,
+                        prompt: "Connection test. Return only the JSON object {\"ok\":true}.",
+                        apiKey: key(for: service, isImage: false), useStoredCredential: false)
                 }
                 try Task.checkCancellation()
                 if isImage {

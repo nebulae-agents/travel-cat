@@ -6,8 +6,9 @@ import XCTest
 private final class SubmissionCredentials: TravelServiceCredentialStoring {
     var key: String? = "test-only"
     private var storageKeys: [String: String] = [:]
+    var writtenIDs: [String] = []
     func read(id: String) throws -> String? { ["workbench-content-v1", "audit-journal-v1"].contains(id) ? storageKeys[id] : key }
-    func save(_ secret: String?, id: String) throws { storageKeys[id] = secret }
+    func save(_ secret: String?, id: String) throws { writtenIDs.append(id); storageKeys[id] = secret }
 }
 
 @MainActor
@@ -16,6 +17,7 @@ private final class SubmissionRuntime: AgentRuntimeClient {
     var onExit: (() -> Void)?
     var calls: [String] = []
     var launches = 0
+    var startParameters: [String: Any] = [:]
     var promptTexts: [String] = []
     var startResult: [String: Any] = ["sessionId": "session"]
     var startFailure: Error?
@@ -27,6 +29,7 @@ private final class SubmissionRuntime: AgentRuntimeClient {
     func request(_ method: String, _ params: [String: Any], timeout: UInt64) async throws -> [String: Any] {
         calls.append(method)
         if method == "start" {
+            startParameters = params
             await beforeStart?()
             if let startFailure { throw startFailure }
             return startResult
@@ -38,6 +41,50 @@ private final class SubmissionRuntime: AgentRuntimeClient {
 }
 
 final class AgentWorkbenchSubmissionTests: XCTestCase {
+    @MainActor
+    func testUnifiedProviderUsesLiveGatewayConfigurationWithoutCopyingKeys() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let keys = SubmissionCredentials(), runtime = SubmissionRuntime()
+        var shared = AgentXState()
+        shared.providers = [.init(id: "shared", name: "Shared", baseURL: "https://first.example/v1", models: ["model"], serviceProtocol: .anthropicMessages)]
+        let resolver = AgentXProviderResolver(state: { shared }, credentials: keys)
+        let model = AgentWorkbenchModel(root: root, credentials: keys, client: runtime, providerResolver: resolver)
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        var instance = WorkbenchInstance(name: "Shared", image: "agent@sha256:" + String(repeating: "a", count: 64), command: ["test-acp"])
+        instance.provider.agentXProviderID = "shared"
+        instance.provider.model = "model"
+        keys.writtenIDs = []
+        try model.save(instance: instance, newKey: "must-not-copy")
+        XCTAssertTrue(keys.writtenIDs.isEmpty)
+        shared.providers[0].baseURL = "https://live.example/v1"
+        await model.start(instanceID: instance.id, text: "hello")
+        let provider = runtime.startParameters["provider"] as? [String: String]
+        XCTAssertEqual(provider?["baseURL"], "https://live.example/v1")
+        XCTAssertEqual(provider?["api"], "messages")
+        XCTAssertEqual(provider?["model"], "model")
+        XCTAssertEqual(provider?["apiKey"], "test-only")
+        XCTAssertTrue(keys.writtenIDs.isEmpty)
+    }
+
+    @MainActor
+    func testUnifiedGatewayDoesNotRelaxEndpointRestrictions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let keys = SubmissionCredentials(), runtime = SubmissionRuntime()
+        var shared = AgentXState()
+        shared.providers = [.init(id: "shared", name: "Shared", baseURL: "https://example.com/v1", models: ["model"])]
+        let model = AgentWorkbenchModel(root: root, credentials: keys, client: runtime,
+            providerResolver: AgentXProviderResolver(state: { shared }, credentials: keys))
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        var instance = WorkbenchInstance(name: "Shared", image: "agent@sha256:" + String(repeating: "a", count: 64), command: ["test-acp"])
+        instance.provider.agentXProviderID = "shared"; instance.provider.model = "model"
+        try model.save(instance: instance, newKey: "")
+        shared.providers[0].baseURL = "http://localhost:8080/v1"
+        await model.start(instanceID: instance.id, text: "hello")
+        XCTAssertEqual(runtime.launches, 0)
+        XCTAssertNotNil(model.error)
+        XCTAssertTrue(model.state.tasks.isEmpty)
+    }
+
     @MainActor
     private func fixture() throws -> (AgentWorkbenchModel, SubmissionRuntime, SubmissionCredentials, URL, UUID) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -29,6 +29,18 @@ enum AgentStorageLoadPhase: Equatable {
 
 @MainActor
 extension AgentWorkbenchModel {
+    func resolvedAuditRoot() throws -> URL {
+        if let managedRoot { return try AgentXRunAudit.directory(root: managedRoot, appID: "workbench") }
+        return store.root.appendingPathComponent("audit-v1")
+    }
+    func historicalAuditRoot() throws -> URL? {
+        guard managedRoot != nil else { return nil }
+        let old = store.root.appendingPathComponent("audit-v1")
+        guard FileManager.default.fileExists(atPath: old.path) else { return nil }
+        guard try old.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey]).isSymbolicLink != true else { throw WorkbenchFailure("历史审计路径不能是链接。") }
+        return try FileManager.default.contentsOfDirectory(atPath: old.path).isEmpty ? nil : old
+    }
+
     var canRetryStorage: Bool { credentialStores != nil && storageTask == nil && !hasShutdown && !isStorageReady }
     var canCancelStorageLoading: Bool { storageTask != nil && storageStatus == .loading && !storageCancellationRequested && !hasShutdown }
     func cancelStorageLoading() {
@@ -86,7 +98,11 @@ extension AgentWorkbenchModel {
             // Keep recovered content visible in memory even if audit authorization is denied.
             store = opened; state = snapshot; contentOpened = true
             storageLoadPhase = .audit
-            let audit = try await AgentAuditStore.open(root: store.root.appendingPathComponent("audit-v1"), credentials: credentials.audit)
+            if let historical = try historicalAuditRoot() {
+                historicalAuditStore = try await AgentAuditStore.open(root: historical, credentials: credentials.audit, readOnly: true)
+                try checkStorageAttempt(generation)
+            }
+            let audit = try await AgentAuditStore.open(root: resolvedAuditRoot(), credentials: credentials.audit)
             try checkStorageAttempt(generation)
             auditStore = audit
             loadFailed = false; storageStatus = .ready
@@ -128,7 +144,7 @@ extension AgentWorkbenchModel {
                 throw WorkbenchFailure("已保存的原生实例须保留程序和目录，以便恢复原会话；请新建实例。")
             }
         }
-        try instance.validate(); if instance.native == nil { try instance.provider.validate() }
+        try instance.validate(); if instance.native == nil { _ = try resolveModelProvider(instance.provider) }
         var next = state
         if let index = next.instances.firstIndex(where: { $0.id == instance.id }) { next.instances[index] = instance }
         else { next.instances.append(instance) }
@@ -140,7 +156,7 @@ extension AgentWorkbenchModel {
         guard !savingInstance else { throw WorkbenchFailure("正在保存 Agent，请稍候。") }
         savingInstance = true; defer { savingInstance = false }
         _ = try snapshotSaving(instance)
-        if instance.native == nil && !newKey.isEmpty { try await writeModelCredential(newKey, id: instance.provider.credentialID) }
+        if instance.native == nil && instance.provider.agentXProviderID == nil && !newKey.isEmpty { try await writeModelCredential(newKey, id: instance.provider.credentialID) }
         try Task.checkCancellation()
         // Use current state after authorization, preserving events received while it was pending.
         let next = try snapshotSaving(instance)
@@ -164,7 +180,7 @@ extension AgentWorkbenchModel {
                 if let remaining = state.instances.first { openInstance(remaining.id) }
                 else { preferredInstanceID = nil; selectedTaskID = nil }
             }
-            if instance.native == nil { try await writeModelCredential(nil, id: instance.provider.credentialID) }
+            if instance.native == nil && instance.provider.agentXProviderID == nil { try await writeModelCredential(nil, id: instance.provider.credentialID) }
         } catch { self.error = error.localizedDescription }
     }
 }

@@ -10,6 +10,65 @@ final class PetTravelPromptServiceTests: XCTestCase {
     // Fixed UTC noon, independent of the runner's time zone and wall clock.
     private let noon = Date(timeIntervalSince1970: 1_787_140_800)
 
+    func testInboxOpensExactPromptAndAcknowledgesWhenBothNotificationChannelsFail() async throws {
+        let harness = try makeHarness()
+        let IDs = try prepareReadyPostcard(in: harness)
+        let attempted = expectation(description: "notification unavailable")
+        var routes: [PetTravelRoute] = []
+        let service = PetTravelPromptService(coordinator: harness.coordinator,
+            showBubble: { _, _, _ in false },
+            postNotification: { _ in attempted.fulfill(); return false },
+            route: { routes.append($0) }, calendar: utcCalendar(), clock: { self.noon })
+        service.ingestCurrent(settings: .init(), now: noon)
+        await fulfillment(of: [attempted], timeout: 2)
+        XCTAssertTrue(service.hasPendingOrStorageError)
+        XCTAssertTrue(service.openPendingFromInbox())
+        XCTAssertEqual(routes, [.postcard(eventID: IDs.eventID, tripID: IDs.tripID)])
+        XCTAssertEqual(try harness.coordinator.pendingCount, 0)
+        XCTAssertFalse(service.hasPendingOrStorageError)
+    }
+
+    func testInboxDoesNotAcknowledgeStorageError() throws {
+        let harness = try makeHarness()
+        _ = try publish(phase: .preparing, in: harness.repository)
+        let service = PetTravelPromptService(coordinator: harness.coordinator,
+            showBubble: { _, _, _ in false }, postNotification: { _ in false },
+            route: { _ in XCTFail("Storage failure must not be treated as a delivered prompt") }, calendar: utcCalendar())
+        try harness.repository.withExclusiveLock {
+            service.ingestCurrent(settings: .init(), now: noon)
+            let original = service.storageError
+            XCTAssertNotNil(original)
+            XCTAssertFalse(service.openPendingFromInbox())
+            XCTAssertEqual(service.storageError, original)
+            XCTAssertTrue(service.hasPendingOrStorageError)
+        }
+    }
+
+    func testInboxCanConsumeQuietHoursPromptAndInvalidateInflightNotification() async throws {
+        let harness = try makeHarness()
+        let departure = try publish(phase: .preparing, in: harness.repository)
+        let started = expectation(description: "notification started")
+        let delayed = DeferredNotificationResult { started.fulfill() }
+        var routes: [PetTravelRoute] = []
+        let service = PetTravelPromptService(coordinator: harness.coordinator,
+            showBubble: { _, _, _ in false }, postNotification: delayed.post,
+            route: { routes.append($0) }, calendar: utcCalendar(), clock: { self.noon })
+        service.ingestCurrent(settings: .init(), now: noon)
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(service.openPendingFromInbox())
+        delayed.complete(false)
+        await Task.yield()
+        XCTAssertFalse(service.hasPendingOrStorageError)
+        XCTAssertEqual(routes.count, 1)
+        XCTAssertEqual(try harness.coordinator.pendingCount, 0)
+
+        _ = try publish(phase: .resting, tripID: departure.tripID, in: harness.repository)
+        service.ingestCurrent(settings: .init(quietStart: 0, quietEnd: 23), now: noon)
+        XCTAssertTrue(service.hasPendingOrStorageError)
+        XCTAssertTrue(service.openPendingFromInbox(), "Explicit user opening is permitted during quiet hours")
+        XCTAssertFalse(service.hasPendingOrStorageError)
+    }
+
     func testBubbleSuccessCommitsDeliveryAndRoutesExactPostcard() throws {
         let harness = try makeHarness()
         let IDs = try prepareReadyPostcard(in: harness)

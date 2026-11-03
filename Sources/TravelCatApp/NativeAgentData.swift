@@ -29,9 +29,16 @@ struct NativeRuntimeConfiguration: Codable, Equatable, Sendable {
     var executable: String
     var workspace: String
     var model: String
+    var workspaceIsRelative: Bool? = nil
 
     func validate(requireModel: Bool = true) throws {
         let fm = FileManager.default
+        if workspaceIsRelative == true {
+            try AgentXWorkspacePolicy.validate(workspace)
+            guard executable.hasPrefix("/"), !executable.contains("\n"), !executable.contains("\0"), fm.isExecutableFile(atPath: executable),
+                  !requireModel || !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw WorkbenchFailure("请选择可执行程序与模型。") }
+            return
+        }
         var directory: ObjCBool = false
         let location = URL(fileURLWithPath: workspace).resolvingSymlinksInPath().standardizedFileURL
         guard executable.hasPrefix("/"), !executable.contains("\n"), !executable.contains("\0"),

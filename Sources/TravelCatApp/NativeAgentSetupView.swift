@@ -37,7 +37,7 @@ struct NativeAgentSetupView: View {
         guard let connection, connection.authenticated,
               connection.models.contains(where: { $0.model == configuration.model }),
               !instance.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        return (try? configuration.validate()) != nil
+        return (try? model.nativeConfiguration(instance: instance)) != nil
     }
     private var hasHistory: Bool { model.state.tasks.contains { $0.instanceID == instance.id } }
     private var isSavedInstance: Bool { model.state.instances.contains { $0.id == instance.id } }
@@ -147,7 +147,7 @@ struct NativeAgentSetupView: View {
                 if !isSavedInstance && step > 0 { Button("上一步") { step -= 1 }.disabled(busy) }
                 if !isSavedInstance && step < 2 {
                     Button("下一步") { step += 1 }.buttonStyle(.borderedProminent)
-                        .disabled(busy || (step == 0 ? instance.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (try? configuration.validate(requireModel: false)) == nil : connection?.authenticated != true))
+                        .disabled(busy || (step == 0 ? instance.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (try? model.nativeConfiguration(instance: instance, requireModel: false)) == nil : connection?.authenticated != true))
                 } else {
                     Button(isSavedInstance ? "保存更改" : "保存 Agent") { save() }.buttonStyle(.borderedProminent).disabled(busy || !ready)
                 }
@@ -168,15 +168,27 @@ struct NativeAgentSetupView: View {
     private func chooseWorkspace() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.allowsMultipleSelection = false; panel.canCreateDirectories = true; panel.title = "选择独立工作目录"
+        if let root = model.managedRoot {
+            let workspace = root.appendingPathComponent("apps/workbench/workspace")
+            do { try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true) }
+            catch { self.error = error.localizedDescription; return }
+            panel.directoryURL = workspace
+            panel.message = "请选择或新建此应用 workspace 内的子目录。"
+        }
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        instance.native?.workspace = url.resolvingSymlinksInPath().path
+        do {
+            if let root = model.managedRoot {
+                instance.native?.workspace = try AgentXWorkspacePolicy.relativeSelection(url, root: root)
+                instance.native?.workspaceIsRelative = true
+            } else { instance.native?.workspace = url.resolvingSymlinksInPath().path }
+        } catch { self.error = error.localizedDescription }
     }
     private func connect() {
         error = nil; working = true
         Task {
             defer { working = false }
             do {
-                try configuration.validate(requireModel: false)
+                _ = try model.nativeConfiguration(instance: instance, requireModel: false)
                 _ = try await model.connectNative(instance: instance)
                 checkedConfiguration = configuration
                 connectionCheckFailed = false

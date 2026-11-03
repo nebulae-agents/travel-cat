@@ -10,7 +10,7 @@ final class DesktopMailboxCoordinator {
     private var notifications: [NSObjectProtocol] = []
     private var subscriptions: [AnyCancellable] = []
 
-    init(desktop: DesktopPetController, pet: AppModel, agents: AgentWorkbenchModel,
+    init(desktop: DesktopPetController, pet: AppModel, agents: AgentWorkbenchModel?,
          openPostcard: @escaping (UUID) -> Void, openAlbum: @escaping () -> Void,
          openAgents: @escaping () -> Void) {
         self.desktop = desktop
@@ -31,12 +31,14 @@ final class DesktopMailboxCoordinator {
         subscriptions.append(pet.objectWillChange.sink { [weak self] _ in
             Task { @MainActor in self?.mailbox.refresh() }
         })
-        subscriptions.append(agents.objectWillChange.sink { [weak self, weak agents] _ in
-            Task { @MainActor in
-                guard let agents else { return }
-                self?.mailbox.update(model: agents)
-            }
-        })
+        if let agents {
+            subscriptions.append(agents.objectWillChange.sink { [weak self, weak agents] _ in
+                Task { @MainActor in
+                    guard let agents else { return }
+                    self?.mailbox.update(model: agents)
+                }
+            })
+        }
         subscriptions.append(desktop.objectWillChange.sink { [weak self] _ in
             Task { @MainActor in self?.updatePresentation() }
         })

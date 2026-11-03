@@ -10,14 +10,17 @@ final class GenerationServiceController: ObservableObject {
     private let store: TravelGenerationConfigurationStore
     private let credentials: any TravelServiceCredentialStoring
     private let didSave: () -> Void
+    let providerResolver: AgentXProviderResolver?
 
     init(store: TravelGenerationConfigurationStore,
          credentials: any TravelServiceCredentialStoring,
          hasExistingHistory: Bool,
+         providerResolver: AgentXProviderResolver? = nil,
          didSave: @escaping () -> Void = {}) throws {
         self.store = store
         self.credentials = credentials
         self.didSave = didSave
+        self.providerResolver = providerResolver
         configuration = try store.load(hasExistingHistory: hasExistingHistory)
     }
 
@@ -31,6 +34,10 @@ final class GenerationServiceController: ObservableObject {
         guard next.schemaVersion == 1 else { throw TravelServiceConfigurationError.unsupportedVersion }
         try next.narrative.validate()
         try next.image.validate()
+        for (service, category) in [(next.narrative, AgentXModelCategory.chat), (next.image, .image)] where service.agentXProviderID != nil {
+            guard let providerResolver else { throw AgentXProviderResolutionError.unavailable }
+            _ = try providerResolver.resolve(service, category: category)
+        }
 
         // Plan both choices before performing any keychain mutation.
         let narrative = try prepare(next.narrative, previous: configuration.narrative,
@@ -86,7 +93,8 @@ final class GenerationServiceController: ObservableObject {
                          previous: TravelServiceConfiguration,
                          secret: String?, noKey: Bool) throws -> CredentialUpdate {
         var service = candidate
-        let endpointUnchanged = service.kind == previous.kind && service.baseURL == previous.baseURL
+        if service.agentXProviderID != nil { return CredentialUpdate(service: service, secret: nil) }
+        let endpointUnchanged = previous.agentXProviderID == nil && service.kind == previous.kind && service.baseURL == previous.baseURL
         guard service.kind == .openAICompatible else {
             service.credentialID = endpointUnchanged ? previous.credentialID : UUID().uuidString
             return CredentialUpdate(service: service, secret: nil)

@@ -1,0 +1,5 @@
+{
+  "id":"writing-room", "name":"写作间 · 示例", "version":"1.0.0", "dataSchemaVersion":1,
+  "hostAPIMajor":1, "kind":"chat", "runtime":"host-text", "modules":["draft"],
+  "paths":{"state":"apps/writing-room/state","artifacts":"apps/writing-room/artifacts","instances":"apps/writing-room/instances","runs":"apps/writing-room/runs"}
+}

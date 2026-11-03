@@ -19,6 +19,8 @@ final class CodexTravelExecutor {
     private let timeout: TimeInterval
     private let diagnostics: @Sendable (Data) -> Void
     private var active: [UUID: Invocation] = [:]
+    private var shuttingDown = false
+    private var retiredInvocations: [Invocation] = []
 
     init(executableURL: URL? = nil, timeout: TimeInterval = 900, diagnostics: @escaping @Sendable (Data) -> Void = { _ in }) {
         self.executableURL = executableURL
@@ -31,8 +33,21 @@ final class CodexTravelExecutor {
         for invocation in active.values { invocation.cancel() }
     }
 
+    /// Seal new subprocess launches before producing a relocation exit receipt.
+    func shutdownAndWait(timeout: Duration) async -> Bool {
+        shuttingDown = true
+        cancelAll()
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !active.isEmpty || retiredInvocations.contains(where: { !$0.hasConfirmedExit }) {
+            guard !Task.isCancelled, ContinuousClock.now < deadline else { return false }
+            do { try await Task.sleep(for: .milliseconds(20)) } catch { return false }
+        }
+        return true
+    }
+
     func run(prompt: String, workspace: URL, schema: URL? = nil, images: [URL] = []) async throws -> Data {
         try Task.checkCancellation()
+        guard !shuttingDown else { throw CancellationError() }
         guard let executable = executableURL ?? Self.locateExecutable(),
               FileManager.default.isExecutableFile(atPath: executable.path) else {
             if let data = try? JSONEncoder().encode(CodexGenerationDiagnostic(code: .notInstalled, recordedAt: Date(), durationMilliseconds: 0, exitStatus: nil)) { diagnostics(data) }
@@ -43,7 +58,7 @@ final class CodexTravelExecutor {
         let id = UUID()
         let invocation = Invocation()
         active[id] = invocation
-        defer { active[id] = nil }
+        defer { retiredInvocations.append(invocation); active[id] = nil }
         let worker = Task.detached(priority: .utility) {
             try Self.execute(executable: executable, prompt: prompt, workspace: workspace, schema: schema, images: images, timeout: limit, invocation: invocation, diagnosticsSink: sink)
         }
@@ -334,7 +349,16 @@ final class CodexTravelExecutor {
             // before the CLI exited. New process groups/sessions are not an escape hatch.
             observeDescendants(of: root, freeze: true)
             for identity in descendants.values { identity.signal(SIGKILL) }
-            descendants.removeAll()
+            // Keep identities until disappearance is observed; SIGKILL is not an exit receipt.
+        }
+
+        var hasConfirmedExit: Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard pid == nil else { return false }
+            return descendants.values.allSatisfy { identity in
+                if let current = ProcessIdentity.read(identity.pid) { return current != identity }
+                return kill(identity.pid, 0) == -1 && errno == ESRCH
+            }
         }
     }
 

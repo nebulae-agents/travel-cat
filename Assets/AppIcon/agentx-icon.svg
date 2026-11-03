@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+ <clipPath id="c"><rect width="1024" height="1024" rx="232"/></clipPath>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2B2560"/><stop offset=".55" stop-color="#17213A"/><stop offset="1" stop-color="#0F2E33"/></linearGradient>
+ <radialGradient id="neb1" cx="30%" cy="30%" r="45%"><stop offset="0" stop-color="#A48CFF" stop-opacity=".55"/><stop offset="1" stop-color="#A48CFF" stop-opacity="0"/></radialGradient>
+ <radialGradient id="neb2" cx="75%" cy="70%" r="45%"><stop offset="0" stop-color="#5EE0D4" stop-opacity=".45"/><stop offset="1" stop-color="#5EE0D4" stop-opacity="0"/></radialGradient>
+ <radialGradient id="eye" cx="50%" cy="40%" r="60%"><stop offset="0" stop-color="#FFD98F"/><stop offset=".7" stop-color="#F0A04B"/><stop offset="1" stop-color="#D9832E"/></radialGradient>
+ <radialGradient id="fur" cx="45%" cy="35%" r="70%"><stop offset="0" stop-color="#3A3D4A"/><stop offset="1" stop-color="#1A1B22"/></radialGradient>
+ <filter id="soft"><feGaussianBlur stdDeviation="30"/></filter>
+ <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity=".45"/></filter>
+</defs>
+<g clip-path="url(#c)">
+ <rect width="1024" height="1024" fill="url(#bg)"/>
+ <ellipse cx="300" cy="300" rx="420" ry="360" fill="url(#neb1)" filter="url(#soft)"/>
+ <ellipse cx="760" cy="720" rx="420" ry="340" fill="url(#neb2)" filter="url(#soft)"/>
+ <!-- twinkles -->
+ <path d="M170 166 Q170 200 204 200 Q170 200 170 234 Q170 200 136 200 Q170 200 170 166 Z" fill="#FFFFFF" opacity="0.95"/><path d="M860 146 Q860 170 884 170 Q860 170 860 194 Q860 170 836 170 Q860 170 860 146 Z" fill="#FFFFFF" opacity="0.9"/><path d="M900 504 Q900 520 916 520 Q900 520 900 536 Q900 520 884 520 Q900 520 900 504 Z" fill="#FFFFFF" opacity="0.8"/><path d="M120 546 Q120 560 134 560 Q120 560 120 574 Q120 560 106 560 Q120 560 120 546 Z" fill="#FFFFFF" opacity="0.7"/><path d="M820 860 Q820 880 840 880 Q820 880 820 900 Q820 880 800 880 Q820 880 820 860 Z" fill="#FFFFFF" opacity="0.8"/>
+ <circle cx="560" cy="110" r="6" fill="#fff" opacity=".8"/><circle cx="90" cy="380" r="5" fill="#fff" opacity=".6"/><circle cx="950" cy="330" r="5" fill="#fff" opacity=".7"/>
+ <!-- cat -->
+ <g filter="url(#shadow)">
+  <!-- ears -->
+  <path d="M272 420 C250 300 268 232 300 220 C340 210 410 300 440 350 Z" fill="url(#fur)"/>
+  <path d="M752 420 C774 300 756 232 724 220 C684 210 614 300 584 350 Z" fill="url(#fur)"/>
+  <path d="M300 395 C292 320 300 278 316 268 C336 262 380 318 404 350 Z" fill="#B08CFF" opacity=".85"/>
+  <path d="M724 395 C732 320 724 278 708 268 C688 262 644 318 620 350 Z" fill="#7EE8DC" opacity=".85"/>
+  <!-- head -->
+  <ellipse cx="512" cy="566" rx="312" ry="272" fill="url(#fur)"/>
+ </g>
+ <!-- cheeks -->
+ <ellipse cx="350" cy="640" rx="54" ry="34" fill="#FF8FA3" opacity=".55"/><ellipse cx="674" cy="640" rx="54" ry="34" fill="#FF8FA3" opacity=".55"/>
+ <!-- eyes -->
+ <ellipse cx="412" cy="545" rx="78" ry="92" fill="url(#eye)"/><ellipse cx="612" cy="545" rx="78" ry="92" fill="url(#eye)"/>
+ <ellipse cx="412" cy="560" rx="40" ry="56" fill="#15161C"/><ellipse cx="612" cy="560" rx="40" ry="56" fill="#15161C"/>
+ <circle cx="438" cy="518" r="24" fill="#fff"/><circle cx="638" cy="518" r="24" fill="#fff"/>
+ <circle cx="392" cy="590" r="10" fill="#fff" opacity=".9"/><circle cx="592" cy="590" r="10" fill="#fff" opacity=".9"/>
+ <!-- nose + mouth ω -->
+ <path d="M494 640 L530 640 L512 660 Z" fill="#FFB3C1"/>
+ <path d="M470 676 q21 24 42 0 q21 24 42 0" stroke="#8A93A3" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+ <!-- whiskers -->
+ <path d="M268 610 L350 626 M268 656 L350 650 M756 610 L674 626 M756 656 L674 650" stroke="#AEB6C4" stroke-width="8" stroke-linecap="round" opacity=".8"/>
+ <!-- collar with agent tag (4 nodes) -->
+ <path d="M296 770 q216 76 432 0" stroke="#F0A04B" stroke-width="26" fill="none" stroke-linecap="round"/>
+ <circle cx="512" cy="816" r="52" fill="#F0A04B"/><circle cx="512" cy="816" r="52" fill="none" stroke="#FFD98F" stroke-width="6"/>
+ <g fill="#1A1205"><circle cx="493" cy="797" r="7"/><circle cx="531" cy="797" r="7"/><circle cx="493" cy="835" r="7"/><circle cx="531" cy="835" r="7"/></g>
+ <path d="M493 797 L531 835 M531 797 L493 835" stroke="#1A1205" stroke-width="5" stroke-linecap="round"/>
+ <!-- forehead star -->
+ <path d="M512 366 Q512 392 538 392 Q512 392 512 418 Q512 392 486 392 Q512 392 512 366 Z" fill="#FFD98F" opacity="0.95"/>
+</g>
+</svg>

@@ -69,6 +69,27 @@ struct EncryptedWorkbenchStorage {
         return try load(directory: directory)
     }
 
+    /// Inspection must never migrate plaintext, delete originals, or create a key.
+    func loadReadOnly() throws -> Data? {
+        try validateKey()
+        guard let directory = try Self.directory(root, create: false) else { return nil }
+        defer { close(directory) }
+        let legacy = try Self.read(Self.legacyName, directory: directory, limit: Self.limit)
+        if let sealed = try Self.read(Self.sealedName, directory: directory, limit: Self.limit + 128) {
+            let bytes = try unseal(sealed)
+            let snapshot = try Self.decode(bytes)
+            if let legacy {
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                guard try encoder.encode(snapshot) == encoder.encode(Self.decode(legacy)) else {
+                    throw WorkbenchFailure("旧对话与加密副本内容冲突，两份数据均已保留。")
+                }
+            }
+            return bytes
+        }
+        if let legacy { _ = try Self.decode(legacy) }
+        return legacy
+    }
+
     func save(_ bytes: Data) throws {
         try validateKey()
         _ = try Self.decode(bytes)

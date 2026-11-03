@@ -20,6 +20,7 @@ final class AgentSidecarClient: AgentRuntimeClient {
     var onEvent: (([String: Any]) -> Void)?
     var onExit: (() -> Void)?
     private var process: Process?
+    private var shuttingDown = false
     private var input: FileHandle?
     private var output: FileHandle?
     private var diagnostics: FileHandle?
@@ -32,6 +33,7 @@ final class AgentSidecarClient: AgentRuntimeClient {
     private var liveChildren: [UUID: Process] = [:]
 
     func launch(python: String) throws {
+        guard !shuttingDown else { throw CancellationError() }
         if process?.isRunning == true { return }
         guard python.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: python),
               let script = Bundle.module.url(forResource: "sidecar", withExtension: "py", subdirectory: "AgentRuntime") else {
@@ -99,6 +101,7 @@ final class AgentSidecarClient: AgentRuntimeClient {
     }
 
     func shutdown() {
+        shuttingDown = true
         // EOF lets the sidecar stop only containers it owns.
         try? input?.close(); input = nil
     }
