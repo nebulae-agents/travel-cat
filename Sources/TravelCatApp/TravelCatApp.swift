@@ -280,7 +280,10 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         let scene = OwnedPetSceneView(
             model: model,
             showStatus: { [weak self] in self?.showCurrentJourney() },
-            showHouse: { [weak self] in self?.showAgentXManager() },
+            showHouse: { [weak self] in
+                self?.agentX?.openApp("blackcat")
+                self?.showAgentXManager()
+            },
             showPostcard: { [weak self] in self?.showLatestPostcard() },
             showAlbum: { [weak self] in self?.showLatestAlbum() },
             showSettings: { [weak self] in self?.showSettings() },

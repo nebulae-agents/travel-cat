@@ -36,26 +36,45 @@ struct AgentXFrontendStore {
     }
 }
 
+/// In-memory edits survive front/back navigation; only explicit Save writes app state.
+@MainActor
+final class AgentXFrontendSession: ObservableObject {
+    @Published var values: [String: [String: String]] = [:]
+    @Published var selectedModule = ""
+    private var initialized = false
+
+    func restore(contract: AppFrontendContract, persisted: [String: [String: String]]) {
+        if !initialized { values = persisted; initialized = true }
+        if !contract.modules.contains(where: { $0.id == selectedModule }) {
+            selectedModule = contract.modules.first?.id ?? ""
+        }
+    }
+}
+
 @MainActor
 struct AgentXFrontendView: View {
     @ObservedObject var controller: AgentXController
     let appID: String
     @State private var contract: AppFrontendContract?
-    @State private var values: [String: [String: String]] = [:]
-    @State private var selectedModule = ""
+    @ObservedObject private var session: AgentXFrontendSession
     @State private var notice: String?
     @State private var ready = false
+    init(controller: AgentXController, appID: String) {
+        self.controller = controller
+        self.appID = appID
+        self.session = controller.frontendSession(appID: appID)
+    }
     private var store: AgentXFrontendStore { .init(root: controller.repository.root, appID: appID) }
-    private var module: AppFrontendContract.Module? { contract?.modules.first { $0.id == selectedModule } }
-    private var prompt: String? { try? contract?.prompt(moduleID: selectedModule, values: values[selectedModule] ?? [:]) }
+    private var module: AppFrontendContract.Module? { contract?.modules.first { $0.id == session.selectedModule } }
+    private var prompt: String? { try? contract?.prompt(moduleID: session.selectedModule, values: session.values[session.selectedModule] ?? [:]) }
     private func field(_ id: String) -> Binding<String> {
-        Binding(get: { values[selectedModule]?[id] ?? "" }, set: { values[selectedModule, default: [:]][id] = $0 })
+        Binding(get: { session.values[session.selectedModule]?[id] ?? "" }, set: { session.values[session.selectedModule, default: [:]][id] = $0 })
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if let contract {
                 Text(contract.title).font(.title2.bold())
-                Picker("前台模块", selection: $selectedModule) {
+                Picker("前台模块", selection: $session.selectedModule) {
                     ForEach(contract.modules, id: \.id) { Text($0.title).tag($0.id) }
                 }.pickerStyle(.segmented)
                 if let module {
@@ -81,7 +100,7 @@ struct AgentXFrontendView: View {
                                       || controller.state.runs.contains { $0.instanceID == controller.selectedInstanceID && !$0.status.terminal })
                     }
                     if let prompt { DisclosureGroup("发送内容预览") { Text(prompt).textSelection(.enabled) } }
-                    if let run = controller.state.runs.last(where: { $0.appID == appID && $0.instanceID == controller.selectedInstanceID }) {
+                    if let run = controller.state.runs.last(where: { $0.appID == appID && $0.instanceID == controller.selectedInstanceID && $0.purpose == nil }) {
                         Text(run.status.label).font(.caption)
                         Text(run.response.isEmpty ? (run.failure ?? "等待结果…") : run.response).textSelection(.enabled)
                         if !run.status.terminal { Button("取消运行") { controller.cancel(run.id) } }
@@ -93,15 +112,16 @@ struct AgentXFrontendView: View {
             .onChange(of: appID) { _, _ in load() }
     }
     private func load() {
-        ready = false; contract = nil; values = [:]
+        ready = false; contract = nil
         do {
             let loaded = try store.load()
-            contract = loaded.0; values = loaded.1; selectedModule = loaded.0.modules[0].id
+            contract = loaded.0
+            session.restore(contract: loaded.0, persisted: loaded.1)
             ready = true; notice = nil
         } catch { notice = "应用前台未能加载，未执行任何应用代码或覆盖输入：\(error.localizedDescription)" }
     }
     @discardableResult private func save() -> Bool {
-        do { try store.save(values); notice = "输入已保存在本应用内。"; return true }
+        do { try store.save(session.values); notice = "输入已保存在本应用内。"; return true }
         catch { notice = "保存失败：\(error.localizedDescription)"; return false }
     }
 }

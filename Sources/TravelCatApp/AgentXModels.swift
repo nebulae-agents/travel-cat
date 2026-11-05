@@ -1,14 +1,26 @@
 import Foundation
 
 enum AgentXPage: String, CaseIterable, Identifiable {
-    case overview, apps, chat, configuration, instances, definitions, providers, runs, inbox, settings
+    case overview, apps, chat, configuration, characters, workflows, members, sceneRules, appModels, appFiles, appSettings, backups, governance, instances, definitions, providers, runs, inbox, settings
     var id: Self { self }
+    var isBackstage: Bool {
+        [.configuration, .members, .workflows, .characters, .sceneRules, .appModels, .runs, .appFiles, .appSettings].contains(self)
+    }
     var title: String {
         switch self {
         case .overview: "总览"
         case .apps: "所有应用"
         case .chat: "前台 · 参与"
-        case .configuration: "配置台 · 框架"
+        case .configuration: "后台 · 生成与优化"
+        case .characters: "人物定制"
+        case .workflows: "工作流"
+        case .members: "成员与工作流"
+        case .sceneRules: "场景与规则"
+        case .appModels: "模型与限额"
+        case .appFiles: "目录与制品"
+        case .appSettings: "应用设置"
+        case .backups: "备份与迁移"
+        case .governance: "预算与审计"
         case .instances: "Agent 实例"
         case .definitions: "Agent 定义"
         case .providers: "模型服务"
@@ -23,6 +35,15 @@ enum AgentXPage: String, CaseIterable, Identifiable {
         case .apps: "square.stack.3d.up"
         case .chat: "bubble.left.and.bubble.right"
         case .configuration: "slider.horizontal.3"
+        case .characters: "person.crop.rectangle"
+        case .workflows: "point.3.connected.trianglepath.dotted"
+        case .members: "person.2"
+        case .sceneRules: "theatermasks"
+        case .appModels: "slider.horizontal.3"
+        case .appFiles: "folder"
+        case .appSettings: "gearshape.2"
+        case .backups: "externaldrive"
+        case .governance: "checkmark.shield"
         case .instances: "cpu"
         case .definitions: "person.text.rectangle"
         case .providers: "server.rack"
@@ -59,6 +80,8 @@ struct AgentXApplication: Codable, Identifiable, Equatable {
     var id: String
     var name: String
     var kind: AgentXAppKind
+    var workflow: AgentXWorkflowConfiguration? = nil
+    var experience: AgentXExperienceConfiguration? = nil
     var canRunHostText: Bool { kind == .chat || kind == .blackcat }
 }
 struct AgentXProvider: Codable, Identifiable, Equatable {
@@ -132,6 +155,10 @@ enum AgentXRunStatus: String, Codable {
         }
     }
 }
+enum AgentXProposalStage { case review, saved, published }
+
+enum AgentXRunPurpose: String, Codable { case configuration, characterPreview, workflow, usageAssistant }
+
 struct AgentXRun: Codable, Identifiable, Equatable {
     var id: String
     var appID: String
@@ -144,10 +171,19 @@ struct AgentXRun: Codable, Identifiable, Equatable {
     var endedAt: Date?
     var failure: String?
     var auditFailure: String? = nil
+    var purpose: AgentXRunPurpose? = nil
+    var configurationDefinitionID: String? = nil
+    var configurationBaseDigest: String? = nil
+    var configurationAppliedDigest: String? = nil
+    var configurationAppliedChangeIDs: [String]? = nil
+    var workflowRevision: Int? = nil
+    var workflowInstanceIDs: [String]? = nil
+    var workflowSteps: [AgentXWorkflowStepResult]? = nil
 }
 struct AgentXState: Codable, Equatable {
     var version = 1
     var blackCatEnabled = true
+    var frontSkin: AgentXFrontSkin? = nil
     var singleAppID: String?
     var apps: [AgentXApplication] = [.init(id: "blackcat", name: "BlackCat", kind: .blackcat)]
     var providers: [AgentXProvider] = []

@@ -46,10 +46,14 @@ struct AgentXManagerView: View {
     @State private var editingDefinition: AgentXDefinition?
     @State private var editingInstance: AgentXInstance?
     @State private var migrationMessage: String?
+    @State private var blackCatTab = 0
+    @State private var holdingStop = false
+    private var isFront: Bool { controller.page == .chat }
+    private var pendingCount: Int { controller.state.unreadCount + (travelPending ? 1 : 0) + workbenchPending }
 
     var body: some View {
         HStack(spacing: 0) {
-            if !controller.singleMode { if controller.page == .chat { frontRail } else { sidebar } }
+            if !isFront && (!controller.singleMode || controller.page.isBackstage) { sidebar }
             VStack(spacing: 0) {
                 header
                 Divider().overlay(AgentXTheme.border)
@@ -62,35 +66,38 @@ struct AgentXManagerView: View {
                 }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) { content }
-                        .padding(28).frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(28)
+                        .frame(maxWidth: isFront && controller.currentApp?.kind != .workbench ? 956 : .infinity, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
             }
         }
         .background(AgentXTheme.background).foregroundStyle(AgentXTheme.text)
         .tint(AgentXTheme.accent)
         .frame(minWidth: 960, minHeight: 640)
+        .overlay(alignment: .bottomTrailing) {
+            if isFront || controller.page.isBackstage {
+                Button { controller.assistantPresented.toggle() } label: {
+                    Label(isFront ? "使用助手" : "配置助手", systemImage: "sparkles").padding(10)
+                }.buttonStyle(.bordered).background(AgentXTheme.surface, in: Capsule()).padding(16)
+                .popover(isPresented: $controller.assistantPresented) {
+                    AgentXAssistantPanel(controller: controller, isFront: isFront).frame(width: 380)
+                }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let notice = controller.undoNotice {
+                HStack {
+                    Text(notice)
+                    Button("撤销") { perform { try controller.undoLastChange() } }
+                        .disabled(!controller.canUndo).keyboardShortcut("z", modifiers: .command)
+                }.padding(14).background(AgentXTheme.surface, in: Capsule())
+                    .overlay(Capsule().stroke(AgentXTheme.border)).padding(16)
+            }
+        }
         .sheet(item: $editor) { kind in AgentXEditorView(controller: controller, kind: kind, existingProvider: editingProvider, existingDefinition: editingDefinition, existingInstance: editingInstance) }
     }
 
-    private var frontRail: some View {
-        VStack(spacing: 12) {
-            railButton(.overview)
-            Divider()
-            railButton(.chat)
-            railButton(.instances)
-            railButton(.runs)
-            railButton(.apps)
-            Spacer()
-            railButton(.inbox)
-            railButton(.configuration)
-        }.padding(.vertical, 16).frame(width: 64).frame(maxHeight: .infinity).background(AgentXTheme.sidebar)
-    }
-    private func railButton(_ page: AgentXPage) -> some View {
-        Button { controller.page = page } label: {
-            Image(systemName: page.icon).font(.system(size: 20)).frame(width: 44, height: 44)
-                .background(controller.page == page ? AgentXTheme.accent.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 8))
-        }.buttonStyle(.plain).help(page.title).accessibilityLabel(page.title)
-    }
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
@@ -102,25 +109,49 @@ struct AgentXManagerView: View {
             }.padding(.vertical, 18)
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
-                    navigation(.overview)
-                    sectionLabel("应用层")
-                    navigation(.apps)
-                    Picker("当前应用", selection: $controller.selectedAppID) {
-                        ForEach(controller.state.apps) { app in Text(app.name).tag(app.id) }
-                    }.labelsHidden().padding(.vertical, 8).accessibilityLabel("当前应用")
-                    navigation(.chat)
-                    navigation(.configuration)
-                    navigation(.runs)
-                    sectionLabel("基石")
-                    navigation(.providers)
-                    navigation(.instances)
-                    navigation(.definitions)
-                    sectionLabel("平台")
-                    navigation(.inbox)
-                    navigation(.settings)
+                    if controller.page.isBackstage {
+                        Text(controller.currentApp?.name ?? "选择应用").font(.headline).padding(.vertical, 8)
+                        navigation(.chat)
+                        navigation(.configuration)
+                        sectionLabel("生成与优化前台")
+                        navigation(.members)
+                        navigation(.workflows)
+                        navigation(.sceneRules)
+                        navigation(.characters)
+                        navigation(.appModels)
+                        navigation(.runs)
+                        navigation(.appFiles)
+                        navigation(.appSettings)
+                        Divider().padding(.vertical, 12)
+                        Button("返回完整平台", systemImage: "sidebar.left") {
+                            controller.singleMode = false; controller.page = .overview
+                        }.buttonStyle(.plain).frame(minHeight: 44)
+                    } else {
+                        navigation(.overview)
+                        sectionLabel("应用层")
+                        navigation(.apps)
+                        Picker("当前应用", selection: $controller.selectedAppID) {
+                            ForEach(controller.state.apps) { app in Text(app.name).tag(app.id) }
+                        }.labelsHidden().padding(.vertical, 8).accessibilityLabel("当前应用")
+                        navigation(.chat)
+                        Button { controller.page = .configuration } label: {
+                            Label("后台 ›", systemImage: "slider.horizontal.3").font(.caption).frame(minHeight: 44)
+                        }.buttonStyle(.plain).foregroundStyle(AgentXTheme.muted).padding(.leading, 14)
+                        sectionLabel("基石")
+                        navigation(.providers)
+                        navigation(.instances)
+                        navigation(.definitions)
+                        navigation(.backups)
+                        sectionLabel("平台")
+                        navigation(.inbox)
+                        navigation(.governance)
+                        navigation(.settings)
+                    }
+
                 }
             }
             Divider()
+            softStopControl
             Label("\(controller.state.activeCount) 个运行中", systemImage: "waveform.path")
                 .font(.caption).foregroundStyle(AgentXTheme.running).padding(.vertical, 6)
             Text("配置、记忆与应用各自独立").font(.caption2).foregroundStyle(AgentXTheme.muted)
@@ -146,19 +177,47 @@ struct AgentXManagerView: View {
         }.buttonStyle(.plain)
     }
     private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(controller.page.title).font(.system(size: 22, weight: .bold))
-                Text(controller.page == .chat || controller.page == .runs ? controller.currentApp?.name ?? "选择应用" : "应用 ← Agent 实例 ← 模型服务")
-                    .font(.caption).foregroundStyle(AgentXTheme.muted)
+        HStack(spacing: 16) {
+            if isFront {
+                Image(systemName: controller.currentApp?.kind == .blackcat ? "pawprint.fill" : "bubble.left.and.bubble.right.fill")
+                    .font(.title2).foregroundStyle(AgentXTheme.accent)
+                Text(controller.currentApp?.name ?? "选择应用").font(.title2.bold())
+                let running = controller.state.runs.filter { $0.appID == controller.selectedAppID && !$0.status.terminal }.count
+                Text(running > 0 ? "● \(running) 个运行中" : "○ 就绪")
+                    .font(.caption).foregroundStyle(AgentXTheme.running)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(AgentXTheme.running.opacity(0.1), in: Capsule())
+                Spacer()
+                headerButton("运行记录", icon: "clock") { controller.page = .runs }
+                headerButton("待处理 \(pendingCount)", icon: pendingCount > 0 ? "bell.badge" : "bell") { controller.page = .inbox }
+                Menu {
+                    Button("简洁皮肤") { perform { try controller.setFrontSkin(.simple) } }
+                    Button("沉浸皮肤") { perform { try controller.setFrontSkin(.immersive) } }
+                    Divider()
+                    Button("后台 · 生成与优化", systemImage: "slider.horizontal.3") { controller.page = .configuration }
+                    Button("所有应用", systemImage: "square.grid.2x2") { controller.singleMode = false; controller.page = .apps }
+                    Button("完整平台", systemImage: "sidebar.left") { controller.singleMode = false; controller.page = .overview }
+                } label: { Image(systemName: "ellipsis").frame(width: 36, height: 36) }
+                    .menuStyle(.borderlessButton).fixedSize().help("应用菜单").accessibilityLabel("应用菜单")
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(controller.page.title).font(.system(size: 22, weight: .bold))
+                    Text(controller.page.isBackstage ? controller.currentApp?.name ?? "选择应用" : "应用 ← Agent 实例 ← 模型服务")
+                        .font(.caption).foregroundStyle(AgentXTheme.muted)
+                }
+                Spacer()
+                if controller.singleMode {
+                    Button("回到前台") { controller.page = .chat }
+                    Button("完整平台", systemImage: "sidebar.left") { controller.singleMode = false }
+                }
+                Button { controller.page = .inbox } label: { Label("待处理 \(pendingCount)", systemImage: "bell") }
+                    .help("打开待处理收件箱")
             }
-            Spacer()
-            if controller.singleMode {
-                Button("完整平台", systemImage: "sidebar.left") { controller.singleMode = false }
-            }
-            Button { controller.page = .inbox } label: { Label("待处理 \(controller.state.unreadCount + (travelPending ? 1 : 0) + workbenchPending)", systemImage: "bell") }
-                .help("打开待处理收件箱")
-        }.padding(.horizontal, 28).padding(.vertical, 20)
+        }.padding(.horizontal, 28).padding(.vertical, 16)
+    }
+    private func headerButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: icon).frame(width: 44, height: 44) }
+            .buttonStyle(.plain).help(title).accessibilityLabel(title)
     }
 
     @ViewBuilder private var content: some View {
@@ -167,8 +226,14 @@ struct AgentXManagerView: View {
         case .apps: applications
         case .providers: providers
         case .definitions: definitions
-        case .instances: instances
+        case .instances, .members: instances
+        case .sceneRules, .appModels, .appFiles, .appSettings:
+            AgentXAppStudioView(controller: controller, section: controller.page)
+        case .backups: settings
+        case .governance: governance
         case .configuration: AgentXAppConfigurationView(controller: controller)
+        case .characters: AgentXCharacterStudioView(controller: controller).frame(minHeight: 650)
+        case .workflows: AgentXWorkflowStudioView(controller: controller)
         case .chat: chat
         case .runs: runList(controller.state.runs.filter { $0.appID == controller.selectedAppID }.reversed(), inbox: false)
         case .inbox:
@@ -240,21 +305,20 @@ struct AgentXManagerView: View {
                 Button("当前旅程", action: openJourney).buttonStyle(.borderedProminent)
                 Button("旅行册", action: openAlbum)
                 Spacer()
-                Button("入口设置") { controller.page = .settings }
+                Menu("更多") { Button("入口设置") { controller.page = .settings } }
             }
         }
     }
     private var applications: some View {
         Group {
             actionHeader("应用空间", button: "新建应用", kind: .app)
-            blackCatCard
-            ForEach(controller.state.apps.filter { $0.kind != .blackcat }) { app in
+            ForEach(controller.state.apps) { app in
                 AgentXCard {
                     Label(app.name, systemImage: "bubble.left.and.bubble.right").font(.headline)
                     Text("\(app.kind == .workbench ? "Agent 工作台" : "应用前台") · \(controller.state.instances.filter { $0.appID == app.id }.count) 个实例").foregroundStyle(AgentXTheme.muted)
                     HStack {
                         Button("进入前台") { controller.openApp(app.id) }.buttonStyle(.borderedProminent)
-                        Button("配置台") { controller.selectedAppID = app.id; controller.page = .configuration }
+
                     }
                 }
             }
@@ -293,20 +357,21 @@ struct AgentXManagerView: View {
             }
         }
     }
+    private var visibleInstances: [AgentXInstance] { controller.page == .instances ? controller.state.instances : controller.currentInstances }
     private var instances: some View {
         Group {
-            if controller.currentApp?.kind == .workbench { workbenchModule }
+            if controller.page == .members && controller.currentApp?.kind == .workbench { workbenchModule }
             else {
-                actionHeader("\(controller.currentApp?.name ?? "应用") · 实例", button: "创建实例", kind: .instance)
-                if controller.currentInstances.isEmpty { empty("此应用还没有实例", detail: "选择定义与模型服务，将角色加入应用。", action: "创建实例", kind: .instance) }
-                ForEach(controller.currentInstances) { instance in
+                actionHeader(controller.page == .instances ? "所有应用 · Agent 实例" : "\(controller.currentApp?.name ?? "应用") · 成员", button: "创建实例", kind: .instance)
+                if visibleInstances.isEmpty { empty("还没有实例", detail: "选择定义与模型服务，将角色加入应用。", action: "创建实例", kind: .instance) }
+                ForEach(visibleInstances) { instance in
                     AgentXCard {
                         HStack { Label(instance.name, systemImage: "cpu").font(.headline); Spacer(); Text("原生对话").font(.caption).foregroundStyle(AgentXTheme.running) }
                         Text(instance.model).font(.system(.body, design: .monospaced))
                         Text("定义：\(controller.state.definitions.first { $0.id == instance.definitionID }?.name ?? "未知") · 独立记忆 / 工作目录 / 配置 / 凭据引用").foregroundStyle(AgentXTheme.muted).font(.caption)
                         HStack {
-                            Button("开始对话") { controller.selectedInstanceID = instance.id; controller.page = .chat }.buttonStyle(.borderedProminent)
-                            Button("编辑实例") { editingProvider = nil; editingDefinition = nil; editingInstance = instance; editor = .instance }
+                            Button("开始对话") { controller.selectedAppID = instance.appID; controller.selectedInstanceID = instance.id; controller.page = .chat }.buttonStyle(.borderedProminent)
+                            Button("编辑实例") { controller.selectedAppID = instance.appID; editingProvider = nil; editingDefinition = nil; editingInstance = instance; editor = .instance }
                                 .disabled(controller.state.runs.contains { $0.instanceID == instance.id && !$0.status.terminal })
                         }
                     }
@@ -326,7 +391,9 @@ struct AgentXManagerView: View {
         }
     }
     @ViewBuilder private var chat: some View {
-        if controller.currentApp?.kind == .workbench {
+        if controller.currentApp?.kind == .blackcat {
+            blackCatLauncher
+        } else if controller.currentApp?.kind == .workbench {
             workbenchModule
         } else if let app = controller.currentApp, !app.canRunHostText {
             AgentXCard {
@@ -337,8 +404,9 @@ struct AgentXManagerView: View {
         } else if let app = controller.currentApp,
                   AgentXFrontendStore(root: controller.repository.root, appID: app.id).exists {
             AgentXFrontendView(controller: controller, appID: app.id).id(app.id)
+        } else if controller.currentApp?.experience?.published?.configuration.layout == .scene && controller.frontSkin == .immersive {
+            AgentXExperienceFrontView(controller: controller)
         } else {
-            if controller.currentApp?.kind == .blackcat { blackCatCard }
             if let instance = controller.currentInstance {
                 AgentXChatView(controller: controller, instance: instance)
             } else {
@@ -346,12 +414,67 @@ struct AgentXManagerView: View {
             }
         }
     }
-    private func runList(_ runs: [AgentXRun], inbox: Bool) -> some View {
+    private var blackCatLauncher: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Picker("BlackCat 面板", selection: $blackCatTab) {
+                Text("应用").tag(0)
+                Text("待处理 · \(pendingCount)").tag(1)
+                Text("动态").tag(2)
+            }.pickerStyle(.segmented)
+            if blackCatTab == 0 {
+                if let urgent = controller.state.runs.last(where: { $0.status == .failed && !$0.isRead }) {
+                    runList([urgent], inbox: true, allowMarkAll: false)
+                }
+                blackCatApplications
+            } else if blackCatTab == 1 {
+                if travelPending { AgentXCard { Label("旅行提醒", systemImage: "pawprint"); Button("查看并确认提醒", action: openTravelPrompt) } }
+                if workbenchPending > 0 { AgentXCard { Text("工作台有 \(workbenchPending) 项待处理"); Button("打开工作台", action: openWorkbench) } }
+                runList(controller.state.runs.filter { $0.status.terminal && !$0.isRead }.reversed(), inbox: true)
+            } else {
+                runList(Array(controller.state.runs.suffix(20).reversed()), inbox: false)
+            }
+        }
+    }
+    private var blackCatApplications: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("今天，想做点什么？").font(.system(size: 28, weight: .semibold))
+                Text("从一个应用开始，BlackCat 陪你继续。") .foregroundStyle(AgentXTheme.muted)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 16) {
+                ForEach(controller.state.apps.filter { $0.kind != .blackcat }) { app in
+                    AgentXCard {
+                        Label(app.name, systemImage: app.kind == .workbench ? "terminal" : "bubble.left.and.bubble.right").font(.headline)
+                        Text(app.kind == .workbench ? "继续你的项目与任务" : "进入应用，开始参与").font(.callout).foregroundStyle(AgentXTheme.muted)
+                        Button("进入前台", systemImage: "arrow.up.right") { controller.openApp(app.id) }.buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+            if controller.state.apps.count == 1 {
+                AgentXCard {
+                    Text("给你的第一个应用一个位置").font(.headline)
+                    Button("新建应用", systemImage: "plus") { editingProvider = nil; editingDefinition = nil; editingInstance = nil; editor = .app }
+                }
+            }
+            if pendingCount > 0 {
+                AgentXCard {
+                    Label("需要你看看 · \(pendingCount)", systemImage: "bell.badge").font(.headline)
+                    Button("查看全部待处理") { blackCatTab = 1 }.buttonStyle(.borderedProminent)
+                }
+            }
+            blackCatCard
+            if let instance = controller.currentInstance {
+                DisclosureGroup("和 BlackCat 对话") { AgentXChatView(controller: controller, instance: instance) }
+            }
+        }
+    }
+
+    private func runList(_ runs: [AgentXRun], inbox: Bool, allowMarkAll: Bool = true) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text(inbox ? "需要你关注的结果" : "真实运行与结果").font(.headline)
                 Spacer()
-                if inbox && !runs.isEmpty { Button("全部标记已读") { perform { try controller.markAllRead() } } }
+                if inbox && allowMarkAll && !runs.isEmpty { Button("全部标记已读") { perform { try controller.markAllRead() } } }
             }
             if runs.isEmpty {
                 AgentXCard {
@@ -366,16 +489,42 @@ struct AgentXManagerView: View {
                         Spacer()
                         Text(run.status.label).foregroundStyle(run.status == .failed ? .red : AgentXTheme.running)
                     }
+                    if run.purpose == .usageAssistant { Label("使用助手", systemImage: "sparkles").font(.caption).foregroundStyle(AgentXTheme.accent) }
+                    if run.purpose == .configuration { Label("配置助手 · 定义建议", systemImage: "sparkles").font(.caption).foregroundStyle(AgentXTheme.accent) }
                     Text(run.prompt).lineLimit(3).textSelection(.enabled)
                     if let failure = run.failure { Text(failure).foregroundStyle(.orange) }
                     Text(run.startedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(AgentXTheme.muted)
                     HStack {
-                        Button("查看对话") { controller.selectedAppID = run.appID; controller.selectedInstanceID = run.instanceID; controller.page = .chat }
+                        Button(run.purpose == .configuration ? "查看配置建议" : run.purpose == .workflow ? "查看工作流" : run.purpose == .characterPreview ? "查看人物试说" : "查看对话") { controller.openRun(run) }.buttonStyle(.borderedProminent)
                         if run.status.terminal && !run.isRead { Button("标记已读") { perform { try controller.markRead(run.id) } } }
                         if !run.status.terminal { Button("取消运行") { controller.cancel(run.id) }.disabled(run.status == .cancelling) }
                     }
                 }
             }
+        }
+    }
+    private var softStopControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(holdingStop ? "继续按住…" : "软停止 · 长按 2 秒", systemImage: "stop.circle")
+                .frame(maxWidth: .infinity, minHeight: 40).contentShape(Rectangle())
+                .foregroundStyle(.red)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.65)))
+                .onLongPressGesture(minimumDuration: 2, pressing: { holdingStop = $0 }) { controller.softStopAll() }
+                .accessibilityLabel("长按两秒请求停止全部宿主文本运行")
+            Text("仅宿主文本运行；等待取消确认，不含外部工作台。")
+                .font(.caption2).foregroundStyle(AgentXTheme.muted)
+        }
+    }
+    private var governance: some View {
+        Group {
+            AgentXCard {
+                Label("运行与安全边界", systemImage: "checkmark.shield").font(.headline)
+                Text("当前活跃运行：\(controller.state.activeCount) · 未读结果：\(controller.state.unreadCount)")
+                Text("统一预算、费用统计及独立审批审计尚未接入。下方展示已保存的真实运行记录。")
+                    .foregroundStyle(AgentXTheme.muted)
+                softStopControl
+            }
+            runList(Array(controller.state.runs.reversed()), inbox: false)
         }
     }
     private var settings: some View {
@@ -451,7 +600,7 @@ private struct AgentXChatView: View {
             Picker("对话实例", selection: Binding(get: { instance.id }, set: { controller.selectedInstanceID = $0 })) {
                 ForEach(controller.currentInstances) { Text($0.name).tag($0.id) }
             }
-            ForEach(controller.state.runs.filter { $0.instanceID == instance.id }) { run in
+            ForEach(controller.state.runs.filter { $0.instanceID == instance.id && $0.purpose == nil }) { run in
                 AgentXCard {
                     Text("你").font(.caption).foregroundStyle(AgentXTheme.accent)
                     Text(run.prompt).textSelection(.enabled)
@@ -469,7 +618,7 @@ private struct AgentXChatView: View {
                     .font(.body).frame(minHeight: 90, maxHeight: 180).scrollContentBackground(.hidden)
                     .accessibilityLabel("发送给 Agent 的消息")
                 HStack {
-                    Text("\(instance.model) · 纯文本 · 不执行工具").font(.caption).foregroundStyle(AgentXTheme.muted)
+                    Text("⌘ Return 发送 · \(instance.model)").font(.caption).foregroundStyle(AgentXTheme.muted)
                     Spacer()
                     Button("发送", systemImage: "arrow.up") { controller.send(controller.drafts[instance.id] ?? "", instanceID: instance.id) }
                         .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)

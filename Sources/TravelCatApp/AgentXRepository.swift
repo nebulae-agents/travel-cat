@@ -20,6 +20,10 @@ struct AgentXRepository {
         guard let version = settings["version"] as? Int else { throw AgentXError.corrupt }
         state.version = version
         state.blackCatEnabled = (settings["blackcat"] as? [String: Any])?["enabled"] as? Bool ?? true
+        if let raw = (settings["ui"] as? [String: Any])?["front_skin"] as? String {
+            guard let skin = AgentXFrontSkin(rawValue: raw) else { throw AgentXError.corrupt }
+            state.frontSkin = skin
+        }
         state.singleAppID = settings["mode"] as? String == "single" ? settings["single_app"] as? String : nil
         for path in try children("manager/providers", extension: "yaml") {
             let item = try dictionary(path)
@@ -92,7 +96,7 @@ struct AgentXRepository {
         var directories = ["manager/providers", "manager/secrets", "manager/templates/assistant", "apps", "shared/inbox", "shared/published", "shared/references", "audit", "backups"]
             + state.instances.flatMap { instance in
                 ["config", "memory", "workspace", "logs"].map { "apps/\(instance.appID)/instances/\(instance.id)/\($0)" }
-            } + state.apps.flatMap { app in ["state", "artifacts", "shared", "runs"].map { "apps/\(app.id)/\($0)" } }
+            } + state.apps.flatMap { app in ["state", "artifacts", "shared", "runs", "memory"].map { "apps/\(app.id)/\($0)" } }
         var writes: [String: Data] = [:]
         var settings = try existingDictionary("agentx.yaml")
         let manifest = try safeURL("agentx.yaml")
@@ -107,6 +111,11 @@ struct AgentXRepository {
         settings["single_app"] = state.singleAppID
         var blackcat = settings["blackcat"] as? [String: Any] ?? [:]
         blackcat["enabled"] = state.blackCatEnabled; settings["blackcat"] = blackcat
+        if let skin = state.frontSkin {
+            var ui = settings["ui"] as? [String: Any] ?? [:]
+            ui["front_skin"] = skin.rawValue
+            settings["ui"] = ui
+        }
         writes["agentx.yaml"] = try yaml(settings)
         for (order, provider) in state.providers.enumerated() {
             let path = "manager/providers/\(provider.id).yaml"
@@ -151,7 +160,28 @@ struct AgentXRepository {
                 }
             }
         }
-        for (order, app) in state.apps.enumerated() { writes["apps/\(app.id)/app.yaml"] = try mergedYAML(app, path: "apps/\(app.id)/app.yaml", order: order) }
+        for (order, app) in state.apps.enumerated() {
+            let path = "apps/\(app.id)/app.yaml"
+            let previous: AgentXApplication? = fm.fileExists(atPath: try safeURL(path).path) ? try decodeYAML(path) : nil
+            let appBytes = try mergedYAML(app, path: path, order: order)
+            // Compare the persisted representation: YAML timestamps have lower precision than Date.
+            let persisted = try YAMLDecoder().decode(AgentXApplication.self, from: String(decoding: appBytes, as: UTF8.self))
+            if let old = previous?.experience {
+                guard old.revisions.allSatisfy({ persisted.experience?.revisions.contains($0) == true }) else { throw AgentXDefinitionError.immutableRevision }
+            }
+            if let published = persisted.experience?.published, published != previous?.experience?.published {
+                let memoryPath = "apps/\(app.id)/memory/agentx-shared.md"
+                let url = try safeURL(memoryPath)
+                if fm.fileExists(atPath: url.path) {
+                    let existing = try String(contentsOf: url, encoding: .utf8)
+                    guard existing == previous?.experience?.published?.configuration.sharedMemory || existing == published.configuration.sharedMemory else {
+                        throw AgentXError.invalid("共享记忆文件已有手写修改，发布已停止；请先审阅并合并，原文件未覆盖。")
+                    }
+                }
+                writes[memoryPath] = Data(published.configuration.sharedMemory.utf8)
+            }
+            writes[path] = appBytes
+        }
         for (order, instance) in state.instances.enumerated() {
             let path = "apps/\(instance.appID)/instances/\(instance.id)/config/agent.yaml"
             var item = try existingDictionary(path)
@@ -306,6 +336,22 @@ struct AgentXRepository {
                   state.definitions.contains(where: { $0.id == instance.definitionID }),
                   state.providers.contains(where: { $0.id == instance.providerID && $0.models.contains(instance.model) }) else {
                 throw AgentXError.invalid("实例必须引用已有应用、定义和已选择的模型。")
+            }
+        }
+        for app in state.apps {
+            if let experience = app.experience {
+                try experience.draft?.validateStructure()
+                guard Set(experience.revisions.map(\.number)).count == experience.revisions.count,
+                      experience.revisions.allSatisfy({ $0.number > 0 }),
+                      experience.publishedRevision == nil || experience.published != nil else { throw AgentXError.corrupt }
+                for revision in experience.revisions { try revision.configuration.validateStructure() }
+            }
+            if let workflow = app.workflow {
+                try workflow.draft?.validate(appID: app.id, instances: state.instances, requireRunnable: false)
+                guard Set(workflow.revisions.map(\.number)).count == workflow.revisions.count,
+                      workflow.revisions.allSatisfy({ $0.number > 0 }),
+                      workflow.publishedRevision == nil || workflow.published != nil else { throw AgentXError.corrupt }
+                for revision in workflow.revisions { try revision.definition.validate(appID: app.id, instances: state.instances) }
             }
         }
         for run in state.runs {

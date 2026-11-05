@@ -3,6 +3,23 @@ import AgentXAppSDK
 @testable import TravelCatApp
 
 final class AgentXFrontendTests: XCTestCase {
+    @MainActor
+    func testUnsavedFormSessionSurvivesReloadWithoutWritingOrCrossingApps() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("AgentXForm-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = AgentXController(repository: .init(root: root), credentials: AgentXTestCredentials())
+        let contract = AppFrontendContract(title: "Form", modules: [.init(id: "draft", title: "Draft", fields: [.init(id: "topic", label: "Topic")], submit: .init(title: "Send", prompt: "{{topic}}"))])
+        let session = controller.frontendSession(appID: "blackcat")
+        session.restore(contract: contract, persisted: ["draft": ["topic": "Saved"]])
+        session.values["draft"] = ["topic": "Unsaved"]
+        let reentered = controller.frontendSession(appID: "blackcat")
+        reentered.restore(contract: contract, persisted: ["draft": ["topic": "Saved"]])
+        XCTAssertEqual(reentered.values["draft"]?["topic"], "Unsaved")
+        XCTAssertEqual(reentered.selectedModule, "draft")
+        XCTAssertTrue(controller.frontendSession(appID: "other").values.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("apps/blackcat/state/frontend-values.json").path))
+    }
+
     func testIndependentFrontendKeepsStateAcrossPayloadUpgradeAndRootMove() throws {
         let base = URL(fileURLWithPath: "/private/tmp/Frontend-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: base) }
