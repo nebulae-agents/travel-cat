@@ -15,6 +15,28 @@ final class CodexTravelExecutorTests: XCTestCase {
         return (root, script)
     }
 
+    func testSuspendVerifiesProcessExitThenResumeOnlyAllowsExplicitRun() async throws {
+        let (root, script) = try fixture("""
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = '--output-last-message' ]; then shift; result="$1"; fi
+          shift
+        done
+        cat > "$result"
+        echo invoked >> invocations
+        """)
+        let executor = CodexTravelExecutor(executableURL: script)
+        _ = try await executor.run(prompt: "first", workspace: root)
+        executor.fence()
+        let stopped = await executor.shutdownAndWait(timeout: .seconds(3))
+        XCTAssertTrue(stopped)
+        XCTAssertTrue(executor.positivelyStopped)
+        do { _ = try await executor.run(prompt: "blocked", workspace: root); XCTFail("Sealed executor") } catch {}
+        XCTAssertTrue(executor.resumeWithoutRunning())
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("invocations"), encoding: .utf8), "invoked\n")
+        _ = try await executor.run(prompt: "explicit", workspace: root)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("invocations"), encoding: .utf8), "invoked\ninvoked\n")
+    }
+
     func testMalformedNarrativeOverridesSuccessfulProcessDiagnostic() async throws {
         let (root, script) = try fixture("""
         while [ "$#" -gt 0 ]; do
@@ -215,4 +237,31 @@ private final class DiagnosticCapture: @unchecked Sendable {
     private var data = Data()
     func set(_ value: Data) { lock.lock(); defer { lock.unlock() }; data = value }
     var value: Data { lock.lock(); defer { lock.unlock() }; return data }
+}
+
+extension CodexTravelExecutorTests {
+    func testReadOnlyObservationOfActualOwnedCLI() async throws {
+        let (root, script) = try fixture("""
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = '--output-last-message' ]; then shift; result="$1"; fi
+          shift
+        done
+        cat >/dev/null
+        sleep 0.6
+        printf 'done' > "$result"
+        """)
+        let executor = CodexTravelExecutor(executableURL: script)
+        let run = Task { try await executor.run(prompt: "isolated observation", workspace: root) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        var observed = false
+        while ContinuousClock.now < deadline {
+            if executor.observeOwnedProcesses().state == .alive { observed = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(observed)
+        let value = try await run.value
+        XCTAssertEqual(value, Data("done".utf8))
+        XCTAssertFalse(executor.hasOwnedOperations)
+        XCTAssertNotEqual(executor.observeOwnedProcesses().state, .alive)
+    }
 }

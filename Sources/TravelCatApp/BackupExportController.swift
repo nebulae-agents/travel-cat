@@ -11,11 +11,12 @@ import TravelStorage
     private let operation: Operation
     init(operation: @escaping Operation) { self.operation = operation }
     convenience init(repository: TravelRepository) { self.init { try repository.export(to: $0, control: $1) } }
+    var isApplicationEnabled: () -> Bool = { true }
     private var task: Task<Void, Never>?
     private var control: RepositoryExportControl?
     private var generation = UUID()
     @discardableResult func start(to destination: URL) -> Bool {
-        guard task == nil else { return false }
+        guard isApplicationEnabled(), task == nil else { return false }
         let token = UUID(); generation = token
         isExporting = true; cancellationRequested = false
         progress = .init(); message = nil

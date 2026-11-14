@@ -56,4 +56,8 @@ struct AgentXWorkflowStepResult: Codable, Equatable, Identifiable {
     var runID: String? = nil
     var startedAt: Date? = nil
     var endedAt: Date? = nil
+    var actualProviderID: String? = nil
+    var actualModel: String? = nil
+    var runtimeCore: String? = nil
+    var effectiveConfiguration: AgentXEffectiveConfiguration? = nil
 }

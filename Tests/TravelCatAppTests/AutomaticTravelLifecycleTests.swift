@@ -10,6 +10,148 @@ import TravelUI
 
 @MainActor
 final class AutomaticTravelLifecycleTests: XCTestCase {
+    func testRecoveryExplicitRestartWhileOldImageExitsIsHonoredWithoutOverlap() async throws {
+        for requestAgain in [false, true] {
+            let f = try LifecycleFixture(); defer { f.clean() }
+            let event = try await f.exhaustImageRetries()
+            let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(), dataRoot: f.root)
+            var resumedWait: CheckedContinuation<Void, Never>?
+            var waits = 0
+            let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+                settings: { .init(mode: .fast) }, isReady: { true }, now: { f.clock.now },
+                sleep: { _ in
+                    waits += 1
+                    await withCheckedContinuation { resumedWait = $0 }
+                })
+            f.generator.holdImage = true
+            controller.start(); controller.requestRetry(event.id)
+            await waitUntil { f.generator.pendingImage != nil }
+            let calls = f.generator.imageCalls
+            controller.stop(); controller.start()
+            if requestAgain { controller.requestRetry(event.id) }
+            for _ in 0..<20 { await Task.yield() }
+            XCTAssertEqual(f.generator.imageCalls, calls)
+            XCTAssertEqual(waits, 0)
+            f.generator.holdImage = false
+            f.generator.pendingImage?.resume(); f.generator.pendingImage = nil
+            // The restarted worker must honor the old attempt's durable image lease.
+            // Entering its wait proves it resumed without prematurely regenerating.
+            await waitUntil { resumedWait != nil }
+            XCTAssertEqual(waits, 1, "Explicit restart must survive old work draining")
+            XCTAssertTrue(controller.hasOwnedOperations)
+            let drain = Task { await controller.suspendAndWait() }
+            for _ in 0..<20 { await Task.yield() }
+            resumedWait?.resume(); resumedWait = nil
+            await drain.value
+        }
+    }
+
+    func testRecoverySuspensionWaitsForPreviouslyStoppedImageOperation() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        let event = try await f.exhaustImageRetries()
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(), dataRoot: f.root)
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { .init(mode: .fast) }, isReady: { true }, now: { f.clock.now },
+            sleep: { seconds in f.clock.advance(seconds); await Task.yield() })
+        f.generator.holdImage = true
+        controller.start()
+        controller.requestRetry(event.id)
+        await waitUntil { f.generator.pendingImage != nil }
+        controller.stop()
+        XCTAssertTrue(controller.hasOwnedOperations)
+        controller.start() // Queued explicit restart must be revoked by application suspension.
+        var done = false
+        let drain = Task { await controller.suspendAndWait(); done = true }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(done)
+        XCTAssertFalse(controller.resumeWithoutRunning())
+        let before = try f.repository.imageRetry(for: event.id)
+        controller.start(); controller.requestRetry(event.id)
+        XCTAssertEqual(try f.repository.imageRetry(for: event.id), before)
+        f.generator.pendingImage?.resume(); f.generator.pendingImage = nil
+        await drain.value
+        XCTAssertTrue(done)
+        XCTAssertFalse(controller.hasOwnedOperations)
+    }
+
+    func testRecoveryManualResumeOnlyRunsSelectedEvent() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        let selected = try await f.exhaustImageRetries()
+        try await f.reach(.resting)
+        let other = try await f.exhaustImageRetries()
+        XCTAssertNotEqual(selected.id, other.id)
+        try f.repository.requestManualImageRetry(eventID: selected.id, mode: .fast)
+        try f.repository.requestManualImageRetry(eventID: other.id, mode: .fast)
+        let untouched = try f.repository.imageRetry(for: other.id)
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(), dataRoot: f.root)
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { .init(mode: .fast, automaticTravelEnabled: false) }, isReady: { true }, now: { f.clock.now },
+            sleep: { seconds in f.clock.advance(seconds); await Task.yield() })
+        let calls = f.generator.imageEventIDs.count
+        XCTAssertTrue(controller.resumeWithoutRunning())
+        controller.requestRetry(selected.id)
+        await waitUntil { f.generator.imageEventIDs.count > calls }
+        await waitUntil { !controller.hasOwnedOperations }
+        controller.refresh()
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(Array(f.generator.imageEventIDs.dropFirst(calls)), [selected.id])
+        XCTAssertEqual(try f.repository.imageRetry(for: other.id), untouched)
+        await controller.suspendAndWait()
+    }
+
+    func testRecoveryResumePreservesPendingQueueUntilExplicitManualRequest() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        let event = try await f.exhaustImageRetries()
+        try f.repository.requestManualImageRetry(eventID: event.id, mode: .fast)
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(), dataRoot: f.root)
+        var enabled = false
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { .init(mode: .fast, automaticTravelEnabled: false) }, isReady: { true },
+            isApplicationEnabled: { enabled }, now: { f.clock.now },
+            sleep: { seconds in f.clock.advance(seconds); await Task.yield() })
+        let before = try f.repository.imageRetry(for: event.id)
+        let calls = f.generator.imageCalls
+        controller.start(); controller.requestRetry(event.id); controller.refresh()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(f.generator.imageCalls, calls)
+        XCTAssertEqual(try f.repository.imageRetry(for: event.id), before)
+        // A host may instantiate the service while the application is disabled;
+        // resume must be safe even without an earlier asynchronous suspend.
+        enabled = true
+        XCTAssertTrue(controller.resumeWithoutRunning())
+        controller.refresh()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(f.generator.imageCalls, calls)
+        XCTAssertEqual(try f.repository.imageRetry(for: event.id), before)
+        controller.requestRetry(event.id)
+        await waitUntil { f.generator.imageCalls > calls }
+        await controller.suspendAndWait()
+        XCTAssertEqual(f.generator.imageCalls, calls + 1)
+    }
+
+    func testStoppedRecoveryRejectsStaleManualActionWithoutChangingRequestQueue() async throws {
+        let f = try LifecycleFixture(); defer { f.clean() }
+        try await f.startOnePostcardTrip()
+        try await f.reach(.postcardReady)
+        let event = try XCTUnwrap(f.repository.events().last)
+        for _ in 0..<3 {
+            f.clock.advance(300)
+            let work = try XCTUnwrap(f.repository.pendingImages(mode: .fast).first)
+            _ = try f.repository.markImage(.init(eventId: event.id, status: .failed, attemptedAt: f.clock.now,
+                relativePath: nil, reason: "fixture failure", attemptToken: work.attemptToken,
+                attemptCount: work.imageAttemptCount, publishedNarrativeHash: work.publishedNarrativeHash), mode: .fast)
+        }
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(), dataRoot: f.root)
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { .init(mode: .fast) }, isReady: { true })
+        controller.start()
+        let action = try XCTUnwrap(model.retryPostcardAction)
+        controller.stop()
+        let before = try f.repository.imageRetry(for: event.id)
+        action(event.id)
+        XCTAssertEqual(try f.repository.imageRetry(for: event.id), before)
+    }
+
     func testRepositoryLockContentionUsesStableShortWaitAcrossRestart() async throws {
         for mode in [TravelMode.fast, .daily] {
             let f = try LifecycleFixture(); defer { f.clean() }
@@ -309,10 +451,15 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         await waitUntil { completions.count == 1 }
         controller.pause()
         controller.refresh()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(completions.count, 1)
+        completions[0].resume(returning: .init(nextCheckAt: Date().addingTimeInterval(120), message: "old"))
+        await waitUntil { !controller.isRunning }
+        XCTAssertEqual(controller.message, "自动旅行已暂停")
+        controller.refresh()
         await waitUntil { completions.count == 2 }
         completions[1].resume(returning: .init(nextCheckAt: Date().addingTimeInterval(120), message: "new"))
         await waitUntil { controller.message == "new" }
-        completions[0].resume(returning: .init(nextCheckAt: Date().addingTimeInterval(120), message: "old"))
         for _ in 0..<10 { await Task.yield() }
         XCTAssertEqual(controller.message, "new")
         XCTAssertFalse(controller.isRunning)
@@ -327,8 +474,10 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         controller.refresh()
         await waitUntil { completions.count == 1 }
         controller.settingsDidChange()
-        await waitUntil { completions.count == 2 }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(completions.count, 1)
         completions[0].resume(returning: .init(nextCheckAt: Date(), message: "old mode"))
+        await waitUntil { completions.count == 2 }
         completions[1].resume(returning: .init(nextCheckAt: Date().addingTimeInterval(120), message: "new mode"))
         await waitUntil { controller.message == "new mode" }
         XCTAssertFalse(controller.isRunning)
@@ -1022,6 +1171,19 @@ private final class LifecycleFixture {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         repository = try TravelRepository(root: root, clock: clock)
     }
+    func exhaustImageRetries() async throws -> TripEvent {
+        try await startOnePostcardTrip()
+        try await reach(.postcardReady)
+        let event = try XCTUnwrap(repository.events().last)
+        for _ in 0..<3 {
+            clock.advance(300)
+            let work = try XCTUnwrap(repository.pendingImages(mode: .fast).first)
+            _ = try repository.markImage(.init(eventId: event.id, status: .failed, attemptedAt: clock.now,
+                relativePath: nil, reason: "fixture failure", attemptToken: work.attemptToken,
+                attemptCount: work.imageAttemptCount, publishedNarrativeHash: work.publishedNarrativeHash), mode: .fast)
+        }
+        return event
+    }
     func clean() { try? FileManager.default.removeItem(at: root) }
     func makeWorker() -> AutomaticTravelWorker {
         let clock = self.clock
@@ -1087,12 +1249,15 @@ private final class LifecycleClock: TravelClock, @unchecked Sendable {
 private final class LifecycleGenerator: TravelContentGenerating {
     var narrativeCalls = 0
     var imageCalls = 0
+    var imageEventIDs: [UUID] = []
     var imageWidth: Int? = 1152
     var imageHeight = 768
     var onNarrative: (() throws -> Void)?
     var narrativeSummary = "黑猫沿着蜿蜒的小路继续旅行，记住沿途的风景，也惦记着温暖的小屋。"
     var failNarrative = false
     var holdNarrative = false
+    var holdImage = false
+    var pendingImage: CheckedContinuation<Void, Never>?
     var pending: CheckedContinuation<Void, Never>?
     func release() { holdNarrative = false; pending?.resume(); pending = nil }
     func narrative(for request: TravelEventRequest) async throws -> TravelNarrative {
@@ -1111,6 +1276,8 @@ private final class LifecycleGenerator: TravelContentGenerating {
     }
     func image(for work: PendingImageWork, in workspace: URL) async throws -> URL {
         imageCalls += 1
+        imageEventIDs.append(work.event.id)
+        if holdImage { await withCheckedContinuation { pendingImage = $0 } }
         guard let width = imageWidth else { throw CocoaError(.fileNoSuchFile) }
         let context = try XCTUnwrap(CGContext(data: nil, width: width, height: imageHeight, bitsPerComponent: 8,
             bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))

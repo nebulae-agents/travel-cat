@@ -28,6 +28,27 @@ final class CodexTravelExecutor {
         self.diagnostics = diagnostics
     }
 
+    var hasOwnedOperations: Bool { !active.isEmpty || retiredInvocations.contains(where: { !$0.hasConfirmedExit }) }
+    func observeOwnedProcesses() -> AgentXOwnedProcessSnapshot {
+        guard active.count + retiredInvocations.count <= AgentXOwnedProcessSnapshot.limit else {
+            return .init(state: .unknown, reason: .partialIdentity)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(100))
+        var snapshots: [AgentXOwnedProcessSnapshot] = []
+        for invocation in Array(active.values) + retiredInvocations {
+            guard ContinuousClock.now < deadline else { return .init(state: .unknown, reason: .busy) }
+            snapshots.append(invocation.readOnlyObservation())
+        }
+        return .combine(snapshots)
+    }
+    var positivelyStopped: Bool { shuttingDown && !hasOwnedOperations }
+    func fence() { shuttingDown = true; cancelAll() }
+    @discardableResult func resumeWithoutRunning() -> Bool {
+        guard !hasOwnedOperations else { return false }
+        shuttingDown = false
+        return true
+    }
+
     /// Also called synchronously from applicationWillTerminate.
     func cancelAll() {
         for invocation in active.values { invocation.cancel() }
@@ -238,9 +259,26 @@ final class CodexTravelExecutor {
     private final class Invocation: @unchecked Sendable {
         private let lock = NSLock()
         private var pid: pid_t?
+        private var registeredIdentity: AgentXStopProcessIdentity?
+        private var didLaunch = false
         private var cancelled = false
         private var descendants: [pid_t: ProcessIdentity] = [:]
         private var lastObservation: TimeInterval = 0
+
+        func readOnlyObservation() -> AgentXOwnedProcessSnapshot {
+            guard lock.try() else { return .init(state: .unknown, reason: .busy) }
+            defer { lock.unlock() }
+            guard didLaunch else { return .init(state: .unknown, reason: .partialIdentity) }
+            guard descendants.count < AgentXOwnedProcessSnapshot.limit else { return .init(state: .unknown, reason: .partialIdentity) }
+            var values: [AgentXOwnedProcessSnapshot] = []
+            if pid == nil { values.append(.init(state: .exited, observedCount: 1)) }
+            else if let registeredIdentity { values.append(.observe(registeredIdentity)) }
+            else { values.append(.init(state: .unknown, reason: .partialIdentity)) }
+            for identity in descendants.values {
+                values.append(.observe(.init(pid: identity.pid, seconds: identity.seconds, microseconds: identity.microseconds)))
+            }
+            return .combine(values)
+        }
 
         func checkCancellation() throws {
             lock.lock(); defer { lock.unlock() }
@@ -253,6 +291,8 @@ final class CodexTravelExecutor {
             var child: pid_t = 0
             guard launch(&child) == 0 else { throw Failure.generationFailed }
             pid = child
+            didLaunch = true
+            registeredIdentity = AgentXStopProcessIdentity.read(child)
         }
 
         func poll() throws -> Int32? {

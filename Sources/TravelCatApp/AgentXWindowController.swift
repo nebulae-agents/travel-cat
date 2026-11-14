@@ -3,7 +3,7 @@ import SwiftUI
 
 @MainActor
 final class AgentXWindowController: NSWindowController {
-    init(controller: AgentXController, openJourney: @escaping () -> Void, openAlbum: @escaping () -> Void,
+    init(controller: AgentXController, applicationService: AgentXManagedApplicationService? = nil, openJourney: @escaping () -> Void, openAlbum: @escaping () -> Void,
          travelPending: Bool, openTravelPrompt: @escaping () -> Void = {},
          workbenchPending: Int = 0, openWorkbench: @escaping () -> Void = {}, workbenchContent: (() -> AnyView)? = nil) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
@@ -12,7 +12,7 @@ final class AgentXWindowController: NSWindowController {
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 960, height: 640)
         window.setFrameAutosaveName("AgentXManagerWindow")
-        let host = NSHostingView(rootView: AgentXManagerView(controller: controller, openJourney: openJourney,
+        let host = NSHostingView(rootView: AgentXManagerView(controller: controller, applicationService: applicationService, openJourney: openJourney,
             openAlbum: openAlbum, openTravelPrompt: openTravelPrompt, travelPending: travelPending,
             workbenchPending: workbenchPending, openWorkbench: openWorkbench, workbenchContent: workbenchContent))
         host.sizingOptions = []

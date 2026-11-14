@@ -23,9 +23,9 @@ struct AgentXExperienceFrontView: View {
                 LinearGradient(colors: [.black.opacity(0.12), .black.opacity(0.8)], startPoint: .top, endPoint: .bottom)
                 VStack(alignment: .leading, spacing: 20) {
                     HStack {
-                        Label("已发布 v\(controller.currentApp?.experience?.published?.number ?? 0)", systemImage: "checkmark.seal")
+                        Label(controller.currentApp?.experience?.published.map { "已发布 v\($0.number)" } ?? "尚未发布", systemImage: "checkmark.seal")
                         Spacer()
-                        Label(latest?.status.label ?? "等待你的行动", systemImage: "bubble.left")
+                        Label(latest?.displayedStatus ?? "等待你的行动", systemImage: "bubble.left")
                     }.font(.caption).padding(10).background(.black.opacity(0.45), in: Capsule())
                     Text(configuration.title.isEmpty ? controller.currentApp?.name ?? "场景" : configuration.title).font(.system(size: 30, weight: .semibold, design: .serif))
                     if !configuration.intro.isEmpty { Text(configuration.intro).font(.callout).lineLimit(5).textSelection(.enabled) }
@@ -34,6 +34,7 @@ struct AgentXExperienceFrontView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             Label(instance?.name ?? "当前场景", systemImage: "person.crop.circle.fill").font(.headline)
                             if let run = latest {
+                                AgentXRunConfigurationLabel(run: run)
                                 Text(run.response.isEmpty ? (run.failure ?? (run.status.terminal ? (run.status == .cancelled ? "已取消回应" : "运行结束，没有文本结果。") : "正在回应…")) : run.response).font(.system(.body, design: .serif)).textSelection(.enabled)
                                 if !run.status.terminal { Button("取消本次回应") { controller.cancel(run.id) }.disabled(run.status == .cancelling) }
                             } else {
@@ -55,9 +56,14 @@ struct AgentXExperienceFrontView: View {
                 }.foregroundStyle(.white).padding(24)
             }.frame(minHeight: 440).clipShape(RoundedRectangle(cornerRadius: 18))
             if let instance {
+                let reviewNotice = controller.pilotReviewNotice(for: instance.id)
                 AgentXCard {
                     Picker("以谁的身份参与", selection: Binding(get: { instance.id }, set: { controller.selectedInstanceID = $0 })) {
                         ForEach(controller.currentInstances) { Text($0.name).tag($0.id) }
+                    }
+                    if let original = controller.currentInstance {
+                        AgentXModelPicker(controller: controller, instance: original)
+                        AgentXConfigurationSummaryView(controller: controller, instance: original)
                     }
                     TextEditor(text: input).frame(minHeight: 76, maxHeight: 130).scrollContentBackground(.hidden).accessibilityLabel("场景行动或对白")
                     HStack {
@@ -67,14 +73,15 @@ struct AgentXExperienceFrontView: View {
                         Text(instance.model).font(.caption).foregroundStyle(AgentXTheme.muted)
                         Button("发送", systemImage: "arrow.up") { controller.send(input.wrappedValue, instanceID: instance.id) }
                             .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
-                            .disabled(input.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || controller.isInstanceBusy(instance.id))
+                            .disabled(input.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || controller.isInstanceBusy(instance.id) || reviewNotice != nil)
                     }
-                    if controller.isInstanceBusy(instance.id) { Text("该成员正在运行，完成或取消后可继续。").font(.caption).foregroundStyle(AgentXTheme.muted) }
+                    if let reviewNotice { Text(reviewNotice).font(.caption).foregroundStyle(.orange) }
+                    else if controller.isInstanceBusy(instance.id) { Text("该成员正在运行，完成或取消后可继续。").font(.caption).foregroundStyle(AgentXTheme.muted) }
                 }
             } else {
                 AgentXCard {
                     Text("场景已发布，添加成员后即可开始对话。")
-                    Button("配置应用成员") { controller.page = .members }
+                    Button("配置应用成员") { controller.navigate(to: .members) }
                 }
             }
         }

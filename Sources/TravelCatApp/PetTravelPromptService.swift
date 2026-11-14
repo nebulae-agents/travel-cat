@@ -163,6 +163,19 @@ final class PetTravelPromptService {
     typealias PostNotification = (PetTravelPromptDelivery) async -> Bool
     typealias ApplyBubblePreference = (Bool) -> Void
 
+    private let operations = AgentXOwnedTaskScope()
+    var hasOwnedOperations: Bool { !operations.isIdle }
+    func fence() {
+        operations.fence()
+        quietEndScheduleID = UUID()
+        quietEndToken?.cancel(); quietEndToken = nil
+        cancelUnavailableRetry()
+        if let next = queue.first, let attemptID { abandonCurrent(next, attemptID: attemptID) }
+        isDelivering = false; attemptID = nil; retryAfterAttemptID = nil
+    }
+    func suspendAndWait() async { fence(); await operations.suspendAndWait() }
+    @discardableResult func resumeWithoutRunning() -> Bool { operations.resumeWithoutRunning() }
+
     private let coordinator: PetTravelPromptCoordinator
     private let showBubble: ShowBubble
     private let postNotification: PostNotification
@@ -225,6 +238,7 @@ final class PetTravelPromptService {
     /// Quiet hours suppress unsolicited delivery, not a user opening their own reminder.
     @discardableResult
     func openPendingFromInbox() -> Bool {
+        guard operations.isEnabled else { return false }
         guard storageError == nil else { stateChanged(); return false }
         do {
             try appendNext(policy: NotificationPolicy(quietStart: 0, quietEnd: 0), now: clock())
@@ -251,6 +265,7 @@ final class PetTravelPromptService {
     }
 
     func ingestCurrent(settings: TravelSettings, now: Date = Date()) {
+        guard operations.isEnabled else { return }
         updateContext(settings: settings, now: now)
         do {
             let policy = policy(for: settings)
@@ -276,6 +291,7 @@ final class PetTravelPromptService {
     }
 
     func retry(settings: TravelSettings, now: Date = Date()) {
+        guard operations.isEnabled else { return }
         updateContext(settings: settings, now: now)
         do {
             let policy = policy(for: settings)
@@ -303,6 +319,7 @@ final class PetTravelPromptService {
     }
 
     func settingsDidChange(settings: TravelSettings, now: Date = Date()) {
+        guard operations.isEnabled else { return }
         updateContext(settings: settings, now: now)
         let activeAttempt = attemptID
         if let activeAttempt {
@@ -335,6 +352,7 @@ final class PetTravelPromptService {
     }
 
     private func deliverNextIfNeeded() {
+        guard operations.isEnabled else { return }
         guard !isDelivering, let next = queue.first else { return }
         isDelivering = true
         let currentAttempt = UUID()
@@ -342,7 +360,7 @@ final class PetTravelPromptService {
 
         if bubbleEnabled, showBubble(
             next,
-            { [weak self] in self?.routeHandler(next.route) },
+            { [weak self] in guard self?.operations.isEnabled == true, self?.attemptID == currentAttempt else { return }; self?.routeHandler(next.route) },
             { [weak self] in self?.finishCurrent(attemptID: currentAttempt) }
         ) {
             cancelUnavailableRetry()
@@ -350,10 +368,10 @@ final class PetTravelPromptService {
             return
         }
 
-        Task { @MainActor [weak self] in
-            guard let self else { return }
+        operations.start { [weak self] in
+            guard let self, operations.isEnabled else { return }
             let succeeded = await postNotification(next)
-            guard attemptID == currentAttempt else { return }
+            guard operations.isEnabled, !Task.isCancelled, attemptID == currentAttempt else { return }
             let shouldRetryAfterCurrent = retryAfterAttemptID == currentAttempt
             if succeeded {
                 cancelUnavailableRetry()
@@ -466,7 +484,7 @@ final class PetTravelPromptService {
     }
 
     private func finishCurrent(attemptID expectedAttempt: UUID) {
-        guard attemptID == expectedAttempt, isDelivering else { return }
+        guard operations.isEnabled, attemptID == expectedAttempt, isDelivering else { return }
         isDelivering = false
         attemptID = nil
         if retryAfterAttemptID == expectedAttempt {

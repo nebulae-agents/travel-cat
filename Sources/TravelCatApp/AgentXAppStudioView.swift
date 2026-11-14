@@ -82,7 +82,7 @@ struct AgentXAppStudioView: View {
             HStack {
                 Label(app?.experience?.published.map { "前台已发布 v\($0.number)" } ?? "前台尚未发布", systemImage: "checkmark.seal")
                 Spacer()
-                Text(isDirty ? "草稿待保存" : (expected == nil ? "尚无草稿" : "草稿已保存"))
+                Text(notice != nil && isDirty ? "草稿保存失败" : (isDirty ? "草稿待保存" : (expected == nil ? "尚无草稿" : "草稿已保存")))
                     .foregroundStyle(isDirty ? AgentXTheme.accent : AgentXTheme.muted)
             }
             Text(unpublished ? "当前编辑内容尚未发布。场景、模型与应用设置共享同一份草稿。" : "草稿与当前发布版本一致。")

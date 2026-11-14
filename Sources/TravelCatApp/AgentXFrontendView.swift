@@ -71,6 +71,7 @@ struct AgentXFrontendView: View {
         Binding(get: { session.values[session.selectedModule]?[id] ?? "" }, set: { session.values[session.selectedModule, default: [:]][id] = $0 })
     }
     var body: some View {
+        let reviewNotice = controller.pilotReviewNotice(for: controller.selectedInstanceID)
         VStack(alignment: .leading, spacing: 16) {
             if let contract {
                 Text(contract.title).font(.title2.bold())
@@ -89,6 +90,10 @@ struct AgentXFrontendView: View {
                         Text("请选择本应用实例").tag("")
                         ForEach(controller.currentInstances) { Text($0.name).tag($0.id) }
                     }
+                    if let instance = controller.currentInstances.first(where: { $0.id == controller.selectedInstanceID }) {
+                        AgentXModelPicker(controller: controller, instance: instance)
+            AgentXConfigurationSummaryView(controller: controller, instance: instance)
+                    }
                     HStack {
                         Button("保存输入") { save() }.disabled(!ready)
                         Button(module.submit.title) {
@@ -97,11 +102,13 @@ struct AgentXFrontendView: View {
                             controller.send(prompt, instanceID: controller.selectedInstanceID)
                         }.buttonStyle(.borderedProminent)
                             .disabled(!ready || prompt == nil || !controller.currentInstances.contains { $0.id == controller.selectedInstanceID }
-                                      || controller.state.runs.contains { $0.instanceID == controller.selectedInstanceID && !$0.status.terminal })
+                                      || controller.isInstanceBusy(controller.selectedInstanceID) || reviewNotice != nil)
                     }
+                    if let reviewNotice { Text(reviewNotice).font(.caption).foregroundStyle(.orange) }
                     if let prompt { DisclosureGroup("发送内容预览") { Text(prompt).textSelection(.enabled) } }
                     if let run = controller.state.runs.last(where: { $0.appID == appID && $0.instanceID == controller.selectedInstanceID && $0.purpose == nil }) {
-                        Text(run.status.label).font(.caption)
+                        Text(run.displayedStatus).font(.caption)
+                        AgentXRunConfigurationLabel(run: run)
                         Text(run.response.isEmpty ? (run.failure ?? "等待结果…") : run.response).textSelection(.enabled)
                         if !run.status.terminal { Button("取消运行") { controller.cancel(run.id) } }
                     }

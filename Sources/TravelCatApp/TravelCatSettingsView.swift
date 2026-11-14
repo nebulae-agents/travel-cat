@@ -120,6 +120,7 @@ final class TravelSettingsLifecycle {
 @MainActor
 final class TravelCatEnvironment: ObservableObject {
     let repository: TravelRepository
+    let isApplicationEnabled: () -> Bool
     let model: AppModel
     let settingsStore: TravelSettingsStore
     let homeLocation: HomeLocationController
@@ -141,7 +142,11 @@ final class TravelCatEnvironment: ObservableObject {
     var openGenerationSetup: () -> Void = {}
     var postcardBacklogRecovered: () -> Void = {}
     @Published var recoveryNotice: String?
-    lazy var backupExport = BackupExportController(repository: repository)
+    lazy var backupExport: BackupExportController = {
+        let controller = BackupExportController(repository: repository)
+        controller.isApplicationEnabled = isApplicationEnabled
+        return controller
+    }()
     private var selectingExportDestination = false
     @Published var latestCodexDiagnostic: CodexGenerationDiagnostic?
 
@@ -150,6 +155,7 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func recoverPostcardBacklog() {
+        guard isApplicationEnabled() else { return }
         // Pause automatic travel before restoring backlog state. Previously queued
         // manual requests retain their existing authorization.
         settings.automaticTravelEnabled = false
@@ -174,6 +180,7 @@ final class TravelCatEnvironment: ObservableObject {
         model: AppModel,
         settings: TravelSettings,
         selectedCharacterProfile initialSelectedCharacterProfile: CharacterProfile? = nil,
+        isApplicationEnabled: @escaping () -> Bool = { true },
         petLocator: @escaping () -> PetCompanionAnchor?,
         route: @escaping (PetTravelRoute) -> Void,
         testRequest: @escaping () -> Void = {},
@@ -182,7 +189,9 @@ final class TravelCatEnvironment: ObservableObject {
         promptStateChanged: @escaping () -> Void
     ) throws {
         self.repository = repository
+        self.isApplicationEnabled = isApplicationEnabled
         homeLocation = HomeLocationController(store: HomeLocationStore(root: repository.root))
+        homeLocation.isApplicationEnabled = isApplicationEnabled
         self.model = model
         self.settings = settings
         let characterConfiguration: CharacterConfigurationResponse
@@ -249,6 +258,7 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func showTestPaper() {
+        guard isApplicationEnabled() else { return }
         let result = testPaperController.request(
             isFastTestEnabled: effectiveSettings.isFastTestEnabled,
             followCodexPet: effectiveSettings.followCodexPet
@@ -257,6 +267,7 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func saveSettings() {
+        guard isApplicationEnabled() else { return }
         switch settingsLifecycle.save(settings) {
         case .applied:
             errorMessage = nil
@@ -269,6 +280,7 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
+        guard isApplicationEnabled() else { return }
         do {
             if enabled { try SMAppService.mainApp.register() }
             else { try SMAppService.mainApp.unregister() }
@@ -281,6 +293,7 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func exportData() {
+        guard isApplicationEnabled() else { return }
         guard !backupExport.isExporting, !selectingExportDestination else { return }
         selectingExportDestination = true
         defer { selectingExportDestination = false }
@@ -292,11 +305,12 @@ final class TravelCatEnvironment: ObservableObject {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "Travel Cat Export \(formatter.string(from: now))"
         panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        guard panel.runModal() == .OK, isApplicationEnabled(), let selected = panel.url else { return }
         if backupExport.start(to: selected) { errorMessage = nil }
     }
 
     func clearHistory() {
+        guard isApplicationEnabled() else { return }
         do {
             let backup = try repository.clearHistory()
             let contents = try repository.loadContents()
@@ -332,7 +346,8 @@ final class TravelCatEnvironment: ObservableObject {
             )
         }
         if previousProfile != model.characterProfile || previousSelection != selectedCharacterProfile {
-            automaticTravel?.settingsDidChange()
+            // Observation may refresh an armed scheduler, but must not re-arm a resumed app.
+            automaticTravel?.refresh()
         }
     }
 
@@ -347,6 +362,7 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     func chooseCharacter() {
+        guard isApplicationEnabled() else { return }
         let panel = NSOpenPanel()
         panel.title = "选择 Codex 宠物文件夹"
         panel.prompt = "选择角色"
@@ -368,6 +384,7 @@ final class TravelCatEnvironment: ObservableObject {
     }
 
     private func configureCharacter(_ request: CharacterConfigurationRequest) {
+        guard isApplicationEnabled() else { return }
         switch characterSelectionLifecycle.update({ try repository.configureCharacter(request) }) {
         case let .applied(configuration):
             applyCharacterConfiguration(configuration)

@@ -11,9 +11,10 @@ final class AutomaticTravelController: ObservableObject {
     @Published private(set) var progress: AutomaticTravelProgress?
     @Published private(set) var lastSuccessDate: Date?
     @Published private(set) var failure: AutomaticTravelFailure?
-    var canRetryFailure: Bool { isEnabled() && !isRunning && task == nil && failure != nil && retry != nil }
+    var canRetryFailure: Bool { !isApplicationSuspended && isEnabled() && !isRunning && ownedTasks.isEmpty && task == nil && failure != nil && retry != nil }
     func retryFailure() {
         guard canRetryFailure else { return }
+        automationArmed = true
         refresh(retryingFailure: true)
     }
     private let retry: ((@escaping AutomaticTravelProgressHandler) async throws -> AutomaticTravelOutcome)?
@@ -21,6 +22,14 @@ final class AutomaticTravelController: ObservableObject {
     private let readLastSuccessDate: () -> Date?
     private let run: (@escaping AutomaticTravelProgressHandler) async throws -> AutomaticTravelOutcome
     private var task: Task<Void, Never>?
+    // Cancellation is only a request. Keep every operation until its body exits,
+    // including operations replaced by settingsDidChange or a visibility pause.
+    private var ownedTasks: [UUID: Task<Void, Never>] = [:]
+    private var isApplicationSuspended = false
+    private var automationArmed = true
+    private var restartAfterDrain = false
+    var hasOwnedOperations: Bool { !ownedTasks.isEmpty }
+
     private var timer: Timer?
     private var executionToken: UUID?
     private var failureRequiresFreshRun = false
@@ -49,6 +58,9 @@ final class AutomaticTravelController: ObservableObject {
     }
 
     func start() {
+        guard !isApplicationSuspended, isEnabled() else { return }
+        automationArmed = true
+        if !ownedTasks.isEmpty, executionToken == nil { restartAfterDrain = true }
         guard observers.isEmpty else { refresh(); return }
         for name in [NSNotification.Name.NSSystemClockDidChange, NSNotification.Name.NSSystemTimeZoneDidChange] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -62,14 +74,17 @@ final class AutomaticTravelController: ObservableObject {
 
     func settingsDidChange() {
         pause()
-        refresh()
+        guard !isApplicationSuspended, isEnabled() else { return }
+        automationArmed = true
+        if ownedTasks.isEmpty { refresh() }
+        else { restartAfterDrain = true }
     }
 
     func refresh(retryingFailure: Bool = false) {
         timer?.invalidate()
         timer = nil
-        guard isEnabled() else { pause(); return }
-        guard task == nil else { return }
+        guard !isApplicationSuspended, automationArmed, isEnabled() else { pause(); return }
+        guard ownedTasks.isEmpty else { return }
         let operation = retryingFailure && !failureRequiresFreshRun ? (retry ?? run) : run
         let token = UUID()
         executionToken = token
@@ -79,6 +94,19 @@ final class AutomaticTravelController: ObservableObject {
         progress = .loadingPlanning
         task = Task { [weak self] in
             guard let self else { return }
+            defer {
+                ownedTasks[token] = nil
+                if executionToken == token { task = nil }
+                isRunning = !ownedTasks.isEmpty
+                if ownedTasks.isEmpty, restartAfterDrain {
+                    restartAfterDrain = false
+                    refresh()
+                }
+            }
+            guard !Task.isCancelled, !isApplicationSuspended, isEnabled(), executionToken == token else {
+                if executionToken == token { pause() }
+                return
+            }
             let outcome: AutomaticTravelOutcome
             var requiresFreshRun = false
             do {
@@ -98,9 +126,8 @@ final class AutomaticTravelController: ObservableObject {
             }
             // A paused/replaced execution cannot finalize the current run or install its timer.
             guard executionToken == token else { return }
-            guard isEnabled() else { pause(); return }
+            guard !isApplicationSuspended, isEnabled() else { pause(); return }
             task = nil
-            isRunning = false
             progress = nil
             if let success = outcome.lastSuccessDate { lastSuccessDate = success }
             message = outcome.message
@@ -117,18 +144,41 @@ final class AutomaticTravelController: ObservableObject {
             self.timer = timer
             RunLoop.main.add(timer, forMode: .common)
         }
+        ownedTasks[token] = task
     }
 
     func pause() {
+        restartAfterDrain = false
         executionToken = nil
         timer?.invalidate()
         timer = nil
-        task?.cancel()
+        ownedTasks.values.forEach { $0.cancel() }
         task = nil
-        isRunning = false
+        isRunning = !ownedTasks.isEmpty
         progress = nil
         nextCheckAt = nil
         message = "自动旅行已暂停"
+    }
+
+    /// Fences all entry points before waiting for actual completion. No preferences
+    /// or persisted travel state are changed.
+    func suspendAndWait() async {
+        isApplicationSuspended = true
+        automationArmed = false
+        stop()
+        let pending = Array(ownedTasks.values)
+        for operation in pending { await operation.value }
+    }
+
+    /// Restores permission only; an explicit start, settings change, or manual retry
+    /// must arm generation again. Wake notifications and refresh do not arm it.
+    @discardableResult
+    func resumeWithoutRunning() -> Bool {
+        guard ownedTasks.isEmpty else { return false }
+        automationArmed = false
+        restartAfterDrain = false
+        isApplicationSuspended = false
+        return true
     }
 
     func stop() {

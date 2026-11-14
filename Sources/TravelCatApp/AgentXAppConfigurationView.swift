@@ -51,7 +51,7 @@ struct AgentXAppConfigurationView: View {
                 }
             } message: {
                 if let definition = publishing {
-                    Text("“\(definition.name)”被以下应用引用：\(referencingApps(definition.id))。未固定版本的实例将在下次请求使用新版本，固定版本不变。")
+                    Text((try? controller.definitionPublicationImpact(id: definition.id).map(\.label).joined(separator: "\n")) ?? "无法解析发布影响；发布会被阻止。")
                 }
             }
             .onChange(of: controller.selectedAppID) { _, _ in notice = nil }
@@ -59,7 +59,7 @@ struct AgentXAppConfigurationView: View {
         } else {
             AgentXCard {
                 Text("先选择一个应用").font(.headline)
-                Button("所有应用") { controller.page = .apps }
+                Button("所有应用") { controller.navigate(to: .apps) }
             }
         }
     }
@@ -71,7 +71,7 @@ struct AgentXAppConfigurationView: View {
                 .foregroundStyle(AgentXTheme.muted)
             if controller.currentApp?.canRunHostText != true {
                 Text("此应用的配置由专用工作台管理。配置助手目前支持原生文本应用。")
-                Button("打开成员工作台") { controller.page = .instances }
+                Button("打开成员工作台") { controller.navigate(to: .members) }
             } else if let instance {
                 Picker("目标成员", selection: Binding(get: { instance.id }, set: { controller.selectedInstanceID = $0 })) {
                     ForEach(controller.currentInstances) { Text($0.name).tag($0.id) }
@@ -116,7 +116,7 @@ struct AgentXAppConfigurationView: View {
                 }
             } else {
                 Text("先为应用添加一个已配置模型与定义的成员。")
-                Button("配置成员") { controller.page = .instances }.buttonStyle(.borderedProminent)
+                Button("配置成员") { controller.navigate(to: .members) }.buttonStyle(.borderedProminent)
             }
             if let notice { Text(notice).font(.callout).textSelection(.enabled) }
         }
@@ -177,7 +177,7 @@ struct AgentXAppConfigurationView: View {
                 let runs = controller.state.runs.filter { $0.appID == controller.selectedAppID }
                 Text("\(runs.filter { !$0.status.terminal }.count) 个运行中 · \(runs.filter { $0.status.terminal && !$0.isRead }.count) 个待查看")
                     .font(.caption).foregroundStyle(AgentXTheme.muted)
-                Button("运行记录") { controller.page = .runs }
+                Button("运行记录") { controller.navigate(to: .runs) }
             }
             AgentXCard {
                 Label("待发布草稿 · \(pending.count)", systemImage: "doc.text").font(.headline)
@@ -196,13 +196,13 @@ struct AgentXAppConfigurationView: View {
                         Button("发布此定义") { publishing = definition }.buttonStyle(.borderedProminent)
                     }
                 }
-                Button("编辑定义与历史版本") { controller.page = .definitions }
+                Button("编辑定义与历史版本") { controller.navigate(to: .definitions) }
             }
             AgentXCard {
                 Label("应用配置", systemImage: "slider.horizontal.3").font(.headline)
-                Button("成员与实例") { controller.page = .instances }
-                Button("模型服务") { controller.page = .providers }
-                Button("应用版本与备份") { controller.page = .settings }
+                Button("成员与实例") { controller.navigate(to: .members) }
+                Button("模型服务") { controller.navigate(to: .providers) }
+                Button("应用版本与备份") { controller.navigate(to: .backups) }
                 Text("固定版本的成员不会自动跟随发布；可在实例设置中调整。").font(.caption).foregroundStyle(AgentXTheme.muted)
             }
         }

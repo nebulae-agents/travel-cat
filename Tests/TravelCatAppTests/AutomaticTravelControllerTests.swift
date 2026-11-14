@@ -4,6 +4,116 @@ import XCTest
 
 @MainActor
 final class AutomaticTravelControllerTests: XCTestCase {
+    func testSuspensionWaitsForPreviouslyPausedOperationAndResumeDoesNotRun() async {
+        var pending: CheckedContinuation<AutomaticTravelOutcome, Never>?
+        var calls = 0
+        var suspended = false
+        let controller = AutomaticTravelController(isEnabled: { true }, run: {
+            calls += 1
+            if calls == 1 { return await withCheckedContinuation { pending = $0 } }
+            return .init(nextCheckAt: Date().addingTimeInterval(60), message: "explicit")
+        })
+        controller.start(); await settle()
+        controller.pause()
+        controller.start() // A subsequent application suspension must revoke this queued intent.
+        let drain = Task { await controller.suspendAndWait(); suspended = true }
+        await settle()
+        XCTAssertFalse(suspended)
+        XCTAssertFalse(controller.resumeWithoutRunning())
+        controller.start(); controller.settingsDidChange(); controller.refresh()
+        await settle()
+        XCTAssertEqual(calls, 1)
+        pending?.resume(returning: .init(nextCheckAt: Date(), message: "stale"))
+        await drain.value
+        XCTAssertTrue(suspended)
+        XCTAssertFalse(controller.hasOwnedOperations)
+        XCTAssertTrue(controller.resumeWithoutRunning())
+        controller.refresh(); await settle()
+        XCTAssertEqual(calls, 1, "Permission alone does not arm timer or queue replay")
+        XCTAssertNil(controller.nextCheckAt)
+        controller.start(); await settle()
+        XCTAssertEqual(calls, 2)
+        await controller.suspendAndWait()
+    }
+
+    func testExplicitStartWhilePausedRunExitsIsHonoredWithoutOverlap() async {
+        var pending: CheckedContinuation<AutomaticTravelOutcome, Never>?
+        var calls = 0
+        let controller = AutomaticTravelController(isEnabled: { true }, run: {
+            calls += 1
+            if calls == 1 { return await withCheckedContinuation { pending = $0 } }
+            return .init(nextCheckAt: Date().addingTimeInterval(60), message: "restarted")
+        })
+        controller.start(); await settle()
+        controller.pause()
+        controller.start(); controller.start(); await settle()
+        XCTAssertEqual(calls, 1)
+        pending?.resume(returning: .init(nextCheckAt: Date(), message: "stale"))
+        await settle()
+        XCTAssertEqual(calls, 2, "Explicit start must survive an older operation draining")
+        XCTAssertEqual(controller.message, "restarted")
+        await controller.suspendAndWait()
+    }
+
+    func testResumeOnFreshControllerDoesNotArmAutomaticGeneration() async {
+        var calls = 0
+        let controller = AutomaticTravelController(isEnabled: { true }, run: {
+            calls += 1
+            return .init(nextCheckAt: Date(), message: "unexpected")
+        })
+        XCTAssertTrue(controller.resumeWithoutRunning())
+        controller.refresh(); await settle()
+        XCTAssertEqual(calls, 0)
+        XCTAssertNil(controller.nextCheckAt)
+        controller.stop()
+    }
+
+    func testDisablingTravelSettingCancelsWithoutWaitingForRunCompletion() async {
+        var enabled = true
+        var pending: CheckedContinuation<AutomaticTravelOutcome, Never>?
+        let controller = AutomaticTravelController(isEnabled: { enabled }, run: {
+            await withCheckedContinuation { pending = $0 }
+        })
+        controller.start(); await settle()
+        enabled = false
+        controller.settingsDidChange()
+        XCTAssertEqual(controller.message, "自动旅行已暂停")
+        XCTAssertNil(controller.progress)
+        XCTAssertTrue(controller.hasOwnedOperations)
+        pending?.resume(returning: .init(nextCheckAt: Date(), message: "stale"))
+        await controller.suspendAndWait()
+    }
+
+    func testDisabledBeforeTaskStartsNeverInvokesOperation() async {
+        var enabled = true
+        var calls = 0
+        let controller = AutomaticTravelController(isEnabled: { enabled }, run: {
+            calls += 1
+            return .init(nextCheckAt: Date(), message: "unexpected")
+        })
+        controller.refresh()
+        enabled = false
+        await settle()
+        XCTAssertEqual(calls, 0)
+        XCTAssertFalse(controller.hasOwnedOperations)
+        controller.stop()
+    }
+
+    func testStopRetainsCancelledOperationUntilItReallyExits() async {
+        var completion: CheckedContinuation<AutomaticTravelOutcome, Never>?
+        let controller = AutomaticTravelController(isEnabled: { true }, run: {
+            await withCheckedContinuation { completion = $0 }
+        })
+        controller.refresh(); await settle()
+        controller.pause()
+        controller.stop()
+        XCTAssertTrue(controller.isRunning, "Cancellation does not prove the operation exited")
+        completion?.resume(returning: .init(nextCheckAt: Date(), message: "stale"))
+        await settle()
+        XCTAssertFalse(controller.isRunning)
+        XCTAssertNil(controller.nextCheckAt)
+    }
+
     func testIndependentCancellationReleasesRunAndSchedulesBoundedRetry() async throws {
         var calls = 0
         let controller = AutomaticTravelController(isEnabled: { true }, run: {
@@ -65,9 +175,10 @@ final class AutomaticTravelControllerTests: XCTestCase {
         defer { controller.stop() }
         controller.refresh(); await settle()
         controller.settingsDidChange(); await settle()
+        XCTAssertEqual(pending.count, 1, "Settings cannot overlap an operation still exiting")
+        pending[0].resume(throwing: CancellationError()); await settle()
         XCTAssertEqual(pending.count, 2)
         guard pending.count == 2 else { return }
-        pending[0].resume(throwing: CancellationError()); await settle()
         XCTAssertTrue(controller.isRunning)
         XCTAssertNil(controller.nextCheckAt)
         controller.refresh(); await settle()
@@ -147,10 +258,12 @@ final class AutomaticTravelControllerTests: XCTestCase {
         callbacks[0](.publication)
         XCTAssertNil(controller.progress)
         controller.refresh(); await settle()
-        callbacks[1](.imageHandling)
-        callbacks[0](.validation)
+        XCTAssertEqual(pending.count, 1, "Paused work still owns the execution slot")
         pending[0].resume(returning: .init(nextCheckAt: Date(), message: "stale"))
         await settle()
+        controller.refresh(); await settle()
+        callbacks[1](.imageHandling)
+        callbacks[0](.validation)
         XCTAssertEqual(controller.progress, .imageHandling)
         XCTAssertTrue(controller.isRunning)
         pending[1].resume(throwing: CocoaError(.fileReadUnknown)); await settle()

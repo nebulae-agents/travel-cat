@@ -10,6 +10,46 @@ final class PetTravelPromptServiceTests: XCTestCase {
     // Fixed UTC noon, independent of the runner's time zone and wall clock.
     private let noon = Date(timeIntervalSince1970: 1_787_140_800)
 
+    func testSuspendWaitsForDeliveryWithoutAcknowledgingPendingAndResumeDoesNotReplay() async throws {
+        let harness = try makeHarness()
+        _ = try prepareReadyPostcard(in: harness)
+        let started = expectation(description: "notification started")
+        var continuation: CheckedContinuation<Bool, Never>?
+        var sends = 0
+        let service = PetTravelPromptService(coordinator: harness.coordinator,
+            showBubble: { _, _, _ in false },
+            postNotification: { _ in sends += 1; return await withCheckedContinuation { continuation = $0; started.fulfill() } },
+            route: { _ in XCTFail("disabled route") }, calendar: utcCalendar(), clock: { self.noon })
+        service.ingestCurrent(settings: .init(), now: noon)
+        await fulfillment(of: [started], timeout: 2)
+        service.fence()
+        XCTAssertFalse(service.openPendingFromInbox())
+        var ended = false
+        let stop = Task { await service.suspendAndWait(); ended = true }
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertFalse(ended)
+        XCTAssertTrue(service.hasOwnedOperations)
+        continuation?.resume(returning: true)
+        await stop.value
+        XCTAssertEqual(try harness.coordinator.pendingCount, 1)
+        XCTAssertTrue(service.resumeWithoutRunning())
+        XCTAssertEqual(sends, 1)
+    }
+    func testOldBubbleTapCannotRouteAfterSuspendAndReenable() async throws {
+        let harness = try makeHarness()
+        _ = try prepareReadyPostcard(in: harness)
+        var oldTap: (() -> Void)?
+        var routes = 0
+        let service = PetTravelPromptService(coordinator: harness.coordinator,
+            showBubble: { _, tap, _ in oldTap = tap; return true }, postNotification: { _ in false },
+            route: { _ in routes += 1 }, calendar: utcCalendar(), clock: { self.noon })
+        service.ingestCurrent(settings: .init(), now: noon)
+        await service.suspendAndWait()
+        XCTAssertTrue(service.resumeWithoutRunning())
+        oldTap?()
+        XCTAssertEqual(routes, 0)
+    }
+
     func testInboxOpensExactPromptAndAcknowledgesWhenBothNotificationChannelsFail() async throws {
         let harness = try makeHarness()
         let IDs = try prepareReadyPostcard(in: harness)

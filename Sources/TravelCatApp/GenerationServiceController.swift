@@ -11,6 +11,11 @@ final class GenerationServiceController: ObservableObject {
     private let credentials: any TravelServiceCredentialStoring
     private let didSave: () -> Void
     let providerResolver: AgentXProviderResolver?
+    let probes = AgentXOwnedTaskScope()
+    var applicationEnabled: Bool { probes.isEnabled }
+    func fence() { probes.fence() }
+    func suspendAndWait() async { await probes.suspendAndWait() }
+    @discardableResult func resumeWithoutRunning() -> Bool { probes.resumeWithoutRunning() }
 
     init(store: TravelGenerationConfigurationStore,
          credentials: any TravelServiceCredentialStoring,
@@ -29,6 +34,7 @@ final class GenerationServiceController: ObservableObject {
     func save(_ candidate: TravelGenerationConfiguration,
               narrativeSecret: String?, imageSecret: String?,
               narrativeNoKey: Bool = false, imageNoKey: Bool = false) throws {
+        guard applicationEnabled else { throw AgentXError.unavailable }
         var next = candidate
         next.onboardingCompleted = true
         guard next.schemaVersion == 1 else { throw TravelServiceConfigurationError.unsupportedVersion }

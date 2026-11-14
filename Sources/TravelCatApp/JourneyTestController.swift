@@ -70,6 +70,12 @@ final class JourneyTestController: ObservableObject {
   private let sleep: Sleep
   private let sessionFactory: SessionFactory
   private let repositoryFactory: RepositoryFactory
+  var isApplicationEnabled: () -> Bool = { true }
+  private let ownership = AgentXOwnedTaskScope()
+  private var activeRunCount = 0
+  func fence() { ownership.fence(); stop() }
+  var hasOwnedOperations: Bool { !ownership.isIdle }
+  @discardableResult func resumeWithoutRunning() -> Bool { ownership.resumeWithoutRunning() }
   private var runTask: Task<Void, Never>?
   private var lastRunTask: Task<Void, Never>?
   private var watchdogTask: Task<Void, Never>?
@@ -117,6 +123,7 @@ final class JourneyTestController: ObservableObject {
   }
 
   func start(fastTestEnabled: Bool, mode: JourneyTestMode = .realGeneration) {
+    guard isApplicationEnabled(), ownership.isEnabled, activeRunCount == 0 else { return }
     guard fastTestEnabled else {
       failImmediately(.fastTestDisabled)
       return
@@ -151,8 +158,10 @@ final class JourneyTestController: ObservableObject {
         .init(
           sessionID: owned.id, stage: nil, completedEvents: 0, message: status, state: .active,
           updatedAt: clock()))
-      let task = Task { [weak self] in
+      activeRunCount += 1
+      let task = ownership.start { [weak self] in
         guard let self else { return }
+        defer { self.activeRunCount -= 1 }
         await self.run(
           session: owned, repository: repository, token: token, mode: mode,
           profile: sessionProfile)
@@ -160,7 +169,7 @@ final class JourneyTestController: ObservableObject {
       runTask = task
       lastRunTask = task
       let duration = maximumDuration
-      watchdogTask = Task { [weak self] in
+      watchdogTask = ownership.start { [weak self] in
         do { try await Task.sleep(for: .seconds(duration)) } catch { return }
         self?.expire(token: token)
       }
@@ -193,8 +202,8 @@ final class JourneyTestController: ObservableObject {
   }
 
   func shutdown() async {
-    stop()
-    await lastRunTask?.value
+    fence()
+    await ownership.suspendAndWait()
   }
 
   func waitUntilIdleForTesting() async {

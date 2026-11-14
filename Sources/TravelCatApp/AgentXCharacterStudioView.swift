@@ -37,8 +37,9 @@ struct AgentXCharacterStudioView: View {
         controller.state.runs.filter { $0.instanceID == instanceID && $0.purpose == .characterPreview }.reversed()
     }
     private var activeRun: AgentXRun? { previewRuns.first { !$0.status.terminal } }
-    private var affectedCount: Int {
-        controller.state.instances.filter { $0.definitionID == definition?.id && $0.definitionRevision == nil }.count
+    private var publicationImpact: String {
+        guard let definition else { return "尚未选择人物定义。" }
+        return (try? controller.definitionPublicationImpact(id: definition.id).map(\.label).joined(separator: "\n")) ?? "无法解析发布影响；发布会被阻止。"
     }
 
     var body: some View {
@@ -86,7 +87,7 @@ struct AgentXCharacterStudioView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("将发布当前草稿。\(affectedCount) 个跟随最新版的实例会在后续运行中使用新版本；固定版本实例保持原版本。")
+            Text("将发布当前草稿。\n" + publicationImpact)
         }
     }
     private func characterCards(availableWidth: CGFloat) -> some View {
@@ -120,7 +121,7 @@ struct AgentXCharacterStudioView: View {
                 controller.configurationInstructions[instanceID] = description
                 controller.selectedConfigurationRunID = nil
                 controller.sendConfigurationRequest(description, instanceID: instanceID)
-                controller.page = .configuration
+                controller.navigate(to: .configuration)
             }.disabled(actionUnavailableReason != nil || generationDescription.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Text("生成后进入配置台逐项审阅建议，不会自动应用或发布。").font(.caption).foregroundStyle(.secondary)
             Divider()

@@ -125,7 +125,9 @@ final class TimerBubbleScheduler: BubbleScheduling {
         _ action: @escaping @MainActor () -> Void
     ) -> BubbleCancellation {
         let timer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { _ in
-            Task { @MainActor in action() }
+            // Created on MainActor's run loop; execute synchronously so cancellation
+            // cannot leave an unowned queued Task after the reminder scope drains.
+            MainActor.assumeIsolated { action() }
         }
         return TimerBubbleCancellation(timer: timer)
     }

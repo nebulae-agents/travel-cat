@@ -54,7 +54,7 @@ struct AgentXAssistantPanel: View {
             HStack {
                 Button(isFront ? "打开后台" : "审阅配置建议") {
                     controller.assistantPresented = false
-                    controller.page = .configuration
+                    controller.navigate(to: .configuration)
                 }
                 Spacer()
                 Button(isFront ? "发送" : "生成建议", systemImage: "arrow.up") {
@@ -63,7 +63,7 @@ struct AgentXAssistantPanel: View {
                     else {
                         controller.sendConfigurationRequest(input.wrappedValue, instanceID: instance.id)
                         controller.assistantPresented = false
-                        controller.page = .configuration
+                        controller.navigate(to: .configuration)
                     }
                 }.buttonStyle(.borderedProminent)
                     .disabled(unavailable != nil || input.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

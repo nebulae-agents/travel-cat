@@ -12,16 +12,22 @@ final class PostcardRecoveryController {
     private let worker: AutomaticTravelWorker
     private let settings: () -> TravelSettings
     private let isReady: () -> Bool
+    private let isApplicationEnabled: () -> Bool
     private let applyContents: ((RepositoryContents, [TripEvent], [UUID: PostcardPresentationReference]) -> Void)?
     private let didRefresh: () -> Void
     private let now: () -> Date
     private let sleep: (TimeInterval) async throws -> Void
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var restartAfterDrain: Set<UUID> = []
     private var stopped = false
+    private var isApplicationSuspended = false
+    private var resumePendingAutomatically = true
+    var hasOwnedOperations: Bool { !tasks.isEmpty }
     private var manualMessage: String?
 
     init(repository: TravelRepository, model: AppModel, worker: AutomaticTravelWorker,
          settings: @escaping () -> TravelSettings, isReady: @escaping () -> Bool,
+         isApplicationEnabled: @escaping () -> Bool = { true },
          applyContents: ((RepositoryContents, [TripEvent], [UUID: PostcardPresentationReference]) -> Void)? = nil,
          didRefresh: @escaping () -> Void = {},
          now: @escaping () -> Date = Date.init,
@@ -33,24 +39,47 @@ final class PostcardRecoveryController {
         self.worker = worker
         self.settings = settings
         self.isReady = isReady
+        self.isApplicationEnabled = isApplicationEnabled
         self.now = now
         self.sleep = sleep
     }
 
     func start() {
+        guard !isApplicationSuspended, isApplicationEnabled() else { return }
         stopped = false
+        resumePendingAutomatically = true
         model.retryPostcardAction = { [weak self] in self?.requestRetry($0) }
         refresh()
     }
 
     func stop() {
         stopped = true
+        restartAfterDrain.removeAll()
         tasks.values.forEach { $0.cancel() }
-        tasks.removeAll()
+    }
+
+    func suspendAndWait() async {
+        isApplicationSuspended = true
+        resumePendingAutomatically = false
+        stop()
+        let pending = Array(tasks.values)
+        for operation in pending { await operation.value }
+    }
+
+    /// Rebinds manual actions without replaying the saved request queue.
+    @discardableResult
+    func resumeWithoutRunning() -> Bool {
+        guard tasks.isEmpty else { return false }
+        restartAfterDrain.removeAll()
+        resumePendingAutomatically = false
+        isApplicationSuspended = false
+        stopped = false
+        model.retryPostcardAction = { [weak self] in self?.requestRetry($0) }
+        return true
     }
 
     func refresh() {
-        guard !stopped else { return }
+        guard !stopped, !isApplicationSuspended, isApplicationEnabled() else { return }
         defer { didRefresh() }
         do {
             let contents = try repository.loadContents()
@@ -76,7 +105,7 @@ final class PostcardRecoveryController {
             // automatic travel. Repeated refreshes cannot dispatch the same request.
             let allEvents = contents.events + supplemental
             for event in allEvents where event.postcardStatus == .pendingImage {
-                if retries[event.id]?.manualRequests.isEmpty == false,
+                if resumePendingAutomatically, retries[event.id]?.manualRequests.isEmpty == false,
                    try backlog.characterProfile(for: event.tripID) == .defaultBlackCat { schedule(event.id) }
             }
         } catch {
@@ -86,7 +115,8 @@ final class PostcardRecoveryController {
         }
     }
 
-    private func requestRetry(_ eventID: UUID) {
+    func requestRetry(_ eventID: UUID) {
+        guard !stopped, !isApplicationSuspended, isApplicationEnabled() else { return }
         guard isReady() else {
             manualMessage = "请先完成生成服务配置，再手动重试。"
             refresh()
@@ -116,13 +146,23 @@ final class PostcardRecoveryController {
     }
 
     private func schedule(_ eventID: UUID) {
-        guard !stopped, isReady(), tasks[eventID] == nil else { return }
+        guard !stopped, !isApplicationSuspended, isApplicationEnabled(), isReady() else { return }
+        if let existing = tasks[eventID] {
+            // Only explicit start/request paths can reach a cancelled slot after
+            // stop; preserve that intent without overlapping the exiting worker.
+            if existing.isCancelled { restartAfterDrain.insert(eventID) }
+            return
+        }
         tasks[eventID] = Task { [weak self] in
             guard let self else { return }
-            defer { tasks[eventID] = nil }
+            defer {
+                tasks[eventID] = nil
+                if restartAfterDrain.remove(eventID) != nil { schedule(eventID) }
+            }
             do {
-                while !Task.isCancelled && !stopped && isReady() {
+                while !Task.isCancelled && !stopped && !isApplicationSuspended && isApplicationEnabled() && isReady() {
                     let outcome = try await worker.step(settings: settings(), manualEventID: eventID)
+                    guard !Task.isCancelled, !stopped, !isApplicationSuspended, isApplicationEnabled(), isReady() else { return }
                     manualMessage = outcome.message
                     refresh()
                     let backlog = try PostcardBacklogStore(root: repository.root)

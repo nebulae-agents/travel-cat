@@ -142,6 +142,7 @@ struct AgentXWorkflowStudioView: View {
             ForEach(run.workflowSteps ?? []) { step in
                 VStack(alignment: .leading, spacing: 5) {
                     Text("\(step.name) · \(step.status.label)").font(.subheadline.bold())
+                    AgentXConfigurationDetails(configuration: step.effectiveConfiguration, title: "步骤运行配置")
                     if !step.output.isEmpty { Text(step.output).textSelection(.enabled) }
                     if let failure = step.failure { Text(failure).foregroundStyle(.orange).textSelection(.enabled) }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(10)

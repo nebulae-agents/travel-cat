@@ -53,6 +53,8 @@ import XCTest
         XCTAssertEqual(messages[1][0].content, "Published")
         XCTAssertTrue(messages[1][1].content.contains("output-1"))
         XCTAssertEqual(c.state.runs[0].workflowSteps?.count, 2)
+        XCTAssertEqual(c.state.runs[0].workflowSteps?.first?.effectiveConfiguration?.definitionRevision, 1)
+        XCTAssertEqual(c.state.runs[0].workflowSteps?.last?.effectiveConfiguration?.modelSource, .publishedBinding)
         XCTAssertEqual(c.state.runs[0].response, "output-2")
         XCTAssertEqual(c.state.runs[0].status, .completed)
         XCTAssertFalse(c.isInstanceBusy(member))

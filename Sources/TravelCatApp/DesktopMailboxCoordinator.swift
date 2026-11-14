@@ -9,6 +9,7 @@ final class DesktopMailboxCoordinator {
     private let mailbox: AgentLauncherController
     private var notifications: [NSObjectProtocol] = []
     private var subscriptions: [AnyCancellable] = []
+    private var contentBinding: DesktopMailboxContentBinding?
 
     init(desktop: DesktopPetController, pet: AppModel, agents: AgentWorkbenchModel?,
          openPostcard: @escaping (UUID) -> Void, openAlbum: @escaping () -> Void,
@@ -28,22 +29,16 @@ final class DesktopMailboxCoordinator {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.updatePresentation() }
         })
-        subscriptions.append(pet.objectWillChange.sink { [weak self] _ in
-            Task { @MainActor in self?.mailbox.refresh() }
-        })
-        if let agents {
-            subscriptions.append(agents.objectWillChange.sink { [weak self, weak agents] _ in
-                Task { @MainActor in
-                    guard let agents else { return }
-                    self?.mailbox.update(model: agents)
-                }
-            })
+        contentBinding = DesktopMailboxContentBinding(pet: pet, agents: agents) { [weak mailbox] model in
+            mailbox?.update(model: model)
         }
         subscriptions.append(desktop.objectWillChange.sink { [weak self] _ in
             Task { @MainActor in self?.updatePresentation() }
         })
         updatePresentation()
     }
+
+    func updateAgents(_ model: AgentWorkbenchModel?) { contentBinding?.updateAgents(model) }
 
     func updatePresentation() {
         guard !desktop.isHidden, let window = desktop.windowController.window, window.isVisible else {
@@ -58,5 +53,51 @@ final class DesktopMailboxCoordinator {
         notifications.forEach(NotificationCenter.default.removeObserver)
         notifications.removeAll()
         subscriptions.removeAll()
+        contentBinding?.shutdown(); contentBinding = nil
+    }
+}
+
+/// Rebinds only the workbench side of the shared inbox; pet observation lives independently.
+@MainActor
+final class DesktopMailboxContentBinding {
+    private weak var agents: AgentWorkbenchModel?
+    private var petSubscription: AnyCancellable?
+    private var agentSubscription: AnyCancellable?
+    private var generation = UUID()
+    private var initialized = false
+    private var stopped = false
+    private let update: (AgentWorkbenchModel?) -> Void
+
+    init(pet: AppModel, agents: AgentWorkbenchModel?, update: @escaping (AgentWorkbenchModel?) -> Void) {
+        self.update = update
+        petSubscription = pet.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.stopped else { return }
+                self.update(self.agents)
+            }
+        }
+        updateAgents(agents)
+    }
+    func updateAgents(_ model: AgentWorkbenchModel?) {
+        guard !stopped, !initialized || agents !== model else { return }
+        initialized = true
+        generation = UUID()
+        let current = generation
+        agentSubscription = nil
+        agents = model
+        update(model)
+        if let model {
+            agentSubscription = model.objectWillChange.sink { [weak self, weak model] _ in
+                Task { @MainActor in
+                    guard let self, !self.stopped, self.generation == current,
+                          let model, self.agents === model else { return }
+                    self.update(model)
+                }
+            }
+        }
+    }
+    func shutdown() {
+        stopped = true; generation = UUID()
+        petSubscription = nil; agentSubscription = nil; agents = nil
     }
 }

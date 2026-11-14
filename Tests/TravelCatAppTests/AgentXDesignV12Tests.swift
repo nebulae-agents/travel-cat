@@ -98,7 +98,11 @@ final class AgentXDesignV12Tests: XCTestCase {
         controller.page = .configuration
         controller.openApp("blackcat")
         XCTAssertEqual(controller.selectedInstanceID, "chosen-member")
-        controller.openApp("different-app")
+        try controller.addApp(name: "Different app")
+        let otherAppID = try XCTUnwrap(controller.state.apps.last?.id)
+        controller.openApp("blackcat")
+        controller.selectedInstanceID = "chosen-member"
+        controller.openApp(otherAppID)
         XCTAssertEqual(controller.selectedInstanceID, "")
     }
 

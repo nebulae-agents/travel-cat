@@ -66,14 +66,14 @@ import XCTest
         c.send("next", instanceID: member); await c.waitForRuns()
         XCTAssertFalse(requests[2].contains { $0.content.contains("How do I use this app?") })
     }
-    func testSkinRoundTripAndUndoDoesNotRevertOtherState() throws {
+    func testSkinRoundTripAndUndoDoesNotRevertOtherState() async throws {
         let (c, root, _) = try configured { _, _, _, _ in "ok" }
         defer { try? FileManager.default.removeItem(at: root) }
         XCTAssertEqual(c.frontSkin, .immersive)
         try c.setFrontSkin(.simple)
         XCTAssertTrue(c.canUndo)
         try c.addApp(name: "Keep this app")
-        try c.undoLastChange()
+        try await c.undoLastChange()
         XCTAssertEqual(c.frontSkin, .immersive)
         XCTAssertEqual(c.state.apps.count, 2)
         try c.setFrontSkin(.simple)

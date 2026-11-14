@@ -41,7 +41,11 @@ final class AgentXViewTests: XCTestCase {
         host.rootView.openWorkbench()
         XCTAssertEqual(opened, 1)
         XCTAssertEqual(controller.drafts["draft"], "保留未发送内容")
-        controller.openFromDock(travelPending: host.rootView.workbenchPending > 0)
+        controller.openFromDock(workbenchPending: host.rootView.workbenchPending)
+        XCTAssertEqual(controller.page, .chat, "BlackCat must ignore another application’s pending count")
+        try controller.ensureWorkbenchApp()
+        controller.openApp("workbench")
+        controller.openFromDock(workbenchPending: host.rootView.workbenchPending)
         XCTAssertEqual(controller.page, .inbox)
     }
 

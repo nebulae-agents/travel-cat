@@ -179,11 +179,13 @@ struct GenerationSetupView: View {
     }
 
     private func probe(isImage: Bool) {
+        guard controller.applicationEnabled else { return }
         busy = true
         message = isImage ? "正在试生成照片；不会加入历史相册…" : "正在测试文字连接…"
         preview = nil
-        testTask = Task { @MainActor in
+        testTask = controller.probes.start {
             defer { busy = false; testTask = nil }
+            guard controller.applicationEnabled, !Task.isCancelled else { return }
             do {
                 let service = isImage ? draft.image : draft.narrative
                 try service.validate()
@@ -205,6 +207,7 @@ struct GenerationSetupView: View {
                         apiKey: key(for: service, isImage: false), useStoredCredential: false)
                 }
                 try Task.checkCancellation()
+                guard controller.applicationEnabled else { throw CancellationError() }
                 if isImage {
                     guard data.count <= 15 * 1024 * 1024,
                           let source = CGImageSourceCreateWithData(data as CFData, nil),
