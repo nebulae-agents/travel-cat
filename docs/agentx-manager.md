@@ -249,3 +249,51 @@ Dock 原生读取仍返回 timeoutReached，故 Dock 图标/数字视觉及直�
 - 安装前后对 AgentXManager、AgentXHost、TravelCat、TravelCatAgents 及实际 TravelPetData 共 7,540 个文件核对 SHA-256：0 内容变化、0 新增、0 缺失。比较覆盖安装阶段，不包含正常启动后的状态写入。
 - 正式原生客户端确认桌宠点击打开新版 BlackCat 前台，应用/待处理/动态分区可见，使用助手显示未配置成员的正确引导，打开后台并返回前台成功。正式模型和成员未添加测试数据，未验证远程模型生成。
 - 旧版备份：`/Users/nebulae/Applications/.Travel Cat.app.backup.20261105T062741Z.54953`。本轮未提交、推送或远端发布。
+
+
+## 2026-11-05 OpenRouter 与 Pi Agent（build 52，已安装并通过真实 OpenRouter 推理验收）
+
+- 已实现 OpenRouter 公开/账号目录、24 小时启动缓存与手动刷新、价格/上下文/能力显示、搜索、启用/收藏/分类默认。新模型默认关闭，下架模型保留历史标识；旧编辑窗口保存只合并用户改动，保留后台更新后的目录事实。
+- 前台普通对话、场景和自定义模块共用“下次请求模型”选择器。会话选择按成员持久化，高于应用发布绑定；保留普通历史、隔离使用助手；运行中先停止再切换。成员编辑不会重置会话选择。工作流使用发布绑定，各步骤记录实际服务、模型及运行核心。
+- OpenRouter 生产请求路由独立 Pi 子进程，不静默退回旧 HTTP transport；其他服务维持原 transport。Pi 官方依赖固定 1.5.0，内嵌 Node 22.22.2（官方归档 SHA 校验）。请求及密钥只经 stdin，环境不继承服务凭据，文本能力无工具；有输出限额、超时及取消回收。生产依赖与许可证随应用打包，开发依赖不进入源码目录。
+- 最终完整回归：1,738 项 XCTest，17 项条件跳过，0 失败；Swift Testing 报告 85 项、0 失败，其中需显式产物路径的 Pi 集成默认跳过。该集成另以最终 dist 包内 Node/runner 实跑，8 项全部通过；Node 本机协议测试 6 项通过。首次完整回归有一项既有 JourneyTestModelRunner 启动超时，专项 10 项及最终完整回归均未复现。
+- 最终安装包版本 1.5.0 / build 52，严格深度签名校验通过，内嵌 Node 可执行。真实 Swift → 包内 Node → Pi → 本机 SSE 已验证模型 A/B、历史及取消连接关闭；不是 OpenRouter 真实推理验收。
+- 独立原生验收位于 `/private/tmp/agentx-pi-native`：用户处理系统钥匙串授权后，模型 A/B 回复、B 请求保留 A 历史及停止请求均已在原生客户端验证；公共目录自动载入 455 个模型。首次编辑服务错误打开新建表单，已修复为身份与实体快照一并呈现，并通过 113 项 XCTest、49 项 Swift Testing 及代码复审。修复后的原生首开、目录搜索、启用、默认模型保存及重启恢复已通过；重启后模型 B、原对话及已启用的 OpenRouter 模型均保留。
+- 已安装并启动 1.5.0 / build 52，严格深度签名校验通过。安装前后 7,540 个受保护数据文件哈希完全一致，旧应用保留备份。用户已在正式客户端填写并保存 API Key。通过原生界面启用 openai/gpt-4o-mini，新建“Pi 连接验收”应用、角色及成员，发送一条短文本。界面收到“Pi 连接成功。”，运行 389546e2-e9ca-4add-ad31-51104af2412b 的持久记录为 completed、actualModel=openai/gpt-4o-mini、runtimeCore=pi-agent-core。未读取或输出密钥。目录中的手填 claude 保留且标记不可用。本轮未提交或推送。
+
+
+## 2026-11-06 模型选择面板（build 53，已安装并验收）
+
+- 共用面板覆盖对话、实例和服务默认配置；按服务/厂商浏览，单服务省略一层。名称/ID 支持忽略大小写和分隔符、乱序词、ds 别名及宽松子序列匹配，精确与完整关键字优先。
+- 多收藏固定在目录上方独立滚动；收藏与选择独立，同名模型按服务隔离。停用/下架/不支持文本的模型显示不可用原因；当前、默认与版本类型有标记。高级手动 ID 配置折叠，正常流程从目录选择。
+- 默认设置同时启用有效模型；偏好按当前状态精确保存，旧服务草稿合并相对基线的改动，保留新目录事实与明确手动增删。
+- 完整回归 1,750 项 XCTest（17 项条件跳过）、85 项 Swift Testing，0 失败。随后修复斜杠模型 ID 的分组边界，最终专项 AgentX 123 项 XCTest、49 项 Swift Testing，0 失败。规格与质量复审均通过，diff 检查通过。
+- 独立原生验收通过：多收藏置顶并独立滚动、服务→厂商分层、ds v4.1 flash 模糊筛选、同名模型按服务选择、禁用状态和直接设默认；重启后收藏、默认与会话选择保留。完整截图确认面板布局及当前/默认标记。
+- 正式安装 1.5.1 / build 53，严格深度签名校验通过。安装阶段 7,550 个受保护数据文件哈希完全一致；旧版备份：/Users/nebulae/Applications/.Travel Cat.app.backup.20261106T022654Z.19059。
+- 正式 OpenRouter 对话默认及 Pi 验收助手当前会话均为标准版 deepseek/deepseek-v4.1-flash；正式重启后界面确认默认/当前标记、4 个收藏及原历史仍保留。此次没有发起新付费推理，不代表 DeepSeek 回复质量验收。本轮未提交或推送。
+
+
+## 2026-11-06 updatev3 应用壳与本地应用管理（1.6.0 / build 54 候选）
+
+当前应用成为界面上下文：顶部应用切换器与模块页签、左侧应用/平台入口、当前应用搜索和收件箱共同使用同一选择状态。应用切换保留各自成员、未发送输入和会话模型；平台页提供返回应用入口。⌘K 打开分组切换器，⌘1–9 切换已启用应用，⌘P 搜索当前应用模块、成员与运行记录。中文输入法组合期间，方向键、回车和 Esc 交还输入法。
+
+应用管理提供已安装列表、本地模板库和卸载备份。模板复用模型目录选择；导入支持本地 ZIP 与已导出的配置目录。安装前展示来源、模型依赖、权限声明和配置内容；更改应用 ID 或模型后必须重新预览。安装创建停用应用，不自动运行。导出只包含可移植配置，不包含凭据、对话历史或用户记忆；内建入口不可卸载。
+
+停用先阻止新工作，再等待该应用拥有的任务、通知和外部运行器完成停止。不能确认停止时显示错误并提供重试，不以取消请求代替已停止。重新启用不自动执行历史任务。卸载需完成停止与可恢复备份验证，审计保留；恢复拒绝覆盖同 ID 应用，并重新校验备份内容。
+
+权限清单是应用声明，不代表操作系统授权。本轮范围为内建前台和本地声明式包，未接入远程 Git 应用库或应用携带的可执行前台。
+
+验证状态：规格与质量复核通过。完整回归最终合计 1,860 项 XCTest（17 项条件跳过）及 87 项 Swift Testing 通过；首轮两项旧源码契约测试因新增启用检查及通知授权 helper 提取而失败，修订测试后 79 项专项和完整应用目标 928 项均通过，生产逻辑未为测试改动。1.6.0 / build 54 已打包并通过严格签名校验；包内 Pi 8 项测试首次本机端口等待超时，独立监听核验正常后重跑全部通过。
+
+隔离客户端 `/private/tmp/agentx-shell-v6-native` 已通过实际键盘/界面验证：应用切换、成员/模型及草稿保留、当前应用搜索、平台返回、Alpha/Beta 本机请求、停用 Alpha 取消慢请求且保留 Beta 完成结果、重新启用不自动请求、模板模型目录选择与默认停用安装。运行文件与本机请求记录均已回读确认。
+
+尚未完成：ZIP/目录选择器、导出、卸载恢复、重启及完整窗口截图验收。系统台前调度仅返回侧边缩略窗口，文件选择器选中有效 ZIP 后“打开”仍不可用；恢复窗口与 Dock 焦点尝试未解决，已请求用户将 AgentX Shell Preview 置于前台。不能将上述待验收项视为客户端通过。正式安装仍为 1.5.1 / build 53，用户数据未改动。候选 dist 保留以待继续验收；尚未进行最终清理和上传审计。本轮不提交、推送或远端发布。
+
+
+### Build 54 installed and verified (2026-11-07)
+
+Version 1.6.0/build54 is installed. Strict signature and executable hash verified; all 7,550 protected entries were unchanged during installation. Previous bundle: /Users/nebulae/Applications/.Travel Cat.app.backup.20261107T044256Z.86319.
+
+Native acceptance additionally verified ZIP preview/install, configuration export, verified uninstall/restore, duplicate restore rejection and restart to the current application. The user assisted with system Open/Save panels; success was read back in the UI. Export contained only application, definition and member configuration. Malicious ZIP, missing requirements and directory reimport have automated coverage but were not individually exercised in the native UI. No new paid inference was performed.
+
+The installed UI opens from the pet, retains all three existing applications, original Pi history and deepseek/deepseek-v4.1-flash conversation choice. A full installed-window screenshot was inspected. Earlier lock-screen/file-panel blockers are resolved. dist removed. No commit, push or remote release.
