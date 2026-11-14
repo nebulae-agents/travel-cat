@@ -66,6 +66,10 @@ case "$ARTIFACT_ID" in
 esac
 PINNED_CLI=$("$PROJECT_ROOT/Scripts/verify-travelcatctl-release.sh" "$PROVENANCE" "$PROJECT_ROOT" "$PINNED_ROOT")
 BUNDLED_LAUNCHER="$PROJECT_ROOT/Scripts/run-bundled-travelcatctl.sh"
+PI_ARTIFACT=$("$PROJECT_ROOT/Scripts/build-pi-runtime.sh")
+[ -x "$PI_ARTIFACT/Helpers/PiAgent/node" ] && [ -f "$PI_ARTIFACT/Resources/PiAgent/runner.mjs" ] || {
+    echo "package-app: Pi runtime artifact is incomplete" >&2; exit 1;
+}
 
 swift_build --disable-sandbox -c release --product TravelCatApp
 BIN_DIR=$(swift_build --disable-sandbox -c release --show-bin-path)
@@ -141,6 +145,8 @@ trap cleanup EXIT HUP INT TERM
 mkdir -p "$DIST_DIR"
 rm -rf -- "$STAGING"
 mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Helpers" "$STAGING/Contents/Resources"
+cp -R "$PI_ARTIFACT/Helpers/PiAgent" "$STAGING/Contents/Helpers/PiAgent"
+cp -R "$PI_ARTIFACT/Resources/PiAgent" "$STAGING/Contents/Resources/PiAgent"
 install -m 755 "$EXECUTABLE" "$STAGING/Contents/MacOS/TravelCatApp"
 install -m 555 "$BUNDLED_LAUNCHER" "$STAGING/Contents/Resources/run-travelcatctl"
 install -m 555 "$PINNED_CLI" "$STAGING/Contents/Helpers/travelcatctl"
@@ -191,6 +197,9 @@ for cat_asset in \
         exit 1
     }
 done
+# Sign the nested native runtime before sealing the outer application.
+codesign --force --sign - "$STAGING/Contents/Helpers/PiAgent/node"
+codesign --verify --strict "$STAGING/Contents/Helpers/PiAgent/node"
 codesign --force --sign - "$STAGING"
 codesign --verify --deep --strict "$STAGING"
 
