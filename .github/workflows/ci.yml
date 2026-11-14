@@ -116,6 +116,8 @@ jobs:
           CACHE_OBSERVATION
       - name: Python source contracts
         run: python3 -m unittest discover -s Scripts/tests -p '*_tests.py'
+      - name: Install agentxd event protocol dependency
+        run: python3 -m pip install -r Runtime/requirements.txt
       - name: Agent runtime contracts
         run: |
           unset TRAVEL_CAT_CODEX_LIVE_TEST TRAVEL_CAT_CODEX_LIVE_IMAGE TRAVEL_CAT_CODEX_LIVE_CONTEXT

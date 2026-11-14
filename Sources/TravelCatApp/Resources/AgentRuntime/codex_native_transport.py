@@ -28,8 +28,14 @@ class NativeFailure(Exception):
     pass
 
 
+class NativeObservationFailure(NativeFailure):
+    def __init__(self, reason):
+        self.observation_reason = reason
+        super().__init__(reason)
+
 class NativeReadDeadline(NativeFailure):
-    """No partial frame was sent, or a fully sent read simply has no response yet."""
+    """Read expired safely; an observation tail, if any, remains ordered in memory."""
+    observation_reason = "timeout"
     pass
 
 
@@ -348,6 +354,7 @@ class NativeTransport:
         self.callback, self.pending = callback, {}
         self.lock, self.writer = threading.RLock(), threading.Lock()
         self.closed, self.total = False, 0
+        self.observation_tail = b''
         path = _ensure_daemon(config)
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.socket.settimeout(START_SECONDS)
@@ -384,7 +391,7 @@ class NativeTransport:
         if headers.get(b'sec-websocket-accept') != accept or headers.get(b'upgrade', b'').lower() != b'websocket' or b'upgrade' not in [v.strip().lower() for v in headers.get(b'connection', b'').split(b',')] or b'sec-websocket-extensions' in headers:
             raise NativeFailure('invalid WebSocket upgrade response')
 
-    def _write_bytes(self, data, deadline, *, scoped_read=False):
+    def _write_bytes(self, data, deadline, *, scoped_read=False, retain_observation=False, continuing_observation=False):
         # Select readiness is advisory: nonblocking I/O is essential under backpressure.
         self.socket.setblocking(False)
         offset = 0
@@ -392,6 +399,9 @@ class NativeTransport:
             while offset < len(data):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not select.select([], [self.socket], [], remaining)[1]:
+                    if retain_observation:
+                        if offset or continuing_observation: self.observation_tail=data[offset:]
+                        raise NativeReadDeadline('native observation write deadline exceeded')
                     if scoped_read and offset == 0:
                         raise NativeReadDeadline('native background write deadline exceeded before first byte')
                     raise NativeFailure('native socket write timed out')
@@ -399,9 +409,14 @@ class NativeTransport:
                 except (BlockingIOError, InterruptedError): continue
                 if not sent: raise NativeFailure('native socket closed during write')
                 offset += sent
-        except (OSError, ValueError): raise NativeFailure('native socket write failed') from None
+        except NativeFailure:
+            if retain_observation and (offset or continuing_observation): self.observation_tail=data[offset:]
+            raise
+        except (OSError, ValueError):
+            if retain_observation and (offset or continuing_observation): self.observation_tail=data[offset:]
+            raise NativeFailure('native socket write failed') from None
 
-    def _wire_send(self, payload, opcode=1, *, deadline=None):
+    def _wire_send(self, payload, opcode=1, *, deadline=None, observation=False):
         if len(payload) > MAX_FRAME: raise NativeFailure('native request exceeds frame limit')
         key = os.urandom(4)
         if len(payload) < 126: header = bytes([128 | opcode, 128 | len(payload)])
@@ -417,28 +432,45 @@ class NativeTransport:
         try:
             if self.closed: raise NativeFailure('native socket disconnected')
             if read_deadline is not None: _remaining_read_time(deadline)
-            self._write_bytes(data, deadline, scoped_read=read_deadline is not None)
+            # A timed-out observation never leaves a new frame behind an unfinished
+            # frame. No worker drains this tail: only the next admitted send does,
+            # under its own deadline and this same writer lock. Late replies are ignored.
+            tail=getattr(self,'observation_tail',b'')
+            if tail:
+                self._write_bytes(tail,deadline,scoped_read=True,retain_observation=True,continuing_observation=True)
+                self.observation_tail=b''
+            if observation:
+                self._write_bytes(data,deadline,scoped_read=True,retain_observation=True)
+            else:
+                self._write_bytes(data, deadline, scoped_read=read_deadline is not None)
         finally: self.writer.release()
 
-    def _send(self, value, *, deadline=None):
-        self._wire_send(json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode(), deadline=deadline)
+    def _send(self, value, *, deadline=None, observation=False):
+        options={'observation':True} if observation else {}
+        self._wire_send(json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode(), deadline=deadline,**options)
 
-    def request(self, method, params, *, deadline=None):
+    def request(self, method, params, *, deadline=None, observation=False):
+        if observation and (deadline is None or method != 'thread/backgroundTerminals/list'): raise NativeFailure('invalid observation')
         # Only these read-only RPCs may expire locally without invalidating mutation outcomes.
         if deadline is not None:
             if method not in ('thread/backgroundTerminals/list', 'thread/turns/list', 'thread/items/list'): raise NativeFailure('read deadline is only valid for scoped observations')
             _remaining_read_time(deadline)
         request_id = str(uuid.uuid4())
         response = queue.Queue(maxsize=1)
-        with self.lock:
-            if self.closed: raise NativeFailure('native socket disconnected')
-            if len(self.pending) >= 32: raise NativeFailure('too many native requests')
-            self.pending[request_id] = response
+        acquired = self.lock.acquire(False) if observation else self.lock.acquire()
+        if not acquired: raise NativeObservationFailure('busy')
         try:
-            try: self._send({'id': request_id, 'method': method, 'params': params}, deadline=deadline)
+            if self.closed: raise NativeFailure('native socket disconnected')
+            if len(self.pending) >= 32: raise NativeObservationFailure('busy')
+            self.pending[request_id] = response
+        finally: self.lock.release()
+        try:
+            try:
+                options={'observation':True} if observation else {}
+                self._send({'id': request_id, 'method': method, 'params': params}, deadline=deadline,**options)
             except NativeReadDeadline: raise
             except NativeFailure:
-                self._lost(notify_async=deadline is not None)
+                if not observation: self._lost(notify_async=deadline is not None)
                 raise
             try: result = response.get(timeout=_remaining_read_time(deadline) if deadline is not None else REQUEST_SECONDS)
             except queue.Empty:
@@ -449,11 +481,23 @@ class NativeTransport:
             # caller resumes late. The absolute observation deadline still wins.
             if deadline is not None: _remaining_read_time(deadline)
             if isinstance(result, NativeFailure): raise result
-            if 'error' in result: raise NativeFailure('native server rejected ' + method)
-            if not isinstance(result.get('result'), dict): raise NativeFailure('invalid native server response')
+            if 'error' in result:
+                if observation:
+                    error=result['error']
+                    code=error.get('code') if isinstance(error,dict) else None
+                    raise NativeObservationFailure('unsupported' if code == -32601 else 'invalid_response')
+                raise NativeFailure('native server rejected ' + method)
+            if not isinstance(result.get('result'), dict):
+                if observation: raise NativeObservationFailure('invalid_response')
+                raise NativeFailure('invalid native server response')
             return result['result']
         finally:
-            with self.lock: self.pending.pop(request_id, None)
+            if observation:
+                # Atomic removal only: never wait behind an unrelated registry user
+                # after the read deadline. Readers use get; shutdown snapshots values.
+                self.pending.pop(request_id, None)
+            else:
+                with self.lock: self.pending.pop(request_id, None)
 
     def notify(self, method, params): self._send({'method': method, 'params': params})
 

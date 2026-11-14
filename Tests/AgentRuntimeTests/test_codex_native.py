@@ -108,6 +108,36 @@ class NativeControllerTests(unittest.TestCase):
             with self.assertRaises(native.NativeFailure):
                 self.controller.handle('native_connect', self.params)
 
+    def test_offline_quiesce_retries_background_failure_after_confirmed_interruption(self):
+        self.prompt()
+        attempts = []
+        def background(_):
+            attempts.append(True)
+            if len(attempts) == 1: raise native.NativeFailure('temporary background query failure')
+            return {'data': [], 'nextCursor': None}
+        self.transport.results['thread/backgroundTerminals/list'] = background
+        with patch.object(native._transport_module, 'stop_managed_daemon') as stop:
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_quiesce', {})
+            stop.assert_not_called()
+            task = self.controller.tasks['task-1']
+            self.assertIsNone(task['turnId'])
+            self.assertEqual(task['terminalTurns']['turn-1'], 'interrupted')
+            self.assertTrue(self.controller.handle('native_background_stop', {'taskId':'task-1'})['stopped'])
+            self.assertEqual(self.controller.handle('native_quiesce', {}), {'stopped': True})
+            stop.assert_called_once()
+        self.assertEqual(sum(method == 'turn/interrupt' for method, _ in self.transport.calls), 1)
+
+    def test_background_cleanup_cannot_clear_unconfirmed_turn_on_quiesce_retry(self):
+        self.prompt()
+        self.transport.results['turn/interrupt'] = {}
+        with patch.object(native, 'CANCEL_COMPLETION_SECONDS', 0.01), patch.object(native._transport_module, 'stop_managed_daemon') as stop:
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_quiesce', {})
+            self.assertTrue(self.controller.handle('native_background_stop', {'taskId':'task-1'})['stopped'])
+            with self.assertRaises(native.NativeFailure): self.controller.handle('native_quiesce', {})
+            self.assertTrue(self.controller.tasks['task-1']['uncertain'])
+            self.assertEqual(self.controller.tasks['task-1']['turnId'], 'turn-1')
+            stop.assert_not_called()
+
     def test_offline_quiesce_never_stops_uncertain_task_daemon(self):
         self.start()
         self.controller.tasks['task-1']['uncertain'] = True
