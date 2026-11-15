@@ -12,6 +12,17 @@ final class AgentXExternalObservationTests: XCTestCase {
         observation.cancel()
     }
 
+    private func waitForReleasedSlot(_ observer: AgentXExternalObserver, appID: String = "a") async {
+        let deadline = ContinuousClock.now + .seconds(5)
+        var started = false
+        while !started && ContinuousClock.now < deadline {
+            observer.refresh(appID, generation: { nil }) { started = true; return [] }
+            await Task.yield()
+        }
+        XCTAssertTrue(started, "completed worker must release its slot")
+        observer.close(appID)
+    }
+
     func testSingleFlightAndFailureReplacesSuccess() async throws {
         let observer = AgentXExternalObserver(timeout: .seconds(30))
         let started = expectation(description: "single probe started")
@@ -57,35 +68,39 @@ final class AgentXExternalObservationTests: XCTestCase {
         try XCTUnwrap(release).resume()
         // A new accepted probe proves the old worker released its slot. Record
         // every publication so a transient late success cannot evade the check.
-        let deadline = ContinuousClock.now + .seconds(5)
-        var nextStarted = false
-        while !nextStarted && ContinuousClock.now < deadline {
-            observer.refresh("a", generation: { nil }) {
-                nextStarted = true
-                return [.init(id: "next", kind: .native, state: .responsive, reason: .none)]
-            }
-            await Task.yield()
-        }
-        XCTAssertTrue(nextStarted)
+        await waitForReleasedSlot(observer)
+        XCTAssertEqual(calls, 1)
         XCTAssertFalse(published.contains { $0.id == "late" && $0.state == .responsive })
-        observer.close("a")
     }
     func testClosingOrChangingGenerationRejectsLateReply() async throws {
-        let observer = AgentXExternalObserver()
+        let observer = AgentXExternalObserver(timeout: .seconds(30))
         var generation = UUID()
+        let started = expectation(description: "generation probe started")
+        var release: CheckedContinuation<Void, Never>?
         observer.refresh("a", generation: { generation }) {
-            try? await Task.sleep(for: .milliseconds(30))
+            await withCheckedContinuation { release = $0; started.fulfill() }
             return [.init(id: "native", kind: .native, state: .responsive, reason: .none)]
         }
+        await fulfillment(of: [started], timeout: 5)
         generation = UUID()
-        try await Task.sleep(for: .milliseconds(60))
-        XCTAssertNotEqual(observer.samples["a"]?.items.first?.state, .responsive)
+        try XCTUnwrap(release).resume()
+        await waitForSample(observer) { $0 == nil }
+        XCTAssertNil(observer.samples["a"])
+
+        let closingStarted = expectation(description: "closing probe started")
+        var closingRelease: CheckedContinuation<Void, Never>?
+        var published: [AgentXExternalProbeItem] = []
+        let history = observer.$samples.sink { published += $0["b"]?.items ?? [] }
+        defer { history.cancel() }
         observer.refresh("b", generation: { nil }) {
-            try? await Task.sleep(for: .milliseconds(30))
-            return [.init(id: "native", kind: .native, state: .responsive, reason: .none)]
+            await withCheckedContinuation { closingRelease = $0; closingStarted.fulfill() }
+            return [.init(id: "closed", kind: .native, state: .responsive, reason: .none)]
         }
+        await fulfillment(of: [closingStarted], timeout: 5)
         observer.close("b")
-        try await Task.sleep(for: .milliseconds(60))
+        try XCTUnwrap(closingRelease).resume()
+        await waitForReleasedSlot(observer, appID: "b")
+        XCTAssertFalse(published.contains { $0.id == "closed" })
         XCTAssertNil(observer.samples["b"])
     }
     func testWireValidationAndStaleness() throws {
@@ -132,14 +147,24 @@ extension AgentXExternalObservationTests {
     func testGenerationChangeRejectsTimeoutToo() async throws {
         let observer = AgentXExternalObserver(timeout: .milliseconds(20))
         var generation = UUID()
+        let started = expectation(description: "probe remains in flight")
+        var release: CheckedContinuation<Void, Never>?
+        var published: [AgentXExternalProbeItem] = []
+        let history = observer.$samples.sink { published += $0["a"]?.items ?? [] }
+        defer { history.cancel() }
         observer.refresh("a", generation: { generation }) {
-            try await Task.sleep(for: .milliseconds(60)); return []
+            await withCheckedContinuation { release = $0; started.fulfill() }
+            return [.init(id: "late", kind: .native, state: .responsive, reason: .none)]
         }
+        // Change identity before yielding, so even a delayed worker start cannot
+        // let the timeout apply to the previous generation.
         generation = UUID()
-        try await Task.sleep(for: .milliseconds(40))
+        await fulfillment(of: [started], timeout: 5)
+        await waitForSample(observer) { $0 == nil }
         XCTAssertNil(observer.samples["a"])
-        try await Task.sleep(for: .milliseconds(40))
-        XCTAssertNil(observer.samples["a"])
+        try XCTUnwrap(release).resume()
+        await waitForReleasedSlot(observer)
+        XCTAssertFalse(published.contains { $0.reason == .timeout || $0.id == "late" })
     }
     func testActualSidecarReadWithoutStartingAnyEngine() async throws {
         let python = "/opt/homebrew/bin/python3"
