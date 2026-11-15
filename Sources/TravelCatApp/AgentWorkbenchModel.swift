@@ -82,7 +82,7 @@ final class AgentWorkbenchModel: ObservableObject {
     var storageGeneration = UUID()
     var hasShutdown = false
     var isStorageReady: Bool { !loadFailed && storageStatus == .ready && !hasShutdown }
-    let client: any AgentRuntimeClient
+    let client: AgentWorkbenchRuntimeGate
     private var saveTask: Task<Void, Never>?
     var draftSaveTask: Task<Void, Never>?
     var draftsDirty = false
@@ -111,7 +111,7 @@ final class AgentWorkbenchModel: ObservableObject {
         store = contentStore
         self.synchronousCredentials = credentials
         self.credentialStores = nil
-        self.client = client ?? AgentSidecarClient()
+        self.client = AgentWorkbenchRuntimeGate(client ?? AgentSidecarClient())
         do { if let contentError { throw contentError }; state = try store.load() }
         catch {
             state = WorkbenchSnapshot(); loadFailed = true
@@ -144,7 +144,7 @@ final class AgentWorkbenchModel: ObservableObject {
         state = WorkbenchSnapshot()
         synchronousCredentials = nil
         self.credentialStores = credentialStores
-        self.client = client ?? AgentSidecarClient()
+        self.client = AgentWorkbenchRuntimeGate(client ?? AgentSidecarClient())
         loadFailed = true
         configureClient()
     }

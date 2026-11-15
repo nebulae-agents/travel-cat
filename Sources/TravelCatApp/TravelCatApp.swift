@@ -19,7 +19,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private var journeyTestPresentation: JourneyTestPresentation?
     private var displayedTestPostcardID: UUID?
     private lazy var journeyTestRouteGate = JourneyTestRouteGate(
-        isEnabled: { [weak self] in self?.environment?.effectiveSettings.isFastTestEnabled == true },
+        isEnabled: { [weak self] in self?.applicationEnabled("blackcat") == true && self?.environment?.effectiveSettings.isFastTestEnabled == true },
         currentSessionID: { [weak self] in self?.environment?.journeyTestController?.session?.id }
     )
     private var watcher: RepositoryWatcher?
@@ -28,6 +28,15 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private var terminationTask: Task<Void, Never>?
     private var homeLocationTask: Task<Void, Never>?
     private var agentX: AgentXController?
+    private var applicationRuntime: AgentXHostRuntimeLifecycle?
+    private(set) var applicationService: AgentXManagedApplicationService?
+    private var providerResolver: AgentXProviderResolver?
+    private var workbenchLegacyRoot: URL?
+    private var travelRuntimeStopped = false
+    private func applicationEnabled(_ id: String) -> Bool {
+        guard let agentX, agentX.isLoaded else { return false }
+        return AgentXApplicationPolicy.isEnabled(id, in: agentX.state)
+    }
     private var agentXWindow: AgentXWindowController?
     private var workbenchSubscription: AnyCancellable?
     private var agentWorkbench: AgentWorkbenchModel?
@@ -110,6 +119,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
 
         codexDiagnosticStore = CodexGenerationDiagnosticStore(fileURL: hostStorage.blackCatRoot.appendingPathComponent("diagnostics/codex-latest.json"))
         let hasAgentXState = FileManager.default.fileExists(atPath: agentXRoot.appendingPathComponent("agentx.yaml").path)
+        let hasAppsDirectory = FileManager.default.fileExists(atPath: agentXRoot.appendingPathComponent("apps").path)
         let manager = AgentXController(repository: AgentXRepository(root: agentXRoot),
             credentials: KeychainTravelServiceCredentialStore(service: "com.nebulae.agentx.model-services"), hostStorage: hostStorage)
         if manager.isLoaded && !hasAgentXState {
@@ -120,27 +130,25 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             guard manager.isLoaded else { throw AgentXError.unavailable }
             return manager.state
         }, credentials: KeychainTravelServiceCredentialStore(service: "com.nebulae.agentx.model-services"))
+        self.providerResolver = providerResolver
+        workbenchLegacyRoot = hostEnvironment.importsLegacyData ? applicationSupport.appendingPathComponent("TravelCatAgents", isDirectory: true) : nil
         agentX = manager
+        installApplicationRuntime(manager: manager, storage: hostStorage)
         manager.errorMessage = migrationNotice ?? manager.errorMessage
-        manager.didChange = { [weak self] in self?.refreshAgentXEntry() }
+        manager.didChange = { [weak self] in
+            self?.applicationRuntime?.synchronize()
+            self?.refreshAgentXEntry()
+        }
         NSApp.setActivationPolicy(.regular)
         refreshAgentXEntry()
         if !manager.state.blackCatEnabled || !manager.isLoaded || manager.singleMode { showAgentXManager() }
         guard manager.isLoaded else { return }
-        do {
-            try manager.ensureWorkbenchApp()
-            try hostStorage.prepareAppData(at: hostStorage.workbenchRoot,
-                legacy: hostEnvironment.importsLegacyData ? applicationSupport.appendingPathComponent("TravelCatAgents", isDirectory: true) : nil)
-            if !hostStorage.workbenchNeedsRebinding {
-                agentWorkbench = AgentWorkbenchModel(root: hostStorage.workbenchRoot, managedRoot: hostStorage.root, providerResolver: providerResolver)
-                workbenchSubscription = agentWorkbench?.objectWillChange.sink { [weak self] _ in
-                    Task { @MainActor in self?.refreshAgentXEntry() }
-                }
-                agentWorkbench?.retryStorage()
-            } else {
-                manager.errorMessage = "旧工作台已复制校验并保留源目录。历史可在工作台只读查看；旧绝对 workspace 未获新授权，运行保持禁用。"
-            }
-        } catch { manager.errorMessage = error.localizedDescription; showAgentXManager() }
+        if !hasAgentXState && !hasAppsDirectory {
+            do { try manager.ensureWorkbenchApp() }
+            catch { manager.errorMessage = error.localizedDescription }
+        }
+        // Workbench storage and runtime are created only by an explicit open action.
+        guard manager.state.apps.contains(where: { $0.id == "blackcat" }) else { return }
         do {
             let legacyRoot: URL?
             if hostEnvironment.importsLegacyData {
@@ -176,6 +184,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 model: model,
                 settings: settings,
                 selectedCharacterProfile: loaded.selectedCharacterProfile,
+                isApplicationEnabled: { [weak self] in self?.applicationEnabled("blackcat") == true },
                 petLocator: { [weak self] in self?.desktopPetAnchor },
                 route: { [weak self] route in self?.performPromptRoute(route) },
                 testRequest: { [weak self] in self?.triggerTestPrompt() },
@@ -189,9 +198,11 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             )
             self.model = model
             self.environment = environment
-            homeLocationTask = Task { [weak environment] in
-                guard let environment else { return }
-                await environment.homeLocation.refresh()
+            if applicationEnabled("blackcat") {
+                homeLocationTask = Task { [weak environment] in
+                    guard let environment else { return }
+                    await environment.homeLocation.refresh()
+                }
             }
             environment.notificationService.promptRouteHandler = { [weak self] route in
                 self?.performPromptRoute(route)
@@ -218,6 +229,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             let recovery = PostcardRecoveryController(repository: repository, model: model, worker: worker,
                 settings: { [weak environment] in environment?.effectiveSettings ?? TravelSettings() },
                 isReady: { [weak services] in services?.isReady ?? false },
+                isApplicationEnabled: { [weak self] in self?.applicationEnabled("blackcat") == true },
                 applyContents: { [weak environment] contents, supplemental, references in
                     guard let environment else { return }
                     environment.applyRepositoryContents(RepositoryContents(
@@ -228,11 +240,10 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 },
                 didRefresh: { [weak self] in self?.refreshMenuState() })
             postcardRecoveryController = recovery
-            recovery.start()
             environment.postcardBacklogRecovered = { [weak recovery] in recovery?.refresh() }
             let automaticTravel = AutomaticTravelController(
-                isEnabled: { [weak environment, weak services] in
-                    (environment?.effectiveSettings.automaticTravelEnabled ?? false) && (services?.isReady ?? false)
+                isEnabled: { [weak self, weak environment, weak services] in
+                    self?.applicationEnabled("blackcat") == true && (environment?.effectiveSettings.automaticTravelEnabled ?? false) && (services?.isReady ?? false)
                         && environment?.selectedCharacterProfile == .defaultBlackCat
                         && environment?.effectiveCharacterProfile == .defaultBlackCat
                 },
@@ -246,27 +257,145 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 readLastSuccessDate: { worker.lastSuccessfulPublicationDate() })
             automaticTravelController = automaticTravel
             environment.automaticTravel = automaticTravel
+            applicationRuntime?.synchronize()
+            guard applicationEnabled("blackcat") else { return }
+            recovery.start()
             automaticTravel.start()
-            if !services.isReady && manager.state.blackCatEnabled { showGenerationSetup() }
             environment.petPromptService.retry(settings: environment.effectiveSettings, now: Date())
             refreshPromptState()
             startWatching(repository: repository, initial: loaded, environment: environment)
-            authorizationTask = Task { [weak environment] in
-                guard let environment else { return }
-                await environment.notificationService.requestAuthorization()
-                guard !Task.isCancelled, let current = try? repository.loadContents() else { return }
-                environment.notificationService.processUnavailable(
-                    previous: loaded,
-                    current: current,
-                    settings: environment.effectiveSettings
-                )
-                environment.petPromptService.retry(settings: environment.effectiveSettings, now: Date())
-                refreshPromptState()
-            }
+            startNotificationAuthorization(replayPendingFrom: loaded)
+            if !services.isReady && manager.state.blackCatEnabled { showGenerationSetup() }
         } catch {
             manager.errorMessage = error.localizedDescription
             showAgentXManager()
         }
+    }
+
+    private func installApplicationRuntime(manager: AgentXController, storage: AgentXHostStorage) {
+        let runtime = AgentXHostRuntimeLifecycle(controller: manager)
+        manager.externalRuntimeProbeGeneration = { [weak self] appID in
+            appID == "workbench" ? self?.agentWorkbench?.client.observationGeneration : nil
+        }
+        manager.externalRuntimeProbe = { [weak self] appID in
+            guard let self else { throw AgentXProbeFailure(.notConnected) }
+            if appID == "blackcat" {
+                return [.process(codexExecutor.observeOwnedProcesses(), kind: .travel)]
+            }
+            if appID == "workbench" {
+                guard let workbench = agentWorkbench else { throw AgentXProbeFailure(.notConnected) }
+                return try AgentXExternalProbeItem.decode(await workbench.client.observeRuntime())
+            }
+            return [.init(id: "transport", kind: .transport, state: .unobserved, reason: .unsupported)]
+        }
+        applicationRuntime = runtime
+        applicationService = runtime.applicationService()
+        runtime.register("blackcat", runtime: .init(
+            fence: { [weak self] in self?.fenceTravelRuntime() },
+            drain: { [weak self] in
+                guard let self else { throw AgentXError.unavailable }
+                await automaticTravelController?.suspendAndWait()
+                await postcardRecoveryController?.suspendAndWait()
+                await generationServices?.suspendAndWait()
+                await environment?.petPromptService.suspendAndWait()
+                await environment?.notificationService.suspendAndWait()
+                await environment?.homeLocation.suspendAndWait()
+                await environment?.journeyTestController?.shutdown()
+                await environment?.backupExport.waitForCompletion()
+                await watcherTask?.value
+                // AsyncStream termination queues watcher cleanup on its dispatch queue.
+                let observationDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+                while (watcher?.activeStreamCount ?? 0) > 0 {
+                    guard ContinuousClock.now < observationDeadline else { throw AgentXError.invalid("旅行目录观察尚未退出。") }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                watcherTask = nil; watcher = nil
+                await authorizationTask?.value; authorizationTask = nil
+                await homeLocationTask?.value; homeLocationTask = nil
+                travelRuntimeStopped = await codexExecutor.shutdownAndWait(timeout: .seconds(10))
+                guard travelRuntimeStopped else { throw AgentXError.invalid("旅行执行器尚未确认退出，请重试停止。") }
+            },
+            isIdle: { [weak self] in self?.travelOwnersAreIdle ?? false },
+            hasExited: { [weak self] in self?.travelRuntimeStopped == true },
+            resume: { [weak self] in
+                guard let self else { return }
+                _ = automaticTravelController?.resumeWithoutRunning()
+                _ = postcardRecoveryController?.resumeWithoutRunning()
+                _ = generationServices?.resumeWithoutRunning()
+                _ = environment?.petPromptService.resumeWithoutRunning()
+                _ = environment?.notificationService.resumeWithoutRunning()
+                _ = environment?.homeLocation.resumeWithoutRunning()
+                _ = environment?.journeyTestController?.resumeWithoutRunning()
+                _ = codexExecutor.resumeWithoutRunning()
+                travelRuntimeStopped = false
+            }))
+        runtime.register("workbench", runtime: .init(
+            fence: { [weak self] in
+                self?.agentWorkbench?.client.seal()
+                self?.agentWindowController.window?.close()
+            },
+            drain: { [weak self] in
+                guard let self else { throw AgentXError.unavailable }
+                if let workbench = agentWorkbench {
+                    try await workbench.suspendAndWait(verifyNativeExit: { storage.nativeDaemonsHaveExited() })
+                    guard !workbench.hasOwnedOperations, workbench.positivelyStopped else { throw AgentXError.unavailable }
+                    workbenchSubscription = nil
+                    agentWorkbench = nil
+                    mailboxCoordinator?.updateAgents(nil)
+                } else if !storage.nativeDaemonsHaveExited() {
+                    throw AgentXError.invalid("原生工作台执行器尚未确认退出。")
+                }
+            },
+            isIdle: { [weak self] in self?.agentWorkbench?.hasOwnedOperations != true },
+            hasExited: { [weak self] in
+                guard let self else { return false }
+                return (agentWorkbench == nil || agentWorkbench?.positivelyStopped == true) && storage.nativeDaemonsHaveExited()
+            },
+            resume: {}))
+    }
+
+    private var travelOwnersAreIdle: Bool {
+        automaticTravelController?.hasOwnedOperations != true && postcardRecoveryController?.hasOwnedOperations != true
+            && generationServices?.probes.isIdle != false
+            && environment?.petPromptService.hasOwnedOperations != true
+            && environment?.notificationService.hasOwnedOperations != true
+            && environment?.homeLocation.hasOwnedOperations != true
+            && environment?.journeyTestController?.hasOwnedOperations != true
+            && environment?.backupExport.isExporting != true
+            && !codexExecutor.hasOwnedOperations
+            && watcherTask == nil && authorizationTask == nil && homeLocationTask == nil
+    }
+
+    private func fenceTravelRuntime() {
+        automaticTravelController?.stop(); postcardRecoveryController?.stop()
+        generationServices?.fence()
+        environment?.petPromptService.fence(); environment?.notificationService.fence()
+        environment?.homeLocation.fence(); environment?.journeyTestController?.fence()
+        environment?.backupExport.cancel()
+        watcherTask?.cancel(); authorizationTask?.cancel(); homeLocationTask?.cancel()
+        codexExecutor.fence()
+        environment?.bubbleController.dismissPresentation()
+        environment?.statusToastController.dismiss(); environment?.testPaperController.dismiss()
+        journeyTestPresentation?.dismiss(); journeyTestPresentation = nil
+        for window in [utilityWindowController.window, settingsWindowController.window,
+                       generationWindowController.window, journeyTestWindowController.window] { window?.close() }
+        closeAlbumPreviewSession()
+    }
+
+    private func prepareWorkbenchForExplicitOpen() {
+        guard applicationEnabled("workbench"), agentWorkbench == nil, let storage = agentXHostStorage,
+              let providerResolver else { return }
+        do {
+            try storage.prepareAppData(at: storage.workbenchRoot, legacy: workbenchLegacyRoot)
+            guard !storage.workbenchNeedsRebinding else { return }
+            let workbench = AgentWorkbenchModel(root: storage.workbenchRoot, managedRoot: storage.root, providerResolver: providerResolver)
+            agentWorkbench = workbench
+            workbenchSubscription = workbench.objectWillChange.sink { [weak self] _ in
+                Task { @MainActor in self?.refreshAgentXEntry() }
+            }
+            workbench.retryStorage()
+            refreshAgentXEntry()
+        } catch { agentX?.errorMessage = error.localizedDescription }
     }
 
     var desktopPetAnchor: PetCompanionAnchor? {
@@ -280,7 +409,10 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         let scene = OwnedPetSceneView(
             model: model,
             showStatus: { [weak self] in self?.showCurrentJourney() },
-            showHouse: { [weak self] in self?.showAgentXManager() },
+            showHouse: { [weak self] in
+                self?.agentX?.openApp("blackcat")
+                self?.showAgentXManager()
+            },
             showPostcard: { [weak self] in self?.showLatestPostcard() },
             showAlbum: { [weak self] in self?.showLatestAlbum() },
             showSettings: { [weak self] in self?.showSettings() },
@@ -292,7 +424,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         controller.restoreVisibility()
         refreshAgentXEntry()
         // Postcards and the mailbox remain available when imported workbench history is read-only.
-        mailboxCoordinator = DesktopMailboxCoordinator(desktop: controller, pet: model, agents: agentWorkbench,
+        mailboxCoordinator = DesktopMailboxCoordinator(desktop: controller, pet: model,
+            agents: applicationEnabled("workbench") ? agentWorkbench : nil,
             openPostcard: { [weak self] id in self?.showMailboxPostcard(id) },
             openAlbum: { [weak self] in self?.showLatestAlbum() },
             openAgents: { [weak self] in self?.showAgentWorkbench() })
@@ -393,8 +526,10 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private func startWatching(
         repository: TravelRepository,
         initial: RepositoryContents,
-        environment: TravelCatEnvironment
+        environment: TravelCatEnvironment,
+        deliverInitialPending: Bool = true
     ) {
+        guard applicationEnabled("blackcat"), watcherTask == nil else { return }
         let watcher = RepositoryWatcher(repository: repository) { message in
             try? FileHandle.standardError.write(
                 contentsOf: Data("TravelCat repository watcher: \(message)\n".utf8)
@@ -403,31 +538,36 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         self.watcher = watcher
         watcherTask = Task { @MainActor [weak environment] in
             var previous: RepositoryContents? = initial
+            var isFirstObservation = true
             for await contents in watcher.contents() {
-                guard !Task.isCancelled, let environment else { break }
+                guard !Task.isCancelled, applicationEnabled("blackcat"), let environment else { break }
                 let changed = contents != previous
                 if changed {
                     if let postcardRecoveryController { postcardRecoveryController.refresh() }
                     else { environment.applyRepositoryContents(contents) }
                     refreshMenuState()
                 }
-                environment.notificationService.processUnavailable(
-                    previous: previous,
-                    current: contents,
-                    settings: environment.effectiveSettings
-                )
-                environment.petPromptService.ingestCurrent(
-                    settings: environment.effectiveSettings,
-                    now: Date()
-                )
+                let deliverPrompts = deliverInitialPending || !isFirstObservation
+                isFirstObservation = false
+                if deliverPrompts {
+                    environment.notificationService.processUnavailable(
+                        previous: previous,
+                        current: contents,
+                        settings: environment.effectiveSettings
+                    )
+                    environment.petPromptService.ingestCurrent(
+                        settings: environment.effectiveSettings,
+                        now: Date()
+                    )
+                }
                 petPromptPending = environment.petPromptService.hasPendingOrStorageError
                 refreshAgentXEntry()
-                if changed {
+                if changed && deliverPrompts {
                     if !petPromptPending, environment.bubbleController.presentation != .slip,
                        let content = TravelStatusToastPolicy.content(
                         previous: previous, current: contents, now: Date(), settings: environment.effectiveSettings
                        ) {
-                        environment.statusToastController.show(content) { [weak self] in self?.showCurrentJourney() }
+                        environment.statusToastController.show(content) { [weak owner = self] in owner?.showCurrentJourney() }
                     } else {
                         environment.statusToastController.dismiss()
                     }
@@ -437,19 +577,52 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         }
     }
 
+    private func startNotificationAuthorization(replayPendingFrom initial: RepositoryContents? = nil) {
+        guard applicationEnabled("blackcat"), authorizationTask == nil, let environment else { return }
+        authorizationTask = Task { [weak self, weak environment] in
+            guard let self, let environment else { return }
+            defer { self.authorizationTask = nil }
+            if initial == nil {
+                await environment.notificationService.refreshAuthorizationForExplicitOpen()
+            } else {
+                await environment.notificationService.requestAuthorization()
+            }
+            guard !Task.isCancelled, self.applicationEnabled("blackcat"), let initial,
+                  let current = try? environment.repository.loadContents() else { return }
+            environment.notificationService.processUnavailable(previous: initial, current: current, settings: environment.effectiveSettings)
+            environment.petPromptService.retry(settings: environment.effectiveSettings, now: Date())
+            self.refreshPromptState()
+        }
+    }
+
+    private func resumeTravelObservationForExplicitOpen() {
+        guard applicationEnabled("blackcat"), watcherTask == nil, let environment else { return }
+        do {
+            let current = try environment.repository.loadContents()
+            environment.applyRepositoryContents(current)
+            refreshMenuState()
+            startWatching(repository: environment.repository, initial: current, environment: environment, deliverInitialPending: false)
+            startNotificationAuthorization()
+        } catch { environment.errorMessage = "旅行记录读取失败，原数据保持不变。" }
+    }
+
     private func managedWorkbenchContent() -> AnyView {
+        guard applicationEnabled("workbench") else { return AnyView(Text("工作台已停用")) }
         if let storage = agentXHostStorage, storage.workbenchNeedsRebinding {
             return AnyView(AgentXLegacyWorkbenchView(root: storage.workbenchRoot))
         }
         if let agentWorkbench { return AnyView(AgentWorkbenchView(model: agentWorkbench)) }
         return AnyView(VStack(alignment: .leading, spacing: 12) {
             Text("工作台尚未就绪").font(.title2)
-            Text(agentX?.errorMessage ?? "请完成已登记的离线导入后重新启动。历史和原目录保持不变。")
+            Text(agentX?.errorMessage ?? "打开工作台后才会初始化运行服务。")
                 .textSelection(.enabled)
+            Button("打开工作台") { [weak self] in self?.showAgentWorkbench() }
         }.padding())
     }
 
     func showAgentWorkbench() {
+        guard applicationEnabled("workbench") else { return }
+        prepareWorkbenchForExplicitOpen()
         if let storage = agentXHostStorage, storage.workbenchNeedsRebinding {
             agentWindowController.show(content: AnyView(AgentXLegacyWorkbenchView(root: storage.workbenchRoot)),
                 size: NSSize(width: 1000, height: 740), minimumContentSize: NSSize(width: 760, height: 600))
@@ -463,6 +636,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func showCurrentJourney() {
+        guard applicationEnabled("blackcat") else { return }
+        resumeTravelObservationForExplicitOpen()
         if let startupError {
             utilityWindowController.show(
                 content: AnyView(StartupErrorView(message: startupError)),
@@ -476,17 +651,21 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func showMailboxPostcard(_ id: UUID) {
+        guard applicationEnabled("blackcat") else { return }
         guard let model, model.openPostcardFromMailbox(eventID: id) else { return }
         show(model: model, size: TravelUtilityWindowController.postcardSize)
     }
 
     func showLatestPostcard() {
+        guard applicationEnabled("blackcat") else { return }
+        resumeTravelObservationForExplicitOpen()
         guard let model, hasLatestPostcard else { return }
         model.openLatestPostcardFromMenu()
         show(model: model, size: TravelUtilityWindowController.postcardSize)
     }
 
     func showHouseArrival() {
+        guard applicationEnabled("blackcat") else { return }
         guard startupError == nil, let model else { showCurrentJourney(); return }
         model.openHouseFromDesktop()
         let size = model.presentation == .status
@@ -495,12 +674,16 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func showLatestAlbum() {
+        guard applicationEnabled("blackcat") else { return }
+        resumeTravelObservationForExplicitOpen()
         guard let model, hasLatestAlbum else { return }
         model.openLatestAlbumFromMenu()
         show(model: model, size: TravelUtilityWindowController.albumSize)
     }
 
     func showGenerationSetup() {
+        guard applicationEnabled("blackcat") else { return }
+        resumeTravelObservationForExplicitOpen()
         guard let services = generationServices else { return }
         generationWindowController.setCloseHandler { [weak self] in
             self?.generationSetupSession.windowDidClose()
@@ -517,6 +700,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func showSettings() {
+        guard applicationEnabled("blackcat") else { return }
+        resumeTravelObservationForExplicitOpen()
         guard let environment else { return }
         settingsWindowController.window?.title = "Travel Cat 设置"
         settingsWindowController.show(
@@ -536,6 +721,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func showAlbumPreview() {
+        guard applicationEnabled("blackcat") else { return }
         guard let environment,
               environment.effectiveSettings.isFastTestEnabled else {
             closeAlbumPreviewSession()
@@ -569,6 +755,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     private func startJourneyTest(mode: JourneyTestMode) {
+        guard applicationEnabled("blackcat") else { return }
         guard let environment, environment.effectiveSettings.isFastTestEnabled,
               let controller = prepareJourneyTestController() else { return }
         controller.start(fastTestEnabled: environment.effectiveSettings.isFastTestEnabled, mode: mode)
@@ -576,6 +763,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func showTestJourneyAlbum() {
+        guard applicationEnabled("blackcat") else { return }
         guard environment?.effectiveSettings.isFastTestEnabled == true,
               let controller = prepareJourneyTestController() else { return }
         controller.model?.openLatestAlbumFromMenu()
@@ -583,6 +771,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     private func prepareJourneyTestController() -> JourneyTestController? {
+        guard applicationEnabled("blackcat") else { return nil }
         guard let environment, environment.effectiveSettings.isFastTestEnabled else { return nil }
         if let controller = environment.journeyTestController { return controller }
         do {
@@ -609,6 +798,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
                 compactImageURL: compactImage,
                 compactCatImageURL: compactCat
             )
+            controller.isApplicationEnabled = { [weak self] in self?.applicationEnabled("blackcat") == true }
             environment.journeyTestController = controller
             controller.onRefresh = { [weak self] in self?.refreshTestJourneyPresentation() }
             controller.onProgress = { [weak self, weak controller] progress in
@@ -624,6 +814,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     private func refreshTestJourneyPresentation() {
+        guard applicationEnabled("blackcat") else { return }
         guard let environment, environment.effectiveSettings.isFastTestEnabled,
               let controller = environment.journeyTestController,
               let session = controller.session, let model = controller.model else { return }
@@ -651,6 +842,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     private func showTestJourneyWindow() {
+        guard applicationEnabled("blackcat") else { return }
         guard environment?.effectiveSettings.isFastTestEnabled == true,
               let controller = environment?.journeyTestController else { return }
         journeyTestWindowController.window?.title = "测试旅程 · Travel Cat"
@@ -663,6 +855,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     private func journeyTestSettingsChanged(enabled: Bool) {
+        guard applicationEnabled("blackcat") else { return }
         if enabled {
             refreshTestJourneyPresentation()
         } else {
@@ -674,6 +867,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func performPromptRoute(_ route: PetTravelRoute) {
+        guard applicationEnabled("blackcat") else { return }
+        resumeTravelObservationForExplicitOpen()
         guard let model else { return }
         switch route {
         case .status:
@@ -695,6 +890,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     private func triggerTestPrompt() {
+        guard applicationEnabled("blackcat") else { return }
         guard let environment,
               environment.effectiveSettings.isFastTestEnabled else { return }
         let model = environment.model
@@ -839,21 +1035,25 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
 
     private func refreshAgentXEntry() {
         guard let agentX else { return }
+        mailboxCoordinator?.updateAgents(applicationEnabled("workbench") ? agentWorkbench : nil)
         if let pet = desktopPetController {
-            if agentX.state.blackCatEnabled && pet.isHidden { pet.show() }
-            else if !agentX.state.blackCatEnabled && !pet.isHidden { pet.hide() }
+            let visible = applicationEnabled("blackcat") && agentX.state.blackCatEnabled
+            if visible && pet.isHidden { pet.show() }
+            else if !visible && !pet.isHidden { pet.hide() }
         }
-        let count = agentX.state.unreadCount + (petPromptPending ? 1 : 0) + (agentWorkbench?.attentionCount ?? 0)
+        let travelPending = applicationEnabled("blackcat") && petPromptPending
+        let workbenchPending = applicationEnabled("workbench") ? (agentWorkbench?.attentionCount ?? 0) : 0
+        let count = agentX.state.unreadCount + (travelPending ? 1 : 0) + workbenchPending
         NSApp.dockTile.badgeLabel = count == 0 ? nil : String(count)
-        agentXWindow?.updateTravelPending(petPromptPending)
-        agentXWindow?.updateWorkbenchPending(agentWorkbench?.attentionCount ?? 0)
+        agentXWindow?.updateTravelPending(travelPending)
+        agentXWindow?.updateWorkbenchPending(workbenchPending)
         agentXWindow?.updateWorkbenchContent { [weak self] in self?.managedWorkbenchContent() ?? AnyView(EmptyView()) }
     }
 
     func showAgentXManager() {
         guard let agentX else { return }
         if agentXWindow == nil {
-            agentXWindow = AgentXWindowController(controller: agentX,
+            agentXWindow = AgentXWindowController(controller: agentX, applicationService: applicationService,
                 openJourney: { [weak self] in self?.showCurrentJourney() },
                 openAlbum: { [weak self] in self?.showLatestAlbum() }, travelPending: petPromptPending,
                 openTravelPrompt: { [weak self] in self?.openTravelPromptFromManager() },
@@ -865,6 +1065,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     private func openTravelPromptFromManager() {
+        guard applicationEnabled("blackcat") else { return }
         guard let environment else { showCurrentJourney(); return }
         if !environment.petPromptService.openPendingFromInbox() {
             if environment.petPromptService.storageError != nil {
@@ -875,7 +1076,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        agentX?.openFromDock(travelPending: petPromptPending || (agentWorkbench?.attentionCount ?? 0) > 0)
+        agentX?.openFromDock(travelPending: petPromptPending, workbenchPending: agentWorkbench?.attentionCount ?? 0)
         showAgentXManager()
         return false
     }
@@ -883,6 +1084,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func showSupplies() {
+        guard applicationEnabled("blackcat") else { return }
+        resumeTravelObservationForExplicitOpen()
         guard let model else { return }
         utilityWindowController.show(content: AnyView(StandaloneSuppliesView(model: model, close: { [weak self] in self?.utilityWindowController.window?.close() })),
             size: TravelUtilityWindowController.statusSize)

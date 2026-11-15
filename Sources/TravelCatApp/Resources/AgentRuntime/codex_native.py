@@ -82,6 +82,7 @@ class CodexNativeController:
         self.background_status_slot = threading.Lock()
         self.closed = threading.Event()
         self.offline_sealed = False
+        self.offline_stopped_instances = set()
         self.sweeper = threading.Thread(target=self._sweep, daemon=True)
         self.sweeper.start()
 
@@ -100,7 +101,7 @@ class CodexNativeController:
         if method in ('native_artifacts','native_export','native_artifact_changes'):
             return self._bounded_artifact_read(params, handlers[method])
         with self.operations:
-            if self.closed.is_set() or self.offline_sealed: raise NativeFailure('native controller closed')
+            if self.closed.is_set() or (self.offline_sealed and method not in ('native_quiesce', 'native_cancel', 'native_login_cancel', 'native_background_stop', 'native_detach')): raise NativeFailure('native controller closed')
             return handlers[method](params)
 
     def _emit(self, instance, method, params, task_id=None):
@@ -551,14 +552,17 @@ class CodexNativeController:
             self.instances[task['instanceId']]['transport'].request('turn/interrupt', {'threadId': task['threadId'], 'turnId': turn_id})
             if not waiter['event'].wait(max(0, deadline - time.monotonic())) or waiter['error'] or waiter['status'] not in ('interrupted', 'completed', 'failed'):
                 raise NativeFailure('native interrupt completion is unknown; recover before retrying')
-            stopped = self._stop_background(task)
-            return {'requested': True, 'backgroundStopped': True, 'terminatedCount': stopped['terminatedCount'], 'turnStatus': waiter['status']}
         except Exception:
             with self.lock: task['uncertain'] = True
             raise
         finally:
             with self.lock:
                 if task.get('cancelWaiter') is waiter: task['cancelWaiter'] = None
+        # The matching official terminal event already established the turn outcome.
+        # Background cleanup has its own retryable failure; it must not erase that
+        # evidence or clear uncertainty raised independently by a lost connection.
+        stopped = self._stop_background(task)
+        return {'requested': True, 'backgroundStopped': True, 'terminatedCount': stopped['terminatedCount'], 'turnStatus': waiter['status']}
 
     def _detach(self, params):
         with self.lock:
@@ -718,15 +722,19 @@ class CodexNativeController:
         if params: raise NativeFailure('quiesce does not accept caller authority')
         self.offline_sealed = True
         for task in list(self.tasks.values()):
+            if task['instanceId'] in self.offline_stopped_instances: continue
             if task.get('turnId'):
                 self._cancel({'taskId': task['taskId'], 'turnId': task['turnId']})
             if task.get('uncertain'): raise NativeFailure('native task terminal state is uncertain')
-            instance = self.instances[task['instanceId']]
-            if self._list_background(instance, task['threadId']):
+            if self._stop_background(task).get('stopped') is not True:
                 raise NativeFailure('native background commands remain active')
-        for instance in self.instances.values():
+        for instance_id, instance in self.instances.items():
+            if instance_id in self.offline_stopped_instances: continue
+            if instance.get('loginId'):
+                self._login_cancel({'instanceId':instance_id,'loginId':instance['loginId']})
             if instance.get('pendingStart') or instance.get('loginId'): raise NativeFailure('native startup or login pending')
             _transport_module.stop_managed_daemon(instance['config'])
+            self.offline_stopped_instances.add(instance_id)
         return {'stopped': True}
 
     def close(self):

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 @MainActor
 protocol AgentRuntimeClient: AnyObject {
@@ -6,9 +7,14 @@ protocol AgentRuntimeClient: AnyObject {
     var onExit: (() -> Void)? { get set }
     func launch(python: String) throws
     func request(_ method: String, _ params: [String: Any], timeout: UInt64) async throws -> [String: Any]
+    func observeRuntime() async throws -> [String: Any]
     func shutdown()
+    func waitForExit(timeout: Duration) async -> Bool
 }
 extension AgentRuntimeClient {
+    func observeRuntime() async throws -> [String: Any] { throw AgentXProbeFailure(.unsupported) }
+    // Clients without process evidence cannot certify a stop.
+    func waitForExit(timeout: Duration) async -> Bool { false }
     func request(_ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
         try await request(method, params, timeout: 120)
     }
@@ -92,6 +98,37 @@ final class AgentSidecarClient: AgentRuntimeClient {
             }
         }
         return (try JSONSerialization.jsonObject(with: response)) as? [String: Any] ?? [:]
+    }
+
+    /// Small atomic nonblocking write; never launches or retries a disconnected service.
+    func observeRuntime() async throws -> [String: Any] {
+        guard !shuttingDown, process?.isRunning == true, let input else { throw AgentXProbeFailure(.notConnected) }
+        guard pending.isEmpty else { throw AgentXProbeFailure(.busy) }
+        let id = UUID().uuidString
+        let payload = try Self.encodeRequest(id: id, method: "runtime_observe", params: [:])
+        guard payload.count < 512 else { throw AgentXProbeFailure(.invalidResponse) }
+        let response: Data = try await withCheckedThrowingContinuation { continuation in
+            pending[id] = continuation
+            deadlines[id] = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                self?.pending.removeValue(forKey: id)?.resume(throwing: AgentXProbeFailure(.timeout))
+                self?.deadlines.removeValue(forKey: id)
+            }
+            let fd = input.fileDescriptor, flags = fcntl(input.fileDescriptor, F_GETFL)
+            guard flags >= 0, fcntl(fd, F_SETNOSIGPIPE, 1) == 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
+                deadlines.removeValue(forKey: id)?.cancel()
+                pending.removeValue(forKey: id)?.resume(throwing: AgentXProbeFailure(.permissionDenied)); return
+            }
+            defer { _ = fcntl(fd, F_SETFL, flags) }
+            let written = payload.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+            if written != payload.count {
+                let reason: AgentXExternalProbeItem.Reason = errno == EAGAIN ? .busy : .disconnected
+                deadlines.removeValue(forKey: id)?.cancel()
+                pending.removeValue(forKey: id)?.resume(throwing: AgentXProbeFailure(reason))
+            }
+        }
+        guard let result = try JSONSerialization.jsonObject(with: response) as? [String: Any] else { throw AgentXProbeFailure(.invalidResponse) }
+        return result
     }
 
     static func encodeRequest(id: String, method: String, params: [String: Any]) throws -> Data {

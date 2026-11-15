@@ -48,7 +48,7 @@ final class AgentLauncherController: NSObject, NSWindowDelegate {
         }
         refresh()
     }
-    func update(model: AgentWorkbenchModel) { self.model = model; refresh() }
+    func update(model: AgentWorkbenchModel?) { self.model = model; refresh() }
     func refresh() {
         let cards = petModel.map { pet in
             pet.unreadPostcardIDs.compactMap { id -> MailboxEntry? in

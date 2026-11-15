@@ -182,12 +182,26 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         XCTAssertEqual(app.components(separatedBy: "requestAlbumPreview:").count - 1, 2)
         XCTAssertTrue(app.contains("guard let environment,"))
         XCTAssertTrue(app.contains("environment.effectiveSettings.isFastTestEnabled else"))
-        for entry in ["func showAlbumPreview()", "private func triggerTestPrompt()"] {
+        for (entry, nextEntry, firstAction) in [
+            ("func showAlbumPreview()", "func startFullJourneyTest()", "currentAlbumPreviewSession()"),
+            ("private func triggerTestPrompt()", "static func menuTitle(", "environment.petPromptService.retry("),
+        ] {
             let start = try XCTUnwrap(app.range(of: entry))
-            let body = app[start.upperBound...]
-            let guardEnd = try XCTUnwrap(body.range(of: "else"))
-            XCTAssertTrue(body[..<guardEnd.lowerBound].contains("environment.effectiveSettings.isFastTestEnabled"),
-                          "\(entry) must independently guard fast-test-only actions")
+            let end = try XCTUnwrap(app.range(of: nextEntry, range: start.upperBound..<app.endIndex))
+            let body = app[start.upperBound..<end.lowerBound]
+            let action = try XCTUnwrap(body.range(of: firstAction))
+            // Independent host and fast-test guards must both return before any test action.
+            // An earlier host guard must not hide the fast-test guard from this contract.
+            let applicationGuard = try XCTUnwrap(body.range(
+                of: #"guard\s+applicationEnabled\("blackcat"\)\s+else\s*\{\s*return\s*\}"#,
+                options: .regularExpression
+            ))
+            let fastTestGuard = try XCTUnwrap(body.range(
+                of: #"guard\s+let environment,\s+environment\.effectiveSettings\.isFastTestEnabled\s+else\s*\{[^}]*\breturn\b[^}]*\}"#,
+                options: .regularExpression
+            ), "\(entry) must independently reject fast-test-only actions when disabled")
+            XCTAssertLessThan(applicationGuard.upperBound, action.lowerBound)
+            XCTAssertLessThan(fastTestGuard.upperBound, action.lowerBound)
         }
         XCTAssertTrue(settings.contains("bubbleController?.setTestActionsEnabled(settings.isFastTestEnabled)"))
         XCTAssertTrue(settings.contains("testModeChanged(settings.isFastTestEnabled)"))
@@ -377,7 +391,31 @@ final class TravelCatAppSourceContractTests: XCTestCase {
         let launchSource = app[launchStart.lowerBound..<launchEnd.lowerBound]
 
         XCTAssertTrue(launchSource.contains("petPromptService.retry"))
-        XCTAssertTrue(launchSource.contains("notificationService.processUnavailable("))
+        let launchGuard = try XCTUnwrap(launchSource.range(of: #"guard applicationEnabled("blackcat") else { return }"#))
+        let authorizationCall = try XCTUnwrap(launchSource.range(of: "startNotificationAuthorization(replayPendingFrom: loaded)"))
+        XCTAssertLessThan(launchGuard.upperBound, authorizationCall.lowerBound)
+
+        let authorizationStart = try XCTUnwrap(app.range(of: "private func startNotificationAuthorization("))
+        let authorizationEnd = try XCTUnwrap(app.range(of: "private func resumeTravelObservationForExplicitOpen()",
+                                                       range: authorizationStart.upperBound..<app.endIndex))
+        let authorization = app[authorizationStart.upperBound..<authorizationEnd.lowerBound]
+        let ownedTask = try XCTUnwrap(authorization.range(of: "authorizationTask = Task"))
+        let entryGuard = try XCTUnwrap(authorization.range(
+            of: #"guard\s+applicationEnabled\("blackcat"\),[^{}]*else\s*\{\s*return\s*\}"#,
+            options: .regularExpression
+        ))
+        XCTAssertLessThan(entryGuard.upperBound, ownedTask.lowerBound)
+        let request = try XCTUnwrap(authorization.range(of: "await environment.notificationService.requestAuthorization()"))
+        let replayGuard = try XCTUnwrap(authorization.range(
+            of: #"guard\s+!Task\.isCancelled,\s+self\.applicationEnabled\("blackcat"\),\s+let initial,[^{}]*else\s*\{\s*return\s*\}"#,
+            options: .regularExpression
+        ))
+        let unavailable = try XCTUnwrap(authorization.range(of: "notificationService.processUnavailable("))
+        let retry = try XCTUnwrap(authorization.range(of: "petPromptService.retry("))
+        // Authorization suspends; replay must recheck cancellation, enablement and startup context.
+        XCTAssertLessThan(request.upperBound, replayGuard.lowerBound)
+        XCTAssertLessThan(replayGuard.upperBound, unavailable.lowerBound)
+        XCTAssertLessThan(replayGuard.upperBound, retry.lowerBound)
         XCTAssertTrue(settings.contains("notificationService?.settingsDidChange(settings)"))
         XCTAssertTrue(settings.contains("petPromptService?.settingsDidChange(settings: settings, now: Date())"))
     }

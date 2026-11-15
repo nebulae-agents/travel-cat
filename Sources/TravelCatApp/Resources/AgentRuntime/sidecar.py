@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Trusted stdio controller. Never emit exception text or subprocess diagnostics."""
 import base64
+import fcntl
+import stat
 import hashlib
 from collections import namedtuple
 import contextlib
@@ -25,7 +27,7 @@ _workspace_spec=importlib.util.spec_from_file_location('travelcat_workspace_io',
 workspace_io=importlib.util.module_from_spec(_workspace_spec)
 _workspace_spec.loader.exec_module(workspace_io)
 
-for _name in ('audit_runtime', 'audit_payload', 'runtime_discovery', 'codex_native'):
+for _name in ('audit_runtime', 'audit_payload', 'runtime_discovery', 'codex_native', 'runtime_observe'):
     _spec=importlib.util.spec_from_file_location(_name,Path(__file__).resolve().with_name(_name+'.py'))
     _module=importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_module)
@@ -201,6 +203,8 @@ class Task:
         self.request_slots=threading.BoundedSemaphore(4)
         self.request_count=0
         self.created=False
+        self.container_id=None
+        self.lifecycle_lock=threading.RLock()
         self.binding_id=str(uuid.uuid4());self.execution_id=None;self.artifact_baseline=None
         self.artifact_read_slot=threading.Lock();self.workspace_identity=None
     def event(self,event,data):
@@ -212,6 +216,9 @@ class Task:
     def create_args(self):
         return ['create','--pull=never','--log-driver=none','--name',self.name,'--network=none','--read-only','--user=65532:65532','--cap-drop=ALL','--security-opt=no-new-privileges','--cpus=2','--memory=1g','--memory-swap=1g','--pids-limit=128','--ipc=none','--tmpfs=/tmp:rw,nosuid,nodev,size=256m,mode=1777','--entrypoint=python3',self.image,'-I','-S','-c','import time; time.sleep(3600)']
     def start(self):
+        with self.lifecycle_lock:
+            return self._start()
+    def _start(self):
         if self.stopped.is_set(): raise RuntimeFailure('task stopped')
         try:
             metadata=json.loads(run_docker(['image','inspect','--format','{{json .Config.Volumes}}',self.image],self.host,context=self.context))
@@ -220,7 +227,8 @@ class Task:
             with self.lock:
                 if self.stopped.is_set(): raise RuntimeFailure('task stopped')
                 self.created=True
-                run_docker(self.create_args(),self.host,context=self.context)
+                created_id=run_docker(self.create_args(),self.host,context=self.context).strip()
+                if re.fullmatch(r'[a-f0-9]{64}',created_id): self.container_id=created_id
                 run_docker(['start',self.name],self.host,context=self.context)
             if self.stopped.is_set(): raise RuntimeFailure('task stopped')
             relay_source=Path(__file__).resolve().with_name('container_relay.py').read_text()
@@ -496,8 +504,10 @@ class Task:
             self.stopped.set();self.permissions.clear()
             for q in self.pending.values():
                 if q.empty(): q.put_nowait({'error':True})
-        self.cleanup()
-        return {'stopped':not self.created}
+        # Join an admitted startup before certifying cleanup: it may still spawn exec children.
+        with self.lifecycle_lock:
+            self.cleanup()
+            return {'stopped':task_cleanup_confirmed(self)}
     def cleanup(self):
         with self.cleanup_lock:
             self._cleanup()
@@ -520,9 +530,15 @@ class Task:
                 self.event('state',{'status':'unknown','message':'Container '+self.name+' cleanup not confirmed; inspect the configured Docker host'})
         return {}
 
+def task_cleanup_confirmed(task):
+    # Container removal alone cannot certify exit of the owned Docker exec clients.
+    return not task.created and all(process is None or process.poll() is not None
+                                    for process in (getattr(task,'process',None),getattr(task,'relay',None)))
+
 class Controller:
     def __init__(self):
         self.tasks={};self.probes={};self.lock=threading.Lock();self.output_lock=threading.Lock();self.shutting_down=False;self.output_broken=False
+        self.observation_slot=threading.Lock()
         self.audit=audit_runtime.AuditBroker(self.emit)
         self.native=codex_native.CodexNativeController(self.emit, audit=self.audit)
     def emit(self,obj):
@@ -536,14 +552,63 @@ class Controller:
                 try:
                     with open(os.devnull,'w') as sink: os.dup2(sink.fileno(),sys.stdout.fileno())
                 except (OSError,ValueError,TypeError): pass
+    def emit_observation(self,obj,deadline):
+        # One nonblocking atomic pipe write; backpressure drops this refresh.
+        if time.monotonic()>=deadline or not self.output_lock.acquire(False): return False
+        try:
+            if self.output_broken: return False
+            fd=sys.stdout.fileno()
+            if not stat.S_ISFIFO(os.fstat(fd).st_mode): return False
+            payload=runtime_observe.wire_frame(obj,os.fpathconf(fd,'PC_PIPE_BUF'))
+            if payload is None or time.monotonic()>=deadline: return False
+            flags=fcntl.fcntl(fd,fcntl.F_GETFL)
+            try:
+                fcntl.fcntl(fd,fcntl.F_SETFL,flags|os.O_NONBLOCK)
+                return os.write(fd,payload)==len(payload)
+            finally: fcntl.fcntl(fd,fcntl.F_SETFL,flags)
+        except (OSError,ValueError,AttributeError): return False
+        finally: self.output_lock.release()
+    def observe(self):
+        return runtime_observe.observe(self,docker_command,child_environment)
+    def quiesce(self):
+        with self.lock:
+            self.shutting_down=True
+            tasks=list(self.tasks.items());probes=list(self.probes.items())
+        confirmed=True
+        for registry, entries in ((self.tasks,tasks),(self.probes,probes)):
+            for key, task in entries:
+                try: stopped=task.stop().get('stopped') is True
+                except Exception: stopped=False
+                if stopped:
+                    with self.lock:
+                        if registry.get(key) is task: registry.pop(key,None)
+                else: confirmed=False
+        try: native=self.native.handle('native_quiesce',{}).get('stopped') is True
+        except Exception: native=False
+        return {'stopped':confirmed and native,'containersStopped':confirmed,'nativeStopped':native}
     def handle(self,obj):
         rid=obj.get('id')
+        if obj.get('method')=='runtime_observe':
+            deadline=time.monotonic()+2.5
+            if not isinstance(rid,str) or obj.get('params')!={}:
+                response={'id':rid,'error':'observation accepts no caller authority'}
+            elif self.shutting_down:
+                response={'id':rid,'error':'controller stopping'}
+            else:
+                try: response={'id':rid,'result':self.observe()}
+                except Exception: response={'id':rid,'error':'observation unavailable'}
+            self.emit_observation(response,deadline)
+            return
         try:
             if not isinstance(rid,str) or not isinstance(obj.get('params'),dict): raise RuntimeFailure('invalid command')
             method=obj.get('method');p=obj['params']
-            if isinstance(method,str) and method.startswith('native_'):
-                with self.lock:
-                    if self.shutting_down: raise RuntimeFailure('controller stopping')
+            cleanup_methods=('runtime_quiesce','native_quiesce','stop','probe_cleanup','cancel','native_cancel','native_login_cancel','native_background_stop','native_detach','audit_ack')
+            with self.lock:
+                if self.shutting_down and method not in cleanup_methods: raise RuntimeFailure('controller stopping')
+            if method=='runtime_quiesce':
+                if p: raise RuntimeFailure('quiesce does not accept caller authority')
+                result=self.quiesce()
+            elif isinstance(method,str) and method.startswith('native_'):
                 result=self.native.handle(method,p)
             elif method=='audit_ack':
                 result={'accepted':self.audit.ack(p.get('receiptId'),p.get('accepted'))}
@@ -575,7 +640,7 @@ class Controller:
                     try: cleanup=probe.stop().get('stopped') is True
                     except Exception: cleanup=False
                 else:
-                    cleanup=not probe.created
+                    cleanup=task_cleanup_confirmed(probe)
                 if cleanup:
                     with self.lock: self.probes.pop(probe_id,None)
                 result={'probeId':probe_id,'compatible':compatible and cleanup,
@@ -612,7 +677,7 @@ class Controller:
                     result=task.start()
                 except Exception:
                     with self.lock:
-                        if not task.created: self.tasks.pop(task.task_id,None)
+                        if task_cleanup_confirmed(task): self.tasks.pop(task.task_id,None)
                     raise
             else:
                 with self.lock: task=self.tasks.get(str(uuid.UUID(p.get('taskId',''))))

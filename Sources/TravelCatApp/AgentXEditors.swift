@@ -18,6 +18,9 @@ struct AgentXEditorView: View {
     @State private var newProfileName = ""
     @State private var newProfileKeys = ""
     @State private var selection = AgentXModelSelection(models: [])
+    @State private var catalogBaseline: AgentXProvider?
+    @State private var browsingModels = false
+    @State private var defaultCategory: AgentXModelCategory = .chat
     @State private var discovering = false
     @State private var discoveryMessage: String?
     @State private var prompt = ""
@@ -26,6 +29,7 @@ struct AgentXEditorView: View {
     @State private var fileMode = false
     @State private var selectedFile = "agent.md"
     @State private var savedDefinitionID: String?
+    @State private var confirmingDefinitionPublication = false
     @State private var historyRevision = 0
     @State private var pinnedRevision = 0
     @State private var variableText = ""
@@ -67,17 +71,17 @@ struct AgentXEditorView: View {
                             if old.isEmpty, existingInstance?.definitionID == new { return }
                             pinnedRevision = 0
                         }
-                        Picker("模型服务", selection: $providerID) {
-                            Text("请选择").tag("")
-                            ForEach(controller.state.providers.filter(\.enabled)) { Text($0.name).tag($0.id) }
-                        }.onChange(of: providerID) { old, new in
-                            if old.isEmpty, existingInstance?.providerID == new { return }
-                            model = selectedProvider?.modelSelection?.defaultModel(for: .chat) ?? selectedProvider?.enabledModels.first ?? ""
-                        }
-                        Picker("模型", selection: $model) {
-                            Text("请选择").tag("")
-                            ForEach(selectedProvider?.enabledModels ?? [], id: \.self) { Text($0).tag($0) }
-                        }
+                        Button("选择模型：\(model.isEmpty ? "尚未选择" : model)") { browsingModels = true }
+                            .sheet(isPresented: $browsingModels) {
+                                VStack(alignment: .leading, spacing: 14) {
+                                    HStack { Text("实例模型").font(.title2.bold()); Spacer(); Button("完成") { browsingModels = false } }
+                                    AgentXModelBrowser(providers: controller.state.providers,
+                                        selected: .init(providerID: providerID, model: model),
+                                        busy: existingInstance.map { controller.isInstanceBusy($0.id) } ?? false,
+                                        choose: { entry in providerID = entry.providerID; model = entry.model.id; browsingModels = false },
+                                        favorite: { entry in try controller.setModelFavorite(providerID: entry.providerID, modelID: entry.model.id, favorite: !entry.model.favorite) })
+                                }.padding(20).frame(width: 740, height: 680).background(AgentXTheme.background).preferredColorScheme(.dark)
+                            }
                         if controller.state.definitions.isEmpty || controller.state.providers.filter(\.enabled).isEmpty {
                             Text("需要先创建 Agent 定义和启用的模型服务。").foregroundStyle(.orange)
                         }
@@ -96,13 +100,21 @@ struct AgentXEditorView: View {
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Spacer()
                 if kind == .definition {
-                    Button("发布新版本") { save(publish: true) }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controller.isLoaded)
+                    Button("发布新版本") { confirmingDefinitionPublication = true }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controller.isLoaded)
                 }
                 Button(kind == .definition ? "保存草稿" : "保存") { save() }.buttonStyle(.borderedProminent)
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controller.isLoaded || discovering)
             }
         }.padding(28).frame(width: 560, height: kind == .app ? 500 : 720)
             .background(AgentXTheme.background).preferredColorScheme(.dark).tint(AgentXTheme.accent)
+            .confirmationDialog("发布定义新版本？", isPresented: $confirmingDefinitionPublication) {
+                Button("确认发布") { save(publish: true) }
+                Button("取消", role: .cancel) {}
+            } message: {
+                if let id = savedDefinitionID {
+                    Text((try? controller.definitionPublicationImpact(id: id).map(\.label).joined(separator: "\n")) ?? "无法解析发布影响；发布会被阻止。")
+                } else { Text("新定义尚未绑定成员。保存并发布后可添加到应用。") }
+            }
             .onAppear {
                 appID = controller.selectedAppID
                 if let existingDefinition {
@@ -118,6 +130,7 @@ struct AgentXEditorView: View {
                     variableText = (existingInstance.variables ?? [:]).sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value }.joined(separator: "\n")
                 }
                 if let existingProvider {
+                    catalogBaseline = existingProvider
                     name = existingProvider.name
                     address = existingProvider.baseURL
                     serviceProtocol = existingProvider.serviceProtocol
@@ -178,6 +191,11 @@ struct AgentXEditorView: View {
     }
     private var providerFields: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if existingProvider == nil {
+                Button("使用 OpenRouter") {
+                    name = "OpenRouter"; address = "https://openrouter.ai/api/v1"; serviceProtocol = .openAICompatible
+                }
+            }
             Picker("服务协议", selection: $serviceProtocol) {
                 ForEach(AgentXServiceProtocol.allCases, id: \.self) { Text($0.title).tag($0) }
             }
@@ -206,38 +224,33 @@ struct AgentXEditorView: View {
                 }.padding(.top, 8)
             }
             Text("密钥仅保存在系统钥匙串，配置只记录引用。多密钥依次轮询；失败不自动重试。").font(.caption).foregroundStyle(AgentXTheme.muted)
-            field("模型 ID（多个用逗号分隔）", value: $models, hint: "手动填写或从服务获取")
-                .onChange(of: models) { _, _ in synchronizeModels() }
+            DisclosureGroup("高级手动配置（无模型目录接口时使用）") {
+                field("模型 ID（多个用逗号分隔）", value: $models, hint: "手动填写模型 ID")
+                    .onChange(of: models) { _, _ in synchronizeModels() }
+            }
             Button(discovering ? "正在获取模型…" : "从服务获取模型") { discover() }
                 .disabled(discovering || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if let discoveryMessage { Text(discoveryMessage).font(.caption).foregroundStyle(AgentXTheme.muted) }
-            ForEach(selection.models) { item in
-                HStack {
-                    Toggle(item.id, isOn: Binding(get: { selection.models.first { $0.id == item.id }?.enabled ?? false }, set: { enabled in
-                        do { try selection.setEnabled(item.id, enabled: enabled) } catch { self.error = error.localizedDescription }
-                    }))
-                    Spacer()
-                    Button {
-                        do { try selection.setFavorite(item.id, favorite: !item.favorite) } catch { self.error = error.localizedDescription }
-                    } label: { Image(systemName: item.favorite ? "star.fill" : "star") }
-                    .accessibilityLabel("收藏模型 \(item.id)").buttonStyle(.borderless)
-                }
-            }
             if !selection.models.isEmpty {
-                DisclosureGroup("分类默认模型") {
-                    ForEach(AgentXModelCategory.allCases, id: \.self) { category in
-                        Picker(categoryLabel(category), selection: Binding(get: { selection.defaultModel(for: category) ?? "" }, set: { id in
-                            if id.isEmpty { selection.defaults[category.rawValue] = nil }
-                            else { do { try selection.setDefault(id, category: category) } catch { self.error = error.localizedDescription } }
-                        })) {
-                            Text("未指定").tag("")
-                            ForEach(selection.models.filter(\.enabled)) { Text($0.id).tag($0.id) }
-                        }
-                    }
-                    Text("分类默认保存您的选择；当前前台仅执行文本对话。").font(.caption).foregroundStyle(AgentXTheme.muted)
-                }
+                Picker("默认模型分类", selection: $defaultCategory) {
+                    ForEach(AgentXModelCategory.allCases, id: \.self) { Text(categoryLabel($0)).tag($0) }
+                }.pickerStyle(.segmented)
+                Text("\(categoryLabel(defaultCategory))默认：\(selection.defaultModel(for: defaultCategory) ?? "未指定")").font(.caption)
+                Text("设为默认会同时启用可用模型，点击保存后生效。").font(.caption).foregroundStyle(AgentXTheme.muted)
+                AgentXModelBrowser(providers: [draftProvider], category: defaultCategory, favorite: { entry in
+                    try selection.setFavorite(entry.model.id, favorite: !entry.model.favorite)
+                }, enable: { entry, enabled in
+                    try selection.setEnabled(entry.model.id, enabled: enabled)
+                }, setDefault: { entry in
+                    try selection.enableAndSetDefault(entry.model.id, category: defaultCategory)
+                }).frame(height: 500)
             }
         }
+    }
+    private var draftProvider: AgentXProvider {
+        .init(id: existingProvider?.id ?? "draft", name: name.isEmpty ? "模型服务" : name, baseURL: address,
+              models: selection.models.map(\.id), enabled: existingProvider?.enabled ?? true,
+              serviceProtocol: serviceProtocol, modelSelection: selection)
     }
     private func categoryLabel(_ category: AgentXModelCategory) -> String {
         switch category { case .chat: "对话"; case .image: "图像"; case .embedding: "向量"; case .audio: "音频"; case .rerank: "重排" }
@@ -265,8 +278,12 @@ struct AgentXEditorView: View {
                     return
                 }
                 synchronizeModels()
-                var seen = Set(selection.models.map(\.id))
-                for item in discovered where seen.insert(item.id).inserted { selection.models.append(item) }
+                if AgentXProviderCatalog.isOpenRouter(baseURL: requestedAddress), requestedProtocol == .openAICompatible {
+                    selection = try selection.mergingCatalog(discovered)
+                } else {
+                    var seen = Set(selection.models.map(\.id))
+                    for item in discovered where seen.insert(item.id).inserted { selection.models.append(item) }
+                }
                 models = selection.models.map(\.id).joined(separator: ", ")
                 discoveryMessage = "服务返回 \(discovered.count) 个模型；新发现的模型需手动启用，保存后生效。"
             } catch { self.error = error.localizedDescription }
@@ -285,7 +302,7 @@ struct AgentXEditorView: View {
             case .app: try controller.addApp(name: name)
             case .provider:
                 if let existingProvider {
-                    try controller.updateProvider(id: existingProvider.id, name: name, address: address, models: models, secret: credentialProfile.isEmpty ? secret : "", serviceProtocol: serviceProtocol, credentialProfile: credentialProfile, modelSelection: selection)
+                    try controller.updateProvider(id: existingProvider.id, name: name, address: address, models: models, secret: credentialProfile.isEmpty ? secret : "", serviceProtocol: serviceProtocol, credentialProfile: credentialProfile, modelSelection: selection, catalogBaseline: catalogBaseline)
                 } else {
                     try controller.addProvider(name: name, address: address, models: models, secret: credentialProfile.isEmpty ? secret : "", serviceProtocol: serviceProtocol, credentialProfile: credentialProfile, modelSelection: selection)
                 }

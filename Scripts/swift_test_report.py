@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run Swift tests without publishing raw compiler/assertion/subprocess output.
 
-Only identities present in public test source and fixed numeric outcomes survive.
+Only public source identities, fixed diagnostic categories and numeric outcomes survive.
 This is a result index, not a compiler log or a substitute for the process status.
 """
 import argparse
@@ -32,8 +32,10 @@ def public_test_names(root):
     return names
 
 class ResultCollector:
-    def __init__(self, known_names, limit=5000):
+    def __init__(self, known_names, limit=5000, known_sources=None):
         self.known_names = known_names
+        self.known_sources = known_sources or {}
+        self.diagnostics = []
         self.limit = min(5000, max(0, limit))
         self.tests = []
         self.swift_testing = None
@@ -41,6 +43,20 @@ class ResultCollector:
     def consume(self, line):
         if len(line) > MAX_LINE: return
         line = ANSI.sub('', line.rstrip('\r\n'))
+        diagnostic = re.fullmatch(r'(.+?):([0-9]{1,7}):([0-9]{1,7}): error: (.+)', line)
+        if diagnostic and diagnostic[1] in self.known_sources:
+            category = 'compilerError'
+            for token, label in [('actor-isolated', 'actorIsolation'), ('cannot find', 'missingSymbol'),
+                                 ('has no member', 'missingSymbol'), ('cannot convert', 'typeMismatch'),
+                                 ('unavailable', 'availability'), ('redeclaration', 'redeclaration')]:
+                if token in diagnostic[4]:
+                    category = label
+                    break
+            entry = {'file': self.known_sources[diagnostic[1]], 'line': int(diagnostic[2]),
+                     'column': int(diagnostic[3]), 'category': category}
+            if entry not in self.diagnostics:
+                if len(self.diagnostics) < 100: self.diagnostics.append(entry)
+                else: self.truncated = True
         if match := CASE.fullmatch(line):
             suite, method, outcome, duration = match.groups()
             name = f'{suite}.{method}'
@@ -89,12 +105,12 @@ def write_report(output, report):
     finally:
         if os.path.exists(name): os.unlink(name)
 
-def run_tests(command, output, known_names, timeout=1500, metadata=None):
+def run_tests(command, output, known_names, timeout=1500, metadata=None, known_sources=None):
     try: Path(output).unlink(missing_ok=True)
     except OSError:
         print('{"reportStatus":"reportWriteFailed","exitCode":73}')
         return 73
-    collector = ResultCollector(known_names)
+    collector = ResultCollector(known_names, known_sources=known_sources)
     start = time.monotonic()
     reason = []
     process = None
@@ -148,7 +164,7 @@ def run_tests(command, output, known_names, timeout=1500, metadata=None):
     report = {'schemaVersion': 1, 'environment': safe_metadata(metadata), 'exitCode': exit_code,
               'reportStatus': status, 'durationSeconds': round(max(0, time.monotonic() - start), 3),
               'xctest': counts, 'swiftTesting': collector.swift_testing,
-              'truncated': collector.truncated, 'tests': collector.tests}
+              'truncated': collector.truncated, 'tests': collector.tests, 'diagnostics': collector.diagnostics}
     try: write_report(output, report)
     except OSError:
         # Keep original failures; fail successful tests if their result cannot be
@@ -156,7 +172,7 @@ def run_tests(command, output, known_names, timeout=1500, metadata=None):
         exit_code = exit_code or 73
         print(json.dumps({'reportStatus': 'reportWriteFailed', 'exitCode': exit_code}))
         return exit_code
-    print(json.dumps({'reportStatus': status, 'exitCode': exit_code, 'xctest': counts, 'swiftTesting': collector.swift_testing}, sort_keys=True))
+    print(json.dumps({'reportStatus': status, 'exitCode': exit_code, 'xctest': counts, 'swiftTesting': collector.swift_testing, 'diagnostics': collector.diagnostics}, sort_keys=True))
     return exit_code
 
 def environment(root, selection):
@@ -174,16 +190,33 @@ def environment(root, selection):
             'platform': system if system in ('Darwin', 'Linux', 'Windows') else 'other',
             'architecture': machine if machine in ('arm64', 'x86_64', 'aarch64') else 'other', 'selection': selection}
 
+def public_source_paths(root):
+    result = {}
+    tracked = subprocess.check_output(['git', 'ls-files', '-z', '--', '*.swift'], cwd=root)
+    for item in tracked.split(b'\0'):
+        relative = os.fsdecode(item)
+        if not re.fullmatch(r'(?:Sources|Tests)/[A-Za-z0-9_./+ -]+\.swift|Package\.swift', relative):
+            continue
+        path = root / relative
+        if '..' in Path(relative).parts or path.is_symlink() or not path.is_file(): continue
+        result[str(path)] = relative
+        result[relative] = relative
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--package', action='store_true', help='Run the release package build with the same safe diagnostics')
     parser.add_argument('--selection', choices=('utc', 'shanghai', 'local'), default='local')
     parser.add_argument('--timeout-seconds', type=int, default=1500, choices=range(1, 1701), metavar='1..1700')
     parser.add_argument('arguments', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     forwarded = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
-    return run_tests([str(root / 'Scripts/travel-cat-swift.sh'), 'test', *forwarded], args.output,
-                     public_test_names(root), timeout=args.timeout_seconds, metadata=environment(root, args.selection))
+    if args.package and forwarded: parser.error('--package does not accept Swift arguments')
+    command = [str(root / 'Scripts/package-app.sh')] if args.package else [str(root / 'Scripts/travel-cat-swift.sh'), 'test', *forwarded]
+    return run_tests(command, args.output, public_test_names(root), timeout=args.timeout_seconds,
+                     metadata=environment(root, args.selection), known_sources=public_source_paths(root))
 
 if __name__ == '__main__': raise SystemExit(main())

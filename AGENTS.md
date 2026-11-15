@@ -9,3 +9,7 @@
 - `dist` is rebuildable packaging output. Remove only the known output after installation verification; keep deployment backups and real data.
 - Local deployment and GitHub publication are separate actions. Do not upload, create remotes, modify Codex caches, enable generation or change the selected pet as a side effect of an unrelated task.
 - Do not change the public license status without the author's explicit choice. Preserve third-party font notices.
+
+## AgentX v1 delivery scope
+
+Follow [AgentX v1 milestones](docs/agentx-v1-milestones.md) for stage boundaries and acceptance gates. Preserve existing features; before v1 acceptance, pause new features outside the v1 execution path while continuing necessary defect, security, and compatibility fixes. Keep local implementation, automated tests, native-client acceptance, installation, and remote publication as separate claims.

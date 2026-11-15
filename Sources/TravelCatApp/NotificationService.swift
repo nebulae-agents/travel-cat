@@ -13,30 +13,54 @@ enum PetTravelForegroundNotificationPolicy {
 
 @MainActor
 final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
-    private let center: UNUserNotificationCenter
+    private let center: UNUserNotificationCenter?
+    private let send: (UNNotificationRequest) async throws -> Void
+    private let authorize: () async throws -> Bool
     private let calendar: Calendar
     private var coordinator: NotificationCoordinator!
     private var summaryTimer: Timer?
+    private var summaryGeneration = UUID()
     private(set) var authorizationDenied = false
     private var isAuthorized = false
+    private let operations = AgentXOwnedTaskScope()
+    var hasOwnedOperations: Bool { !operations.isIdle }
+    func fence() { summaryGeneration = UUID(); operations.fence(); summaryTimer?.invalidate(); summaryTimer = nil }
+    func suspendAndWait() async { fence(); await operations.suspendAndWait() }
+    @discardableResult func resumeWithoutRunning() -> Bool { operations.resumeWithoutRunning() }
     var promptRouteHandler: ((PetTravelRoute) -> Void)?
 
     init(
-        center: UNUserNotificationCenter = .current(),
+        center: UNUserNotificationCenter? = .current(),
+        send: ((UNNotificationRequest) async throws -> Void)? = nil,
+        authorized: Bool = false,
+        authorize: (() async throws -> Bool)? = nil,
         defaults: UserDefaults = .standard,
         calendar: Calendar = .current
     ) {
         self.center = center
+        self.send = send ?? { request in guard let center else { throw CancellationError() }; try await center.add(request) }
+        self.authorize = authorize ?? { try await center?.requestAuthorization(options: [.alert, .sound]) ?? false }
+        self.isAuthorized = authorized
         self.calendar = calendar
         super.init()
-        center.delegate = self
+        center?.delegate = self
         coordinator = NotificationCoordinator(defaults: defaults) { [weak self] delivery in
-            Task { @MainActor in await self?.deliver(delivery) }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.operations.start({ await self.deliver(delivery) }) == nil { self.coordinator.deliveryFailed(delivery) }
+            }
         }
     }
 
     func postTravelPromptFallback(_ delivery: PetTravelPromptDelivery) async -> Bool {
-        guard isAuthorized,
+        var result = false
+        guard let task = operations.start({ result = await self.deliverPrompt(delivery) }) else { return false }
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        return result
+    }
+
+    private func deliverPrompt(_ delivery: PetTravelPromptDelivery) async -> Bool {
+        guard operations.isEnabled, !Task.isCancelled, isAuthorized,
               let payload = try? PetTravelNotificationPayload(delivery: delivery) else {
             return false
         }
@@ -47,13 +71,18 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         content.sound = .default
         content.userInfo = payload.userInfo
         do {
-            try await center.add(
+            try await send(
                 UNNotificationRequest(
                     identifier: payload.identifier,
                     content: content,
                     trigger: nil
                 )
             )
+            guard operations.isEnabled, !Task.isCancelled else {
+                center?.removePendingNotificationRequests(withIdentifiers: [payload.identifier])
+                center?.removeDeliveredNotifications(withIdentifiers: [payload.identifier])
+                return false
+            }
             return true
         } catch {
             log("pet prompt notification failed: \(error)")
@@ -71,23 +100,38 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         ) else {
             return
         }
-        await MainActor.run { self.promptRouteHandler?(route) }
+        await MainActor.run { if self.operations.isEnabled { self.promptRouteHandler?(route) } }
     }
 
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        PetTravelForegroundNotificationPolicy.options(
-            categoryIdentifier: notification.request.content.categoryIdentifier
-        )
+        let category = notification.request.content.categoryIdentifier
+        return await MainActor.run {
+            guard self.operations.isEnabled else { return [] }
+            return PetTravelForegroundNotificationPolicy.options(categoryIdentifier: category)
+        }
     }
 
+    /// Refresh permission only. Persisted pending notifications are not replayed here.
+    func refreshAuthorizationForExplicitOpen() async { await requestAuthorization() }
+
     func requestAuthorization() async {
+        guard operations.isEnabled, !Task.isCancelled else { return }
+        guard let task = operations.start({ await self.performAuthorization() }) else { return }
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+
+    private func performAuthorization() async {
+        guard operations.isEnabled, !Task.isCancelled else { return }
         do {
-            isAuthorized = try await center.requestAuthorization(options: [.alert, .sound])
-            authorizationDenied = !isAuthorized
+            let authorized = try await authorize()
+            guard operations.isEnabled, !Task.isCancelled else { return }
+            isAuthorized = authorized
+            authorizationDenied = !authorized
         } catch {
+            guard operations.isEnabled, !Task.isCancelled else { return }
             authorizationDenied = true
             log("notification authorization failed: \(error)")
         }
@@ -99,7 +143,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         settings: TravelSettings,
         now: Date = Date()
     ) {
-        guard isAuthorized else { return }
+        guard operations.isEnabled, isAuthorized else { return }
         let events = previous.map { NotificationDetector.detect(previous: $0, current: current) } ?? []
         coordinator.process(
             events,
@@ -115,7 +159,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         settings: TravelSettings,
         now: Date = Date()
     ) {
-        guard isAuthorized else { return }
+        guard operations.isEnabled, isAuthorized else { return }
         let events = previous.map {
             NotificationDetector.detectUnavailable(previous: $0, current: current)
         } ?? []
@@ -128,7 +172,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func settingsDidChange(_ settings: TravelSettings, now: Date = Date()) {
-        guard isAuthorized else { return }
+        guard operations.isEnabled, isAuthorized else { return }
         coordinator.process(
             [],
             policy: NotificationPolicy(quietStart: settings.quietStart, quietEnd: settings.quietEnd),
@@ -138,7 +182,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private func deliver(_ delivery: NotificationDelivery) async {
-        guard !authorizationDenied else { return }
+        guard operations.isEnabled, !Task.isCancelled, !authorizationDenied else { coordinator.deliveryFailed(delivery); return }
         let content = UNMutableNotificationContent()
         switch delivery {
         case let .event(event):
@@ -155,7 +199,13 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             case let .event(event): identifier = event.identifier
             case .summary: identifier = "travel-cat-quiet-summary"
             }
-            try await center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+            try await send(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+            guard operations.isEnabled, !Task.isCancelled else {
+                center?.removePendingNotificationRequests(withIdentifiers: [identifier])
+                center?.removeDeliveredNotifications(withIdentifiers: [identifier])
+                coordinator.deliveryFailed(delivery)
+                return
+            }
             coordinator.deliverySucceeded(delivery)
         } catch {
             coordinator.deliveryFailed(delivery)
@@ -164,6 +214,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private func scheduleQuietEnd(settings: TravelSettings, now: Date) {
+        let generation = UUID(); summaryGeneration = generation
         summaryTimer?.invalidate()
         summaryTimer = nil
         let policy = NotificationPolicy(quietStart: settings.quietStart, quietEnd: settings.quietEnd)
@@ -176,8 +227,8 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
               ) else { return }
         summaryTimer = Timer.scheduledTimer(withTimeInterval: max(1, quietEnd.timeIntervalSince(now)), repeats: false) {
             [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
+            MainActor.assumeIsolated {
+                guard let self, self.operations.isEnabled, self.summaryGeneration == generation else { return }
                 self.coordinator.process([], policy: policy, hour: policy.quietEnd)
                 self.summaryTimer = nil
             }

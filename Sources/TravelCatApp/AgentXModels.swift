@@ -1,14 +1,28 @@
 import Foundation
 
 enum AgentXPage: String, CaseIterable, Identifiable {
-    case overview, apps, chat, configuration, instances, definitions, providers, runs, inbox, settings
+    case overview, platformOverview, module, apps, chat, configuration, characters, workflows, members, sceneRules, appModels, appFiles, appSettings, backups, governance, instances, definitions, providers, runs, inbox, settings
     var id: Self { self }
+    var isBackstage: Bool {
+        [.configuration, .members, .workflows, .characters, .sceneRules, .appModels, .runs, .appFiles, .appSettings].contains(self)
+    }
     var title: String {
         switch self {
-        case .overview: "总览"
+        case .overview: "应用总览"
+        case .platformOverview: "全平台总览"
+        case .module: "前台模块"
         case .apps: "所有应用"
         case .chat: "前台 · 参与"
-        case .configuration: "配置台 · 框架"
+        case .configuration: "后台 · 生成与优化"
+        case .characters: "人物定制"
+        case .workflows: "工作流"
+        case .members: "成员与工作流"
+        case .sceneRules: "场景与规则"
+        case .appModels: "模型与限额"
+        case .appFiles: "目录与制品"
+        case .appSettings: "应用设置"
+        case .backups: "备份与迁移"
+        case .governance: "预算与审计"
         case .instances: "Agent 实例"
         case .definitions: "Agent 定义"
         case .providers: "模型服务"
@@ -19,10 +33,20 @@ enum AgentXPage: String, CaseIterable, Identifiable {
     }
     var icon: String {
         switch self {
-        case .overview: "square.grid.2x2"
+        case .overview, .platformOverview: "square.grid.2x2"
+        case .module: "rectangle.3.group"
         case .apps: "square.stack.3d.up"
         case .chat: "bubble.left.and.bubble.right"
         case .configuration: "slider.horizontal.3"
+        case .characters: "person.crop.rectangle"
+        case .workflows: "point.3.connected.trianglepath.dotted"
+        case .members: "person.2"
+        case .sceneRules: "theatermasks"
+        case .appModels: "slider.horizontal.3"
+        case .appFiles: "folder"
+        case .appSettings: "gearshape.2"
+        case .backups: "externaldrive"
+        case .governance: "checkmark.shield"
         case .instances: "cpu"
         case .definitions: "person.text.rectangle"
         case .providers: "server.rack"
@@ -59,7 +83,44 @@ struct AgentXApplication: Codable, Identifiable, Equatable {
     var id: String
     var name: String
     var kind: AgentXAppKind
+    var workflow: AgentXWorkflowConfiguration? = nil
+    var experience: AgentXExperienceConfiguration? = nil
+    var enabled: Bool = true
+    var runtime: String? = nil
+    var modules: [String]? = nil
+    var version: AgentXManifestValue? = nil
+    var manifest: [String: AgentXManifestValue]? = nil
+    var manifestAuthor: String? { manifest?["author"]?.string }
+    var manifestSource: String? { manifest?["source"]?.string }
+    var requiredRuntime: String? { manifest?["requires"]?.object?["runtime"]?.string ?? runtime }
+    var requiredProviders: [String] { manifest?["requires"]?.object?["providers"]?.strings ?? [] }
+    var declaredPermissions: [String: AgentXManifestValue] { manifest?["permissions"]?.object ?? [:] }
+    var declaredModules: [String] { modules ?? manifest?["ui"]?.object?["modules"]?.strings ?? [] }
+    var declaredIcon: String? { manifest?["ui"]?.object?["icon"]?.string }
     var canRunHostText: Bool { kind == .chat || kind == .blackcat }
+    private enum CodingKeys: String, CodingKey {
+        case id, name, kind, workflow, experience, enabled, runtime, modules, version, manifest
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        kind = try c.decode(AgentXAppKind.self, forKey: .kind)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        workflow = try c.decodeIfPresent(AgentXWorkflowConfiguration.self, forKey: .workflow)
+        experience = try c.decodeIfPresent(AgentXExperienceConfiguration.self, forKey: .experience)
+        runtime = try c.decodeIfPresent(String.self, forKey: .runtime)
+        modules = try c.decodeIfPresent([String].self, forKey: .modules)
+        version = try c.decodeIfPresent(AgentXManifestValue.self, forKey: .version)
+        manifest = try c.decodeIfPresent([String: AgentXManifestValue].self, forKey: .manifest)
+        try validateManifest()
+
+    }
+    init(id: String, name: String, kind: AgentXAppKind, workflow: AgentXWorkflowConfiguration? = nil,
+         experience: AgentXExperienceConfiguration? = nil, enabled: Bool = true) {
+        self.id = id; self.name = name; self.kind = kind; self.workflow = workflow
+        self.experience = experience; self.enabled = enabled
+    }
 }
 struct AgentXProvider: Codable, Identifiable, Equatable {
     var id: String
@@ -70,17 +131,20 @@ struct AgentXProvider: Codable, Identifiable, Equatable {
     var serviceProtocol: AgentXServiceProtocol = .openAICompatible
     var credentialProfile: String?
     var modelSelection: AgentXModelSelection?
+    var catalogRefreshedAt: Date?
+    var isOpenRouter: Bool { serviceProtocol == .openAICompatible && AgentXProviderCatalog.isOpenRouter(baseURL: baseURL) }
     var credentialID: String { "agentx.provider.\(id)" }
     var enabledModels: [String] {
         guard let modelSelection else { return models }
-        return models.filter { id in modelSelection.models.contains { $0.id == id && $0.enabled } }
+        return models.filter { id in modelSelection.models.contains { $0.id == id && $0.enabled && $0.available && $0.supportsTextOutput } }
     }
     init(id: String, name: String, baseURL: String, models: [String], enabled: Bool = true,
-         serviceProtocol: AgentXServiceProtocol = .openAICompatible, credentialProfile: String? = nil, modelSelection: AgentXModelSelection? = nil) {
+         serviceProtocol: AgentXServiceProtocol = .openAICompatible, credentialProfile: String? = nil, modelSelection: AgentXModelSelection? = nil, catalogRefreshedAt: Date? = nil) {
         self.id = id; self.name = name; self.baseURL = baseURL; self.models = models; self.enabled = enabled
         self.serviceProtocol = serviceProtocol; self.credentialProfile = credentialProfile; self.modelSelection = modelSelection
+        self.catalogRefreshedAt = catalogRefreshedAt
     }
-    private enum CodingKeys: String, CodingKey { case id, name, baseURL, models, enabled, serviceProtocol, credentialProfile, modelSelection }
+    private enum CodingKeys: String, CodingKey { case id, name, baseURL, models, enabled, serviceProtocol, credentialProfile, modelSelection, catalogRefreshedAt }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id); name = try c.decode(String.self, forKey: .name)
@@ -89,6 +153,7 @@ struct AgentXProvider: Codable, Identifiable, Equatable {
         serviceProtocol = try c.decodeIfPresent(AgentXServiceProtocol.self, forKey: .serviceProtocol) ?? .openAICompatible
         credentialProfile = try c.decodeIfPresent(String.self, forKey: .credentialProfile)
         modelSelection = try c.decodeIfPresent(AgentXModelSelection.self, forKey: .modelSelection)
+        catalogRefreshedAt = try c.decodeIfPresent(Date.self, forKey: .catalogRefreshedAt)
     }
 }
 struct AgentXDefinition: Codable, Identifiable, Equatable {
@@ -108,6 +173,10 @@ struct AgentXDefinition: Codable, Identifiable, Equatable {
         return .init(source: prompt, files: draft?.files ?? [:], directories: draft?.directories ?? [])
     }
 }
+struct AgentXConversationModel: Codable, Equatable, Hashable {
+    var providerID: String
+    var model: String
+}
 struct AgentXInstance: Codable, Identifiable, Equatable {
     var id: String
     var name: String
@@ -115,6 +184,7 @@ struct AgentXInstance: Codable, Identifiable, Equatable {
     var definitionID: String
     var providerID: String
     var model: String
+    var conversationModel: AgentXConversationModel? = nil
     var definitionRevision: Int? = nil
     var variables: [String: String]? = nil
     var credentialProfile: String? = nil
@@ -132,6 +202,10 @@ enum AgentXRunStatus: String, Codable {
         }
     }
 }
+enum AgentXProposalStage { case review, saved, published }
+
+enum AgentXRunPurpose: String, Codable { case configuration, characterPreview, workflow, usageAssistant }
+
 struct AgentXRun: Codable, Identifiable, Equatable {
     var id: String
     var appID: String
@@ -144,10 +218,36 @@ struct AgentXRun: Codable, Identifiable, Equatable {
     var endedAt: Date?
     var failure: String?
     var auditFailure: String? = nil
+    var actualProviderID: String? = nil
+    var actualModel: String? = nil
+    var runtimeCore: String? = nil
+    var effectiveConfiguration: AgentXEffectiveConfiguration? = nil
+    var purpose: AgentXRunPurpose? = nil
+    var configurationDefinitionID: String? = nil
+    var configurationBaseDigest: String? = nil
+    var configurationAppliedDigest: String? = nil
+    var configurationAppliedChangeIDs: [String]? = nil
+    var workflowRevision: Int? = nil
+    var workflowInstanceIDs: [String]? = nil
+    var workflowSteps: [AgentXWorkflowStepResult]? = nil
+    var revision: Int? = nil
+    var stopEvidence: String? = nil
+    var requiresProcessReview: Bool? = nil
+
+    var displayedStatus: String {
+        switch stopEvidence {
+        case "pending": "已请求停止 · 等待 Pi 退出"
+        case "confirmedExited": status.label + " · Pi 已确认退出"
+        case "unverified": status.label + " · Pi 退出未确认"
+        default: status.label
+        }
+    }
 }
 struct AgentXState: Codable, Equatable {
     var version = 1
     var blackCatEnabled = true
+    var frontSkin: AgentXFrontSkin? = nil
+    var currentAppID: String?
     var singleAppID: String?
     var apps: [AgentXApplication] = [.init(id: "blackcat", name: "BlackCat", kind: .blackcat)]
     var providers: [AgentXProvider] = []
@@ -155,7 +255,7 @@ struct AgentXState: Codable, Equatable {
     var definitions: [AgentXDefinition] = []
     var instances: [AgentXInstance] = []
     var runs: [AgentXRun] = []
-    var unreadCount: Int { runs.filter { $0.status.terminal && !$0.isRead }.count }
+    var unreadCount: Int { runs.filter { $0.status.terminal && !$0.isRead && AgentXApplicationPolicy.isEnabled($0.appID, in: self) }.count }
     var dockDestination: AgentXPage { unreadCount > 0 ? .inbox : .overview }
     var activeCount: Int { runs.filter { !$0.status.terminal }.count }
 }

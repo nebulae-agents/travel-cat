@@ -16,6 +16,30 @@ private final class MemoryGenerationCredentials: TravelServiceCredentialStoring 
 }
 
 final class GenerationServiceControllerTests: XCTestCase {
+    @MainActor func testDisabledControllerRejectsSaveAndWaitsForProbeCompletion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let keys = MemoryGenerationCredentials()
+        let controller = try GenerationServiceController(store: .init(root: root), credentials: keys, hasExistingHistory: false)
+        var continuation: CheckedContinuation<Void, Never>?
+        let started = expectation(description: "probe started")
+        controller.probes.start { await withCheckedContinuation { continuation = $0; started.fulfill() } }
+        await fulfillment(of: [started], timeout: 2)
+        controller.fence()
+        XCTAssertThrowsError(try controller.save(controller.configuration, narrativeSecret: "secret", imageSecret: nil))
+        XCTAssertTrue(keys.values.isEmpty)
+        XCTAssertNil(controller.probes.start { XCTFail("disabled probe") })
+        var finished = false
+        let stop = Task { await controller.suspendAndWait(); finished = true }
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertFalse(finished)
+        XCTAssertFalse(controller.resumeWithoutRunning())
+        continuation?.resume()
+        await stop.value
+        XCTAssertTrue(controller.resumeWithoutRunning())
+        XCTAssertTrue(controller.probes.isIdle)
+    }
+
     @MainActor func testNoKeySetupPersistsBothServicesAndReopensReadyWithoutTouchingHistory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

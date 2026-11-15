@@ -9,6 +9,60 @@ final class AgentXLayeredRepositoryTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
     }
+    func testNavigationSavePreservesHistoricalRunBytesAndModificationDate() throws {
+        let directory = try root(), repository = AgentXRepository(root: directory)
+        var state = AgentXState()
+        state.runs = [.init(id: "history", appID: "blackcat", instanceID: "old-member", prompt: "old", status: .completed, response: "kept")]
+        try repository.save(state)
+        let file = directory.appendingPathComponent("apps/blackcat/runs/history.json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        object["futureExtension"] = ["keep": "verbatim"]
+        let original = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        try original.write(to: file)
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: stamp], ofItemAtPath: file.path)
+        var loaded = try repository.load()
+        let history = loaded.runs
+        loaded.currentAppID = "blackcat"
+        try repository.save(loaded)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date, stamp)
+        XCTAssertEqual(try repository.load().runs, history)
+    }
+
+    func testChangingOneRunPreservesOtherHistoryAndPersistsNewRun() throws {
+        let directory = try root(), repository = AgentXRepository(root: directory)
+        var state = AgentXState()
+        state.runs = ["first", "second"].map { .init(id: $0, appID: "blackcat", instanceID: "old-member", prompt: $0, status: .completed) }
+        try repository.save(state)
+        let untouched = directory.appendingPathComponent("apps/blackcat/runs/second.json")
+        let bytes = try Data(contentsOf: untouched)
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: stamp], ofItemAtPath: untouched.path)
+        state.runs[0].isRead = true
+        state.runs[0].response = "updated"
+        state.runs.append(.init(id: "third", appID: "blackcat", instanceID: "old-member", prompt: "new", status: .running))
+        try repository.save(state)
+        XCTAssertEqual(try repository.load().runs, state.runs)
+        XCTAssertEqual(try Data(contentsOf: untouched), bytes)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: untouched.path)[.modificationDate] as? Date, stamp)
+    }
+
+    func testCorruptHistoricalRunIsNotOverwrittenByUnrelatedSave() throws {
+        let directory = try root(), repository = AgentXRepository(root: directory)
+        var state = AgentXState()
+        state.runs = [.init(id: "history", appID: "blackcat", instanceID: "old-member", prompt: "old", status: .completed)]
+        try repository.save(state)
+        let file = directory.appendingPathComponent("apps/blackcat/runs/history.json")
+        let corrupt = Data("{broken".utf8)
+        try corrupt.write(to: file)
+        let settings = try Data(contentsOf: directory.appendingPathComponent("agentx.yaml"))
+        state.blackCatEnabled.toggle()
+        XCTAssertThrowsError(try repository.save(state))
+        XCTAssertEqual(try Data(contentsOf: file), corrupt)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("agentx.yaml")), settings)
+    }
+
     func testDesignApplicationYAMLPreservesRuntimeModulesAndUnknownConfiguration() throws {
         let directory = try root(), repository = AgentXRepository(root: directory)
         try repository.save(AgentXState())

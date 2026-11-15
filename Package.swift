@@ -27,7 +27,7 @@ let package = Package(
         .executableTarget(
             name: "TravelCatApp",
             dependencies: ["TravelCore", "TravelStorage", "TravelUI", .product(name: "Yams", package: "Yams"), .product(name: "AgentXAppSDK", package: "AgentXAppSDK")],
-            resources: [.copy("Resources/Generation"), .copy("Resources/AgentRuntime")]
+            resources: [.copy("Resources/Generation"), .copy("Resources/AgentRuntime"), .copy("Resources/AgentXScenes")]
         ),
         .executableTarget(
             name: "TravelCatCLI",

@@ -93,6 +93,7 @@ struct AgentXOfflineAppLifecycle {
         return nil
     }
     func request(_ operation: Operation) throws {
+        guard try AgentXPilot.configured(at: root) == nil else { throw Failure.writersActive }
         let migration = locator.deletingLastPathComponent().appendingPathComponent("pending-migration.json")
         try checkFile(migration)
         guard !fm.fileExists(atPath: migration.path) else { throw Failure.migrationPending }
@@ -130,6 +131,7 @@ struct AgentXOfflineAppLifecycle {
     @discardableResult
     func applyPending(writersHaveStopped: @escaping () -> Bool) throws -> Result? {
         guard hasPendingOperation else { return nil }
+        guard try AgentXPilot.configured(at: root) == nil else { throw Failure.writersActive }
         var request = try readRequest()
         guard request.sourceRoot == root.path else { throw Failure.mismatchedRoot }
         guard previousHostHasExited() else { throw Failure.previousHostActive }

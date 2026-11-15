@@ -49,6 +49,7 @@ struct AgentXHostStorage {
     var offlineLifecycle: AgentXOfflineAppLifecycle { .init(root: root, locator: hostDirectory.appendingPathComponent("location.json")) }
     var hasPendingMigration: Bool { FileManager.default.fileExists(atPath: requestURL.path) }
     func requestMigration(to destination: URL) throws {
+        guard try AgentXPilot.configured(at: root) == nil else { throw Failure.writersActive }
         guard !offlineLifecycle.hasPendingOperation else { throw Failure.invalidRequest }
         guard destination.isFileURL, destination.path != "/", destination.standardizedFileURL != root.standardizedFileURL,
               !destination.path.hasPrefix(root.path + "/"), !root.path.hasPrefix(destination.path + "/"),
@@ -78,6 +79,7 @@ struct AgentXHostStorage {
     }
     func applyPendingMigration(writersHaveStopped: () -> Bool, inspectLegacyWorkbench: (URL) throws -> Void = { _ in }, migrateCredentials: ((URL, URL) throws -> Void)? = nil) throws -> URL {
         guard hasPendingMigration else { return root }
+        guard try AgentXPilot.configured(at: root) == nil else { throw Failure.writersActive }
         var request = try JSONDecoder().decode(Request.self, from: Data(contentsOf: requestURL))
         guard request.source == root.path else { throw Failure.invalidRequest }
         guard !offlineLifecycle.hasPendingOperation else { throw Failure.invalidRequest }

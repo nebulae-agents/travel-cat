@@ -11,6 +11,39 @@ import TravelUI
 @Suite(.serialized)
 struct JourneyTestControllerTests {
     @Test @MainActor
+    func disabledApplicationDoesNotCreateSessionOrExecute() throws {
+        let harness = try Harness()
+        let calls = ExternalCallProbe()
+        let controller = JourneyTestController(parentRoot: harness.parent, productionRoot: harness.production,
+            modelGenerator: NeverModel(probe: calls), imageGenerator: NeverImage(probe: calls), referenceImageURL: nil)
+        controller.isApplicationEnabled = { false }
+        controller.start(fastTestEnabled: true, mode: .compact)
+        #expect(controller.session == nil)
+        #expect(!controller.isRunning)
+        controller.stop()
+    }
+    @Test @MainActor
+    func suspendOwnsCancelledGenerationUntilActualReturn() async throws {
+        let harness = try Harness(), image = ImageFake(source: try harness.makeGeneratedPNG())
+        let entered = AsyncGate(), release = AsyncGate()
+        let controller = JourneyTestController(parentRoot: harness.parent, productionRoot: harness.production,
+            modelGenerator: NarrativeFake(), imageGenerator: image,
+            imageImporter: JourneyTestImageImporter(allowedRoot: harness.generated),
+            handwritingPreparer: LateInk(entered: entered, release: release),
+            referenceImageURL: nil, stageInterval: 0, sleep: { _ in })
+        controller.start(fastTestEnabled: true)
+        await entered.wait()
+        controller.fence()
+        #expect(controller.hasOwnedOperations)
+        #expect(!controller.resumeWithoutRunning())
+        let stopped = Task { await controller.shutdown() }
+        await release.release()
+        await stopped.value
+        #expect(!controller.hasOwnedOperations)
+        #expect(controller.resumeWithoutRunning())
+    }
+
+    @Test @MainActor
     func handwritingFailurePublishesFallbackWithoutRegeneratingScene() async throws {
         let harness = try Harness(), image = ImageFake(source: try harness.makeGeneratedPNG())
         let service = PostcardHandwritingGenerator(model: NarrativeFake(), select: { _, _ in

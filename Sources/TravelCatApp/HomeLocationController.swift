@@ -87,6 +87,12 @@ final class HomeLocationController: ObservableObject {
     private let store: HomeLocationStore
     private let lookup: any HomeLocationLookingUp
     private let now: () -> Date
+    private let operations = AgentXOwnedTaskScope()
+    var isApplicationEnabled: () -> Bool = { true }
+    var hasOwnedOperations: Bool { !operations.isIdle }
+    func fence() { revision += 1; operations.fence() }
+    func suspendAndWait() async { fence(); await operations.suspendAndWait() }
+    @discardableResult func resumeWithoutRunning() -> Bool { operations.resumeWithoutRunning() }
     private var revision = 0
     private var loadFailed = false
 
@@ -103,6 +109,7 @@ final class HomeLocationController: ObservableObject {
     }
 
     func setIPLookupEnabled(_ enabled: Bool) {
+        guard operations.isEnabled, isApplicationEnabled() else { return }
         guard !loadFailed else { return }
         do {
             var next = state
@@ -115,6 +122,7 @@ final class HomeLocationController: ObservableObject {
     }
 
     func setManualCity(_ city: String) {
+        guard operations.isEnabled, isApplicationEnabled() else { return }
         guard !loadFailed else { return }
         let city = city.trimmingCharacters(in: .whitespacesAndNewlines)
         guard HomeLocation.validName(city) else { errorMessage = "请输入 1–80 字的城市名称，不要换行。"; return }
@@ -131,6 +139,7 @@ final class HomeLocationController: ObservableObject {
     }
 
     func useProposedLocation() {
+        guard operations.isEnabled, isApplicationEnabled() else { return }
         guard !loadFailed, let location = proposedLocation else { return }
         do {
             var next = state
@@ -145,6 +154,12 @@ final class HomeLocationController: ObservableObject {
     }
 
     func refresh(force: Bool = false) async {
+        guard isApplicationEnabled() else { return }
+        guard let task = operations.start({ await self.performRefresh(force: force) }) else { return }
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+    private func performRefresh(force: Bool) async {
+        guard operations.isEnabled, isApplicationEnabled(), !Task.isCancelled else { return }
         guard !loadFailed, !isLocating else { return }
         guard state.ipLookupEnabled else {
             if force { message = "请先允许通过 ipwho.is 定位，或直接手动填写城市。" }
@@ -170,7 +185,7 @@ final class HomeLocationController: ObservableObject {
         do {
             let candidate = try await lookup.lookup()
             try Task.checkCancellation()
-            guard currentRevision == revision, state.ipLookupEnabled else { return }
+            guard operations.isEnabled, isApplicationEnabled(), currentRevision == revision, state.ipLookupEnabled else { return }
             let location = HomeLocation(country: candidate.country, region: candidate.region, city: candidate.city,
                 source: .ip, provider: "ipwho.is", updatedAt: now())
             if state.location?.source == .manual {
