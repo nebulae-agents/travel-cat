@@ -119,8 +119,15 @@ final class AgentXHostRuntimeLifecycleTests: XCTestCase {
         XCTAssertFalse(controller.state.apps.contains { $0.id == "new-app" })
         try controller.setBlackCatEnabled(false)
         XCTAssertFalse(try repo.load().apps.contains { $0.id == "new-app" })
-        // Let the deliberately short-lived undo task finish before another package mutation.
-        try await Task.sleep(for: .milliseconds(5100))
+        // Wait for the same readiness gate used by package mutations. The undo
+        // task starts asynchronously, so 5.1 seconds from here is not a receipt.
+        let deadline = ContinuousClock.now + .seconds(15)
+        var snapshotIdle = false
+        while !snapshotIdle && ContinuousClock.now < deadline {
+            do { try controller.requirePackageSnapshotIdle(); snapshotIdle = true }
+            catch { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        try controller.requirePackageSnapshotIdle()
         try service.restore(receipt)
         XCTAssertFalse(try XCTUnwrap(controller.state.apps.first { $0.id == "new-app" }).enabled)
         XCTAssertFalse(controller.state.blackCatEnabled)
