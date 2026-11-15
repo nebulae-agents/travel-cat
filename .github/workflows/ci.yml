@@ -190,7 +190,16 @@ jobs:
         run: |
           set -euo pipefail
           export TRAVEL_CAT_SCRATCH_ROOT="$RUNNER_TEMP/travel-cat-packaged-swift"
-          Scripts/package-app.sh > "$RUNNER_TEMP/travel-cat-package.log" 2>&1
+          python3 Scripts/swift_test_report.py --package --timeout-seconds 1100 --output "$RUNNER_TEMP/travel-cat-package-result.json"
+      - name: Preserve sanitized package diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: package-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: ignore
+          # Public source positions and fixed categories only; never raw build logs.
+          path: ${{ runner.temp }}/travel-cat-package-result.json
       - name: Offline relocated packaged-app acceptance
         shell: bash
         run: |

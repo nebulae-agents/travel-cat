@@ -25,6 +25,31 @@ class SwiftTestReportTests(unittest.TestCase):
         c.consume('Test Case malicious body token=canary-private-value')
         self.assertEqual(c.tests, [{'name': 'FixtureTests.testExample', 'outcome': 'failed', 'durationSeconds': 0.125}])
         self.assertNotIn('canary', json.dumps(c.tests))
+    def test_compile_diagnostics_keep_only_public_location_and_fixed_category(self):
+        c = self.collector()
+        self.assertTrue(hasattr(c, 'diagnostics'), 'compiler failures currently leave no diagnostic')
+        c.known_sources = {'/checkout/Sources/Probe.swift': 'Sources/Probe.swift'}
+        c.consume("/checkout/Sources/Probe.swift:12:4: error: cannot find 'private-canary' in scope")
+        c.consume("/private/person.swift:9:1: error: secret-canary")
+        c.consume("/checkout/Sources/Probe.swift:12:4: error: cannot find 'private-canary' in scope")
+        c.consume("/checkout/Sources/Probe.swift:13:2: error: main actor-isolated initializer cannot be called from a nonisolated context token=canary")
+        self.assertEqual(c.diagnostics, [
+            {'file': 'Sources/Probe.swift', 'line': 12, 'column': 4, 'category': 'missingSymbol'},
+            {'file': 'Sources/Probe.swift', 'line': 13, 'column': 2, 'category': 'actorIsolation'}])
+        self.assertNotIn('canary', json.dumps(c.diagnostics))
+
+    def test_compiler_failure_report_keeps_exit_status_and_safe_diagnostics(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'safe.json'
+            code = "print('/checkout/Sources/Probe.swift:4:2: error: cannot convert value private-canary');raise SystemExit(1)"
+            self.assertTrue(hasattr(self.collector(), 'diagnostics'))
+            status = REPORT.run_tests([sys.executable, '-c', code], out, set(),
+                                     known_sources={'/checkout/Sources/Probe.swift':'Sources/Probe.swift'})
+            self.assertEqual(status, 1)
+            data = json.loads(out.read_text())
+            self.assertEqual(data['diagnostics'][0]['category'], 'typeMismatch')
+            self.assertNotIn('canary', out.read_text())
+
     def test_skips_ansi_and_swift_testing_aggregate(self):
         c = self.collector()
         c.consume("\x1b[32mTest Case '-[Fixture.FixtureTests testExample]' skipped (0.001 seconds).\x1b[0m")
