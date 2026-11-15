@@ -66,9 +66,12 @@ enum AgentXLocalAppZIP {
             }
         }
         let lower = max(0, data.count - 22 - 65535)
-        guard let end = stride(from: data.count - 22, through: lower, by: -1).first(where: { offset in
-            (try? value(offset, 4)) == 0x06054b50 && (try? value(offset + 20, 2)).map { offset + 22 + $0 == data.count } == true
-        }) else { throw AgentXError.corrupt }
+        let end: Int? = stride(from: data.count - 22, through: lower, by: -1).first { offset in
+            guard let signature = try? value(offset, 4), signature == 0x06054b50,
+                  let commentSize = try? value(offset + 20, 2) else { return false }
+            return offset + 22 + commentSize == data.count
+        }
+        guard let end else { throw AgentXError.corrupt }
         let count = try value(end + 10, 2), centralSize = try value(end + 12, 4), central = try value(end + 16, 4)
         guard try value(end + 4, 2) == 0, try value(end + 6, 2) == 0, try value(end + 8, 2) == count,
               count > 0, count <= AgentXPackageFiles.maximumEntries, central + centralSize == end else { throw AgentXError.invalid("不支持分卷、ZIP64 或超量条目的 ZIP。") }
@@ -116,7 +119,9 @@ enum AgentXLocalAppZIP {
             localRanges.append(range)
             total += size
             guard total <= AgentXPackageFiles.maximumBytes else { throw AgentXError.invalid("ZIP 解压总量超过 8 MiB。") }
-            entries.append(.init(name: path, directory: directory, method: method, compressedSize: compressed, size: size, crc: crc, payload: payloadStart..<payloadStart + compressed))
+            let payload: Range<Int> = payloadStart..<(payloadStart + compressed)
+            entries.append(Entry(name: path, directory: directory, method: method,
+                                 compressedSize: compressed, size: size, crc: crc, payload: payload))
             cursor = next
         }
         guard cursor == end else { throw AgentXError.corrupt }

@@ -50,6 +50,33 @@ class SwiftTestReportTests(unittest.TestCase):
             self.assertEqual(data['diagnostics'][0]['category'], 'typeMismatch')
             self.assertNotIn('canary', out.read_text())
 
+    def test_source_allowlist_excludes_untracked_and_symlinked_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'Sources').mkdir()
+            (root / 'Sources/Public.swift').write_text('public struct Public {}')
+            (root / 'Sources/Private.swift').write_text('private-canary')
+            (root / 'Sources/Linked.swift').symlink_to(root / 'Sources/Private.swift')
+            subprocess.run(['git', 'add', 'Sources/Public.swift', 'Sources/Linked.swift'], cwd=root, check=True)
+            paths = REPORT.public_source_paths(root)
+            self.assertEqual(set(paths.values()), {'Sources/Public.swift'})
+            self.assertNotIn('Private', json.dumps(paths))
+
+    def test_package_dispatch_uses_bounded_reporter_and_rejects_extra_arguments(self):
+        from unittest.mock import patch
+        with patch.object(sys, 'argv', ['report', '--package', '--output', '/tmp/report.json']), \
+             patch.object(REPORT, 'environment', return_value={}), \
+             patch.object(REPORT, 'public_test_names', return_value=set()), \
+             patch.object(REPORT, 'public_source_paths', return_value={}), \
+             patch.object(REPORT, 'run_tests', return_value=7) as run:
+            self.assertEqual(REPORT.main(), 7)
+            self.assertEqual(run.call_args.args[0], [str(ROOT / 'Scripts/package-app.sh')])
+        with patch.object(sys, 'argv', ['report', '--package', '--output', '/tmp/report.json', '--', '--filter', 'Private']), \
+             patch.object(REPORT, 'run_tests') as run:
+            with self.assertRaises(SystemExit): REPORT.main()
+            run.assert_not_called()
+
     def test_skips_ansi_and_swift_testing_aggregate(self):
         c = self.collector()
         c.consume("\x1b[32mTest Case '-[Fixture.FixtureTests testExample]' skipped (0.001 seconds).\x1b[0m")
