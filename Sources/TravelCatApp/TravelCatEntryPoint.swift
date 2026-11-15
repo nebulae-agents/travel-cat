@@ -63,6 +63,10 @@ enum AgentXAcceptanceLaunch {
 @MainActor
 enum TravelCatEntryPoint {
     static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.contains(where: { $0.hasPrefix("--agentx-audit") }) {
+            AgentXAuditHelper.dispatch(arguments: arguments)
+        }
         guard AgentXAcceptanceLaunch.permits(bundleID: Bundle.main.bundleIdentifier, environment: ProcessInfo.processInfo.environment) else {
             FileHandle.standardError.write(Data("AgentX Pi acceptance requires its isolated environment.\n".utf8))
             exit(78)

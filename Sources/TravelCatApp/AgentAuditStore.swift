@@ -2,6 +2,27 @@ import Foundation
 import CryptoKit
 import Darwin
 
+/// Advisory locks serialize cooperating host/helper processes. Lock contention fails closed.
+final class AgentAuditProcessLock {
+    private let descriptor: Int32
+    init(directory: URL) throws {
+        descriptor = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw WorkbenchFailure("审计锁不可用。") }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { Darwin.close(descriptor); throw WorkbenchFailure("审计存储正在使用，请重试。") }
+    }
+    init() throws {
+        let path = "/private/tmp/com.nebulae.agent-audit-key-\(getuid()).lock"
+        descriptor = Darwin.open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw WorkbenchFailure("审计密钥锁不可用。") }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_uid == getuid(), info.st_mode & S_IFMT == S_IFREG,
+              info.st_mode & 0o077 == 0, info.st_nlink == 1, flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            Darwin.close(descriptor); throw WorkbenchFailure("审计密钥正在使用或锁无效。")
+        }
+    }
+    deinit { flock(descriptor, LOCK_UN); Darwin.close(descriptor) }
+}
+
 struct AgentAuditInventory { let records: Int; let bytes: Int; let retiredRecords: Int }
 struct AgentAuditRetentionPreview { let removableCount: Int; let head: String }
 protocol AgentAuditStoring {
@@ -28,6 +49,7 @@ final class AgentAuditStore: AgentAuditStoring {
     private let readOnly: Bool
     private let maximumBytes: Int
     private let maximumRecords: Int
+    private let synchronizeDirectory: (URL) throws -> Void
     private struct Entry: Codable {
         let version: Int
         let sequence: Int
@@ -52,7 +74,8 @@ final class AgentAuditStore: AgentAuditStoring {
         var checkpoint: Checkpoint?
     }
 
-    init(root: URL, keyData: Data, recordLimit: Int = 4096, byteLimit: Int = 64 * 1024 * 1024, readOnly: Bool = false) throws {
+    init(root: URL, keyData: Data, recordLimit: Int = 4096, byteLimit: Int = 64 * 1024 * 1024, readOnly: Bool = false, synchronizeDirectory: ((URL) throws -> Void)? = nil) throws {
+        self.synchronizeDirectory = synchronizeDirectory ?? AgentAuditStore.syncDirectory
         guard recordLimit > 32, byteLimit > 512 * 1024 else { throw WorkbenchFailure("审计容量配置无效。") }
         maximumRecords = recordLimit; maximumBytes = byteLimit
         guard keyData.count == 32 else { throw WorkbenchFailure("审计密钥无效，已停止受控调用。") }
@@ -68,12 +91,16 @@ final class AgentAuditStore: AgentAuditStoring {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
         }
+        let processLock = try AgentAuditProcessLock(directory: root)
+        defer { withExtendedLifetime(processLock) {} }
         _ = try verify()
         if !readOnly { try cleanupRetired() }
     }
 
     @MainActor
     static func open(root: URL, credentials: any AsyncTravelServiceCredentialStoring, readOnly: Bool = false) async throws -> AgentAuditStore {
+        let keyLock = try AgentAuditProcessLock()
+        defer { withExtendedLifetime(keyLock) {} }
         let id = "audit-journal-v1"
         let encoded = try await credentials.read(id: id)
         try Task.checkCancellation()
@@ -100,6 +127,8 @@ final class AgentAuditStore: AgentAuditStoring {
 
     @MainActor
     static func open(root: URL, credentials: any TravelServiceCredentialStoring, readOnly: Bool = false) throws -> AgentAuditStore {
+        let keyLock = try AgentAuditProcessLock()
+        defer { withExtendedLifetime(keyLock) {} }
         let id = "audit-journal-v1"
         let data: Data
         if let encoded = try credentials.read(id: id) {
@@ -119,15 +148,29 @@ final class AgentAuditStore: AgentAuditStoring {
         return try AgentAuditStore(root: root, keyData: data, readOnly: readOnly)
     }
 
-    func append(record: [String: Any]) throws {
+    func append(record: [String: Any]) throws { try append(record: record, idempotent: false) }
+
+    func appendIdempotent(record: [String: Any]) throws { try append(record: record, idempotent: true) }
+
+    private func append(record: [String: Any], idempotent: Bool) throws {
         guard !readOnly else { throw WorkbenchFailure("历史审计为只读，禁止写入。") }
         lock.lock(); defer { lock.unlock() }
+        let processLock = try AgentAuditProcessLock(directory: root)
+        defer { withExtendedLifetime(processLock) {} }
         guard let eventID = record["eventId"] as? String, UUID(uuidString: eventID) != nil,
               let taskID = record["taskId"] as? String, UUID(uuidString: taskID) != nil,
               record["kind"] is String else { throw WorkbenchFailure("审计事件格式无效，调用已阻止。") }
         let payload = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes])
         guard payload.count <= 2 * 1024 * 1024 else { throw WorkbenchFailure("审计单条记录超过 2 MiB，调用已阻止。") }
         let journal = try verify()
+        if idempotent, let previous = journal.records.first(where: { ($0["eventId"] as? String) == eventID }) {
+            guard try JSONSerialization.data(withJSONObject: previous, options: [.sortedKeys, .withoutEscapingSlashes]) == payload else {
+                throw WorkbenchFailure("审计事件标识冲突。")
+            }
+            // A prior rename may have succeeded while its directory fsync failed.
+            try synchronizeDirectory(root)
+            return
+        }
         let management = ["audit.export", "policy.retention"].contains(record["kind"] as? String ?? "")
         guard journal.records.count < maximumRecords - (management ? 0 : 32),
               !journal.records.contains(where: { ($0["eventId"] as? String) == eventID }) else {
@@ -148,14 +191,13 @@ final class AgentAuditStore: AgentAuditStoring {
         catch { try? handle.close(); throw error }
         let destination = root.appendingPathComponent(String(format: "%020d.event", entry.sequence))
         try FileManager.default.moveItem(at: temporary, to: destination)
-        let directory = Darwin.open(root.path, O_RDONLY)
-        guard directory >= 0 else { throw WorkbenchFailure("无法确认审计持久化，调用已阻止。") }
-        defer { Darwin.close(directory) }
-        guard fsync(directory) == 0 else { throw WorkbenchFailure("无法确认审计持久化，调用已阻止。") }
+        try synchronizeDirectory(root)
     }
 
     func records(taskID: UUID) throws -> [[String: Any]] {
         lock.lock(); defer { lock.unlock() }
+        let processLock = try AgentAuditProcessLock(directory: root)
+        defer { withExtendedLifetime(processLock) {} }
         return try verify().records.filter { ($0["taskId"] as? String).flatMap(UUID.init(uuidString:)) == taskID }
     }
 
@@ -228,17 +270,23 @@ final class AgentAuditStore: AgentAuditStoring {
     }
     func inventory() throws -> AgentAuditInventory {
         lock.lock(); defer { lock.unlock() }
+        let processLock = try AgentAuditProcessLock(directory: root)
+        defer { withExtendedLifetime(processLock) {} }
         let journal = try verify()
         return .init(records: journal.records.count, bytes: journal.bytes, retiredRecords: journal.baseSequence)
     }
     func retentionPreview(before: Date) throws -> AgentAuditRetentionPreview {
         lock.lock(); defer { lock.unlock() }
+        let processLock = try AgentAuditProcessLock(directory: root)
+        defer { withExtendedLifetime(processLock) {} }
         let journal = try verify()
         return .init(removableCount: removable(journal, before: before), head: journal.lastHash)
     }
     func prune(before: Date, expectedHead: String) throws -> Int {
         guard !readOnly else { throw WorkbenchFailure("历史审计为只读，禁止清理。") }
         lock.lock(); defer { lock.unlock() }
+        let processLock = try AgentAuditProcessLock(directory: root)
+        defer { withExtendedLifetime(processLock) {} }
         let journal = try verify()
         guard journal.lastHash == expectedHead else { throw WorkbenchFailure("日志已变化，请重新预览清理范围。") }
         let count = removable(journal, before: before)
@@ -258,6 +306,8 @@ final class AgentAuditStore: AgentAuditStoring {
     }
     func exportData(taskID: UUID?, includeContents: Bool) throws -> Data {
         lock.lock(); defer { lock.unlock() }
+        let processLock = try AgentAuditProcessLock(directory: root)
+        defer { withExtendedLifetime(processLock) {} }
         let journal = try verify()
         let records = journal.records.filter { taskID == nil || ($0["taskId"] as? String).flatMap(UUID.init(uuidString:)) == taskID }
         let fields = Set(["eventId", "taskId", "callId", "kind", "timestamp", "destination", "model", "api", "requestHash", "bytes", "bodyRedacted", "status", "complete", "phase", "policy", "allow", "exportId", "includesContents", "scope", "sha256", "days"])

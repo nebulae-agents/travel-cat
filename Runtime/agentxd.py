@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import RLock
 
 from agentxd_runs import PilotRuns, CommandError
+from agentxd_audit import enqueue, SwiftAudit
 
 
 IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,100}")
@@ -38,12 +39,18 @@ def write_json(path, value):
             stream.flush()
             os.fsync(stream.fileno())
             os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
             temporary.unlink(missing_ok=True)
 
 
 class RunStore:
-    def __init__(self, root):
+    def __init__(self, root, audit=None):
+        self.audit = audit
         config = read_json(root / ".agentxd-pilot.json")
         self.config = config
         self.app = config["appID"]
@@ -90,25 +97,55 @@ class RunStore:
             return 409, {"error": "snapshot_required", "revision": revision}
         return 200, {"revision": revision, "events": [e for e in events if e["revision"] > cursor]}
 
+    def flush_audit(self, run):
+        if run.get("auditStatus") != "pending":
+            return run
+        if self.audit is None:
+            return run
+        try:
+            for record in run["auditOutbox"][run.get("auditDelivered", 0):]:
+                self.audit.append(record)
+            acknowledged = dict(run, auditStatus="confirmed", auditFailure=None, auditDelivered=len(run["auditOutbox"]), revision=run["revision"] + 1)
+            self.record_event(acknowledged, "auditConfirmed")
+            write_json(self.directory / (run["id"] + ".json"), acknowledged)
+            return acknowledged
+        except (OSError, ValueError):
+            return run  # Keep durable outbox and result; retry on recovery/new create.
+
+    def recover_audit(self):
+        with self.lock:
+            for run in self.list_runs():
+                self.flush_audit(run)
+
     def insert(self, run):
         with self.lock:
             target = self.directory / (run["id"] + ".json")
             if target.exists():
                 raise FileExistsError("run already exists")
+            enqueue(run, "started")
             self.record_event(run, "created")
             write_json(target, run)
+            run.update(self.flush_audit(run))
 
-    def update(self, run_id, expected, changes):
+    def update(self, run_id, expected, changes, *, flush_audit=True):
         with self.lock:
             run = self.get(run_id)
             if run["revision"] != expected:
                 return 409, run
             if any(run.get(key) != value for key, value in changes.items()):
+                previous = run.get("status")
                 run.update(changes)
+                if previous != run.get("status"):
+                    phase = {"cancelling": "cancel_requested", "completed": "completed",
+                             "failed": "failed", "cancelled": "cancelled"}.get(run.get("status"))
+                    if phase:
+                        enqueue(run, phase)
                 run["revision"] += 1
                 kind = "readFlagChanged" if set(changes) == {"isRead"} else "updated"
                 self.record_event(run, kind)
                 write_json(self.directory / (run_id + ".json"), run)
+                if flush_audit:
+                    run = self.flush_audit(run)
             return 200, run
 
 
@@ -184,6 +221,19 @@ class Handler(BaseHTTPRequestHandler):
         route = parts[5:]
         try:
             if self.command == "GET":
+                if len(route) == 2 and route[1] == "audit":
+                    with server.store.lock:
+                        run = server.store.get(route[0])
+                        if server.store.audit is None:
+                            raise CommandError(503, "audit_unavailable")
+                        try:
+                            count = server.store.audit.verify()
+                            records = server.store.audit.records(route[0])
+                        except (OSError, ValueError):
+                            raise CommandError(503, "audit_unavailable") from None
+                        return self.reply(200, {"runId": run["id"], "appID": server.store.app,
+                                                "auditStatus": run.get("auditStatus", "legacy"),
+                                                "verified": True, "chainRecords": count, "records": records})
                 if len(route) == 2 and route[1].partition("?")[0] == "events":
                     query = re.fullmatch(r"events\?after=([0-9]{1,19})", route[1])
                     if not query:
@@ -230,7 +280,7 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = do_PATCH = do_POST = handle_run
 
 
-def serve(root, on_ready=None, *, pi_bundle=None):
+def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
     root = root.resolve(strict=True)
     info = root.stat()
     if info.st_uid != os.getuid() or info.st_mode & 0o077:
@@ -244,6 +294,15 @@ def serve(root, on_ready=None, *, pi_bundle=None):
         if any((root / name).exists() for name in (".agentx-local-operation.json", ".agentx-transaction.json")):
             raise ValueError("finish the pending desktop transaction before starting the pilot")
         store = RunStore(root)
+        if audit_helper is None and pi_bundle is not None:
+            import plistlib
+            with regular(pi_bundle / "Contents/Info.plist").open("rb") as stream:
+                executable = plistlib.load(stream)["CFBundleExecutable"]
+            if not isinstance(executable, str) or not IDENTIFIER.fullmatch(executable):
+                raise ValueError("invalid bundle executable")
+            audit_helper = pi_bundle / "Contents/MacOS" / executable
+        if audit_helper is not None:
+            store.audit = SwiftAudit(root, store.app, audit_helper)
         endpoint = root / ".agentxd-endpoint.json"
         with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
             server.daemon_threads = False  # Drain handlers before giving up the root lock.
@@ -273,8 +332,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--pi-bundle", type=Path, help="Existing application bundle with the embedded Pi runtime")
+    parser.add_argument("--audit-helper", type=Path, help="Absolute Swift app executable with audit helper support (defaults to Pi bundle executable)")
     args = parser.parse_args()
     try:
-        serve(args.root, pi_bundle=args.pi_bundle)
+        serve(args.root, pi_bundle=args.pi_bundle, audit_helper=args.audit_helper)
     except (OSError, ValueError, KeyError, TypeError) as error:
         sys.exit("agentxd: " + str(error))

@@ -43,7 +43,7 @@ def endpoint(root):
 
 def run(args):
     port, token = endpoint(args.root)
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     path = "/v1/apps/" + args.app + "/runs"
     if args.operation != "list":
         path += "/" + args.run
@@ -51,6 +51,8 @@ def run(args):
         if args.after < 0:
             raise ValueError("expected a nonnegative event cursor")
         path += "/events?after=" + str(args.after)
+    if args.operation == "audit":
+        path += "/audit"
     headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
     try:
         if args.operation == "stop":
@@ -66,6 +68,11 @@ def run(args):
         data = json.load(response)
     finally:
         connection.close()
+    if args.operation == "audit":
+        if not isinstance(data, dict) or data.get("runId") != args.run or data.get("appID") != args.app:
+            raise ValueError("invalid audit response from service")
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return
     if args.operation == "events":
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return
@@ -82,7 +89,7 @@ def main():
     parser.add_argument("--root", type=Path, default=os.environ.get("AGENTX_ROOT"), help="pilot root (default: AGENTX_ROOT)")
     commands = parser.add_subparsers(dest="command", required=True)
     ops = commands.add_parser("run").add_subparsers(dest="operation", required=True)
-    for name in ("list", "show", "stop", "events"):
+    for name in ("list", "show", "stop", "events", "audit"):
         op = ops.add_parser(name)
         op.add_argument("--app", required=True, type=identifier)
         if name != "list":

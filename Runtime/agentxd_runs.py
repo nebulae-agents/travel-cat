@@ -41,16 +41,17 @@ class PilotRuns:
                     or not ID.fullmatch(self.config["providerID"])
                     or len(self.config["systemPrompt"].encode()) > 100_000):
                 raise ValueError("invalid Pi binding")
+        store.recover_audit()
         # The root lock excludes the previous service, but cannot attest to its child's exit.
         for run in store.list_runs():
             if run.get("pilotCreateKey") and run.get("status") in ACTIVE:
                 self._patch(run["id"], status="failed", stopEvidence="unverified", endedAt=now(),
                             requiresProcessReview=True, failure="服务已重启，旧 Pi 进程的退出尚未确认。")
 
-    def _patch(self, run_id, **changes):
+    def _patch(self, run_id, *, flush_audit=True, **changes):
         with self.store.lock:
             run = self.store.get(run_id)
-            return self.store.update(run_id, run["revision"], changes)[1]
+            return self.store.update(run_id, run["revision"], changes, flush_audit=flush_audit)[1]
 
     @staticmethod
     def key_digest(key):
@@ -78,6 +79,10 @@ class PilotRuns:
             config = self.config
             if self.closing or not config or not self.bundle:
                 raise CommandError(503, "pi_unavailable")
+            self.store.recover_audit()
+            if (self.factory is PiProcess and self.store.audit is None) or any(
+                    r.get("auditStatus") == "pending" for r in self.store.list_runs()):
+                raise CommandError(503, "audit_unavailable")
             instance = config["instanceID"]
             if body["instanceId"] != instance:
                 raise CommandError(422, "unbound_instance")
@@ -102,7 +107,15 @@ class PilotRuns:
                        status="running", response="", isRead=False, startedAt=now(), revision=1,
                        pilotCreateKey=digest, runtimeCore="pi-agent-core",
                        actualProviderID=config["providerID"], actualModel=config["model"])
+            if self.store.audit is not None:
+                run["auditContext"] = dict(providerId=config["providerID"], model=config["model"],
+                                           promptBytes=len(body["prompt"].encode()),
+                                           requestTextBytes=sum(len(m["content"].encode()) for m in messages))
             self.store.insert(run)
+            if run.get("auditStatus") == "pending":
+                self._patch(run_id, status="failed", endedAt=now(),
+                            failure="开始审计尚未确认，未启动 Pi。")
+                raise CommandError(503, "audit_unavailable")
             thread = threading.Thread(target=self._execute, args=(run_id, child), name="agentxd-pi")
             self.workers[run_id] = (child, thread)
             try:
@@ -151,10 +164,12 @@ class PilotRuns:
             owned = self.workers.get(run_id)
             if owned is None:
                 raise CommandError(409, "unverified_owner")
-            pending = self._patch(run_id, status="cancelling", stopEvidence="pending",
-                                  stopRequestedAt=now(), pilotStopKey=digest)
-            owned[0].request_stop()
-            return 202, pending
+            try:
+                pending = self._patch(run_id, flush_audit=False, status="cancelling", stopEvidence="pending",
+                                      stopRequestedAt=now(), pilotStopKey=digest)
+            finally:
+                owned[0].request_stop()
+            return 202, self.store.flush_audit(pending)
 
     def close(self):
         with self.store.lock:
