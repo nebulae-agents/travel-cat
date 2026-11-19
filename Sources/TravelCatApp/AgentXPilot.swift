@@ -43,13 +43,16 @@ struct AgentXPilot: Decodable {
             completionHandler(nil)
         }
     }
-    static let session: URLSession = {
+    static let session = makeSession(request: 3, resource: 5)
+    // A stop can queue behind one bounded audit call and then append its own event.
+    static let commandSession = makeSession(request: 30, resource: 30)
+    private static func makeSession(request: TimeInterval, resource: TimeInterval) -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.connectionProxyDictionary = [:]
-        config.timeoutIntervalForRequest = 3
-        config.timeoutIntervalForResource = 5
+        config.timeoutIntervalForRequest = request
+        config.timeoutIntervalForResource = resource
         return URLSession(configuration: config, delegate: LoopbackOnly(), delegateQueue: nil)
-    }()
+    }
 
     private func request(_ method: String = "GET", id: String? = nil, stop: Bool = false,
                          key: String? = nil, body: Data? = nil) async throws -> (Data, Int) {
@@ -71,7 +74,8 @@ struct AgentXPilot: Decodable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
         }
-        let (data, response) = try await Self.session.data(for: request)
+        let session = method == "POST" ? Self.commandSession : Self.session
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AgentXError.corrupt }
         switch http.statusCode {
         case 200...299: break

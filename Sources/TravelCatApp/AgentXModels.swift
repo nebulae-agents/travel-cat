@@ -233,6 +233,7 @@ struct AgentXRun: Codable, Identifiable, Equatable {
     var revision: Int? = nil
     var stopEvidence: String? = nil
     var requiresProcessReview: Bool? = nil
+    var pilotCreateKey: String? = nil
 
     var displayedStatus: String {
         switch stopEvidence {

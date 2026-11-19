@@ -6,7 +6,8 @@ final class AgentXAuditHelperTests: XCTestCase {
     @MainActor final class Credentials: TravelServiceCredentialStoring {
         var value: String?
         var saves = 0
-        func read(id: String) throws -> String? { value }
+        var reads = 0
+        func read(id: String) throws -> String? { reads += 1; return value }
         func save(_ secret: String?, id: String) throws { value = secret; saves += 1 }
     }
     @MainActor func testHelperEncryptedIdempotencyAndValidation() throws {
@@ -44,6 +45,44 @@ final class AgentXAuditHelperTests: XCTestCase {
         try Data("corrupt".utf8).write(to: file)
         XCTAssertThrowsError(try send(["op": "verify"]))
     }
+    @MainActor func testSessionReusesCredentialsAndRejectsChangedPilot() throws {
+        let root = URL(fileURLWithPath: "/private/tmp/agentx-audit-test-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let marker = root.appendingPathComponent(".agentxd-pilot.json")
+        try JSONSerialization.data(withJSONObject: ["appID": "pilot", "root": root.path]).write(to: marker)
+        let credentials = Credentials(); credentials.value = Data(repeating: 7, count: 32).base64EncodedString()
+        let helper = try AgentXAuditHelper(root: root.path, appID: "pilot", credentials: credentials)
+        for _ in 0..<5 { _ = try helper.execute(Data("{\"op\":\"verify\"}".utf8)) }
+        XCTAssertEqual(credentials.reads, 1)
+        try JSONSerialization.data(withJSONObject: ["appID": "other", "root": root.path]).write(to: marker)
+        XCTAssertThrowsError(try helper.execute(Data("{\"op\":\"verify\"}".utf8)))
+    }
+
+    @MainActor func testExistingKeyReadDoesNotNeedCreationLock() throws {
+        let root = URL(fileURLWithPath: "/private/tmp/agentx-audit-existing-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let credentials = Credentials(); credentials.value = Data(repeating: 6, count: 32).base64EncodedString()
+        let creationLock = try AgentAuditProcessLock()
+        defer { withExtendedLifetime(creationLock) {} }
+        _ = try AgentAuditStore.open(root: root, credentials: credentials)
+        XCTAssertEqual(credentials.reads, 1)
+        XCTAssertEqual(credentials.saves, 0)
+    }
+    private struct FixedAsyncCredentials: AsyncTravelServiceCredentialStoring {
+        func read(id: String) async throws -> String? { Data(repeating: 6, count: 32).base64EncodedString() }
+        func save(_ secret: String?, id: String) async throws { throw WorkbenchFailure("unexpected key replacement") }
+    }
+    @MainActor func testExistingAsyncKeyReadDoesNotNeedCreationLock() async throws {
+        let root = URL(fileURLWithPath: "/private/tmp/agentx-audit-existing-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let creationLock = try AgentAuditProcessLock()
+        defer { withExtendedLifetime(creationLock) {} }
+        _ = try await AgentAuditStore.open(root: root, credentials: FixedAsyncCredentials())
+    }
+
     func testIndependentStoresSerializeAndDeduplicate() throws {
         let root = URL(fileURLWithPath: "/private/tmp/agentx-audit-store-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

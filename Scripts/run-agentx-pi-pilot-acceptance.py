@@ -58,7 +58,7 @@ def cli(workspace, command, run_id=None):
     args = [str(REPO / "Scripts/agentx"), "--root", str(workspace / "root"), "run", command, "--app", "pilot"]
     if run_id is not None:
         args += ["--run", run_id]
-    return json.loads(subprocess.check_output(args, timeout=8))
+    return json.loads(subprocess.check_output(args, timeout=45))
 
 
 class StreamingModel(BaseHTTPRequestHandler):
@@ -234,7 +234,19 @@ def temporary_app(workspace):
     return exe
 
 
-def launch(workspace, bundle, *, daemon_args=None, inspect=None):
+def await_daemon_ready(endpoint, previous, daemon, *, timeout=75):
+    # The service publishes its endpoint only after its bounded 60s audit handshake.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if daemon.poll() is not None:
+            raise RuntimeError("daemon startup failed")
+        if endpoint.exists() and endpoint.read_bytes() != previous:
+            return
+        time.sleep(.05)
+    raise RuntimeError("daemon readiness timed out")
+
+
+def launch(workspace, bundle, *, daemon_args=None, inspect=None, audit_helper=None):
     exe = temporary_app(workspace)
     root = workspace / "root"
     node = bundle / "Contents/Helpers/PiAgent/node"
@@ -243,17 +255,11 @@ def launch(workspace, bundle, *, daemon_args=None, inspect=None):
     put(workspace / "runtime.json", {"node": str(node.resolve())})
     endpoint = root / ".agentxd-endpoint.json"
     old = endpoint.read_bytes() if endpoint.exists() else None
-    args = [sys.executable, "-B", str(REPO / "Runtime/agentxd.py"), "--root", str(root), "--pi-bundle", str(bundle)]
+    args = [sys.executable, "-B", str(REPO / "Runtime/agentxd.py"), "--root", str(root), "--pi-bundle", str(bundle),
+            "--audit-helper", str((audit_helper or exe).resolve(strict=True))]
     daemon = subprocess.Popen(daemon_args if daemon_args is not None else args)
     try:
-        for _ in range(160):
-            if daemon.poll() is not None:
-                raise RuntimeError("daemon startup failed")
-            if endpoint.exists() and endpoint.read_bytes() != old:
-                break
-            time.sleep(.05)
-        else:
-            raise RuntimeError("daemon readiness timed out")
+        await_daemon_ready(endpoint, old, daemon)
         with (workspace / "gui.log").open("a") as log:
             env = dict(os.environ, AGENTX_ROOT=str(root), AGENTX_HOST_DIRECTORY=str(workspace / "host"))
             app = subprocess.Popen([str(exe)], env=env, stdout=log, stderr=log)
@@ -330,6 +336,7 @@ if __name__ == "__main__":
     client = subs.add_parser("launch")
     client.add_argument("workspace", type=Path)
     client.add_argument("--pi-bundle", type=Path, required=True)
+    client.add_argument("--audit-helper", type=Path, help="optional matching Swift helper (default: staged debug client)")
     subs.add_parser("verify").add_argument("workspace", type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
@@ -339,6 +346,7 @@ if __name__ == "__main__":
         if workspace.parent != Path("/private/tmp") or not workspace.name.startswith("agentxd-pi-e2e-"):
             parser.error("expected the workspace printed by prepare")
         if args.action == "launch":
-            launch(workspace, args.pi_bundle.resolve(strict=True))
+            launch(workspace, args.pi_bundle.resolve(strict=True),
+                   audit_helper=args.audit_helper.resolve(strict=True) if args.audit_helper else None)
         else:
             verify(workspace)
