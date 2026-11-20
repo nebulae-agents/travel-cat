@@ -17,7 +17,8 @@ final class AgentXController: ObservableObject {
     private var appInstanceSelections: [String: String] = [:]
     @Published var selectedAppID = "blackcat"
     @Published var selectedInstanceID = ""
-    @Published var errorMessage: String?
+    private var errorGeneration: UInt64 = 0
+    @Published var errorMessage: String? { didSet { errorGeneration &+= 1 } }
     @Published private(set) var isLoaded = false
     @Published var drafts: [String: String] = [:]
     @Published var configurationInstructions: [String: String] = [:]
@@ -27,7 +28,7 @@ final class AgentXController: ObservableObject {
     let repository: AgentXRepository
     private(set) var pilot: AgentXPilot?
     @Published private var submittingPilotInstances: Set<String> = []
-    private var pilotRequests: [String: (prompt: String, key: String)] = [:]
+    private var pilotRequests: [String: (prompt: String, key: String, failureGeneration: UInt64?)] = [:]
     @Published private(set) var pilotConnectionIssue: String?
     private let credentials: any TravelServiceCredentialStoring
     private let catalog: AgentXProviderCatalog
@@ -624,6 +625,16 @@ final class AgentXController: ObservableObject {
             next.runs.sort { $0.startedAt < $1.startedAt }
             try repository.validate(next)
             state = next
+            for run in accepted where run.appID == pilot?.appID {
+                guard let request = pilotRequests[run.instanceID],
+                      run.pilotCreateKey == SHA256.hash(data: Data(request.key.utf8)).map({ String(format: "%02x", $0) }).joined() else { continue }
+                // Only the authenticated receipt for this exact request can reconcile its error/draft.
+                if let generation = request.failureGeneration, generation == errorGeneration { errorMessage = run.auditFailure }
+                if drafts[run.instanceID]?.trimmingCharacters(in: .whitespacesAndNewlines) == request.prompt {
+                    drafts[run.instanceID] = ""
+                }
+                pilotRequests[run.instanceID] = nil
+            }
             didChange?()
         }
         return accepted
@@ -897,18 +908,25 @@ final class AgentXController: ObservableObject {
         // A failed HTTP response may follow a committed run. Reuse the key on an explicit retry.
         let previous = pilotRequests[instanceID]
         let key = previous.flatMap { $0.prompt == prompt ? $0.key : nil } ?? UUID().uuidString.lowercased()
-        pilotRequests[instanceID] = (prompt, key)
+        pilotRequests[instanceID] = (prompt, key, previous?.prompt == prompt ? previous?.failureGeneration : nil)
         submittingPilotInstances.insert(instanceID)
         Task {
             defer { submittingPilotInstances.remove(instanceID) }
             do {
                 let run = try await pilot.create(prompt: prompt, instanceID: instanceID, key: key)
                 try mergePilotRuns([run])
+                if let generation = pilotRequests[instanceID]?.failureGeneration, generation == errorGeneration {
+                    errorMessage = run.auditFailure
+                }
                 pilotRequests[instanceID] = nil
                 if drafts[instanceID]?.trimmingCharacters(in: .whitespacesAndNewlines) == prompt {
                     drafts[instanceID] = ""
                 }
-            } catch { errorMessage = error.localizedDescription }
+            } catch {
+                guard pilotRequests[instanceID]?.key == key else { return }
+                errorMessage = error.localizedDescription
+                pilotRequests[instanceID]?.failureGeneration = errorGeneration
+            }
         }
     }
 

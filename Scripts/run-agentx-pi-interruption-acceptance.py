@@ -101,7 +101,7 @@ def fault_service(workspace, bundle):
 
     signal.signal(signal.SIGTERM, graceful_shutdown)
     agentxd.PilotRuns = ReceiptBarrier
-    agentxd.serve(root, pi_bundle=bundle)
+    agentxd.serve(root, pi_bundle=bundle, audit_helper=fixture.temporary_app(workspace).resolve())
 
 
 def interrupted_turn(workspace, bundle, model, app, daemon):

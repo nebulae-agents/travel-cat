@@ -286,6 +286,7 @@ def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
     if info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError("pilot root must be private (0700)")
     descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    audit = None
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -302,7 +303,8 @@ def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
                 raise ValueError("invalid bundle executable")
             audit_helper = pi_bundle / "Contents/MacOS" / executable
         if audit_helper is not None:
-            store.audit = SwiftAudit(root, store.app, audit_helper)
+            audit = SwiftAudit(root, store.app, audit_helper, persistent=True)
+            store.audit = audit
         endpoint = root / ".agentxd-endpoint.json"
         with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
             server.daemon_threads = False  # Drain handlers before giving up the root lock.
@@ -321,7 +323,11 @@ def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
                 finally:
                     endpoint.unlink(missing_ok=True)
     finally:
-        os.close(descriptor)
+        try:
+            if audit is not None:
+                audit.close()
+        finally:
+            os.close(descriptor)
 
 
 if __name__ == "__main__":

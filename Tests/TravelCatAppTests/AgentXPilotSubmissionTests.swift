@@ -4,6 +4,20 @@ import XCTest
 @MainActor
 final class AgentXPilotSubmissionTests: XCTestCase {
     func testExplicitRetryReusesKeyAndOnlySendsPromptAndInstance() async throws {
+        try await exerciseSubmission(recoverBySnapshot: false)
+    }
+    func testCommittedSnapshotClearsOnlyItsOwnSubmissionError() async throws {
+        try await exerciseSubmission(recoverBySnapshot: true)
+    }
+    func testCommittedSnapshotPreservesNewDraftAndUnrelatedError() async throws {
+        try await exerciseSubmission(recoverBySnapshot: true, preserveNewInput: true)
+    }
+    func testCommandBudgetCoversTwoBoundedAuditCallsAndReadsStayShort() {
+        XCTAssertGreaterThanOrEqual(AgentXPilot.commandSession.configuration.timeoutIntervalForResource, 24)
+        XCTAssertLessThanOrEqual(AgentXPilot.commandSession.configuration.timeoutIntervalForResource, 30)
+        XCTAssertLessThanOrEqual(AgentXPilot.session.configuration.timeoutIntervalForResource, 5)
+    }
+    private func exerciseSubmission(recoverBySnapshot: Bool, preserveNewInput: Bool = false) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("AgentXPilotSend-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: root) }
@@ -22,6 +36,7 @@ final class AgentXPilotSubmissionTests: XCTestCase {
         server.arguments = ["-B", "-c", #"""
         import http.server, json, pathlib, sys
         root = pathlib.Path(sys.argv[1])
+        import hashlib
         class Handler(http.server.BaseHTTPRequestHandler):
             saved_key = None
             def log_message(self, *args): pass
@@ -29,6 +44,9 @@ final class AgentXPilotSubmissionTests: XCTestCase {
                 recovered = dict(id="pilot-run", appID="pilot", instanceID="member", prompt="hello",
                                  status="failed", startedAt=0, isRead=False, response="", revision=4,
                                  stopEvidence="unverified", requiresProcessReview=True)
+                if (root/"committed").exists() and Handler.saved_key:
+                    recovered.update(status="running", revision=1, stopEvidence=None, requiresProcessReview=False,
+                                     pilotCreateKey=hashlib.sha256(Handler.saved_key.encode()).hexdigest())
                 body = json.dumps([recovered]).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
@@ -75,12 +93,30 @@ final class AgentXPilotSubmissionTests: XCTestCase {
         for _ in 0..<100 where controller.errorMessage == nil { try await Task.sleep(for: .milliseconds(25)) }
         XCTAssertNotNil(controller.errorMessage)
         XCTAssertEqual(controller.drafts["member"], "hello")
-        controller.errorMessage = nil
-        controller.send("hello", instanceID: "member")
-        for _ in 0..<100 where controller.state.runs.isEmpty && controller.errorMessage == nil { try await Task.sleep(for: .milliseconds(25)) }
+        let submissionError = controller.errorMessage
+        if recoverBySnapshot {
+            if preserveNewInput {
+                controller.drafts["member"] = "new draft"
+                controller.errorMessage = submissionError
+            }
+            try Data().write(to: root.appendingPathComponent("committed"))
+            await controller.refreshPilotRuns()
+            if preserveNewInput {
+                XCTAssertEqual(controller.errorMessage, submissionError)
+                XCTAssertEqual(controller.drafts["member"], "new draft")
+            } else {
+                XCTAssertNil(controller.errorMessage)
+                XCTAssertEqual(controller.drafts["member"], "")
+            }
+            try FileManager.default.removeItem(at: root.appendingPathComponent("committed"))
+        } else {
+            controller.send("hello", instanceID: "member")
+            for _ in 0..<100 where controller.state.runs.isEmpty { try await Task.sleep(for: .milliseconds(25)) }
+        }
+        if !preserveNewInput { XCTAssertNil(controller.errorMessage) }
         let first = try XCTUnwrap(controller.state.runs.first)
         XCTAssertEqual(first.id, "pilot-run")
-        XCTAssertEqual(controller.drafts["member"], "")
+        XCTAssertEqual(controller.drafts["member"], preserveNewInput ? "new draft" : "")
         controller.cancel(first.id)
         for _ in 0..<100 where controller.state.runs.first?.status == .running { try await Task.sleep(for: .milliseconds(25)) }
         XCTAssertEqual(controller.state.runs.first?.status, .cancelling)
