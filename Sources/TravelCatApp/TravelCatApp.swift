@@ -1175,7 +1175,7 @@ struct MenuServiceRootView: View {
                 PostcardView(event: event, rootURL: model.dataRoot, presentationReference: model.presentationReferences[event.id],
                     workItem: model.postcardWorkItems.first { $0.eventID == event.id },
                     travelDate: TripAlbumChronology.dates(events: model.events, workItems: model.postcardWorkItems)[event.id],
-                    retry: model.retryPostcard, error: model.postcardWorkError, notice: model.manualRetryMessage,
+                    retry: model.retryPostcard, error: model.postcardWorkError, notice: model.postcardRetryMessage(for: event.id),
                     isFavourite: model.favouritePostcardIDs.contains(event.id), toggleFavourite: { model.toggleFavourite(event.id) },
                     isUnread: model.unreadPostcardIDs.contains(event.id), recipient: model.postcardRecipient,
                     onSceneryDisplayed: { model.postcardFrontDidDisplay(event.id, relativePath: $0) }, recipientModel: model) { destination in

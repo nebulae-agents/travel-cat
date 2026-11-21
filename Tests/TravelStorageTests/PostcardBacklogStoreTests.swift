@@ -174,6 +174,7 @@ final class PostcardBacklogStoreTests: XCTestCase {
         XCTAssertEqual(try store.supplementalEvents().count, 2)
         XCTAssertEqual(try store.pendingImages(mode: .fast).first?.event.id, slots[1].id)
         XCTAssertEqual(try store.damagedReadyImageIDs(), [slots[0].id])
+        XCTAssertFalse(try store.requestManualImageRetry(eventID: slots[0].id, mode: .fast, whenOpened: true))
         XCTAssertTrue(try store.requestManualImageRetry(eventID: slots[0].id, mode: .fast))
         XCTAssertEqual(try Data(contentsOf: imageURL), Data("damaged bytes".utf8))
         XCTAssertEqual(try store.imageRetry(for: slots[0].id)?.manualPriorResultHashes.count, 1)
@@ -200,6 +201,7 @@ final class PostcardBacklogStoreTests: XCTestCase {
         XCTAssertEqual(try store.supplementalEvents().first?.postcardStatus, .imageUnavailable)
         XCTAssertTrue(try store.pendingImages(mode: .fast).isEmpty)
         XCTAssertThrowsError(try store.markImage(ImageResultEnvelope(eventId: slot.id, status: .failed, attemptedAt: Date(), relativePath: nil, reason: "stale", attemptToken: stale.attemptToken, attemptCount: stale.imageAttemptCount, publishedNarrativeHash: stale.publishedNarrativeHash), mode: .fast))
+        XCTAssertFalse(try store.requestManualImageRetry(eventID: slot.id, mode: .fast, whenOpened: true))
         XCTAssertTrue(try store.requestManualImageRetry(eventID: slot.id, mode: .fast))
         XCTAssertEqual(try store.pendingManualImage(eventID: slot.id, mode: .fast)?.imageAttemptCount, 2)
     }
@@ -292,7 +294,7 @@ final class PostcardBacklogStoreTests: XCTestCase {
         XCTAssertEqual(try PostcardBacklogStore(root: backup).supplementalEvents().count, 1)
     }
 
-    func testThreeFailuresThenExactlyOneManualAttemptSurvivesRestart() throws {
+    func testFirstOpenRetrySurvivesRestartWithoutQueueingAgainAfterFailure() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let clock = BacklogTestClock()
@@ -313,8 +315,8 @@ final class PostcardBacklogStoreTests: XCTestCase {
             clock.now = clock.now.addingTimeInterval(300)
         }
         XCTAssertTrue(try store.pendingImages(mode: .fast).isEmpty)
-        XCTAssertTrue(try store.requestManualImageRetry(eventID: slot.id, mode: .fast))
-        XCTAssertFalse(try store.requestManualImageRetry(eventID: slot.id, mode: .fast))
+        XCTAssertTrue(try store.requestManualImageRetry(eventID: slot.id, mode: .fast, whenOpened: true))
+        XCTAssertFalse(try store.requestManualImageRetry(eventID: slot.id, mode: .fast, whenOpened: true))
         store = try PostcardBacklogStore(root: root, clock: clock)
         let work = try XCTUnwrap(store.pendingManualImage(eventID: slot.id, mode: .fast))
         XCTAssertEqual(work.imageAttemptCount, 2)
@@ -324,6 +326,7 @@ final class PostcardBacklogStoreTests: XCTestCase {
             attemptCount: work.imageAttemptCount, publishedNarrativeHash: work.publishedNarrativeHash)
         XCTAssertEqual(try store.markImage(result, mode: .fast).status, .imageUnavailable)
         XCTAssertTrue(try store.pendingImages(mode: .fast).isEmpty)
+        XCTAssertFalse(try store.requestManualImageRetry(eventID: slot.id, mode: .fast, whenOpened: true))
         XCTAssertEqual(try store.imageRetry(for: slot.id)?.manualRequests.count, 1)
     }
 

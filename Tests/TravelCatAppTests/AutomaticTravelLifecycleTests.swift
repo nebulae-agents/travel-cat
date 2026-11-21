@@ -99,6 +99,34 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         await controller.suspendAndWait()
     }
 
+    func testOpeningAfterEnableReconcilesAnInterruptedRetryWithoutStartingAnotherImage() async throws {
+        let f = try LifecycleFixture()
+        defer { f.clean() }
+        let event = try await f.exhaustImageRetries()
+        try f.repository.requestManualImageRetry(eventID: event.id, mode: .fast)
+        let oldWork = try XCTUnwrap(f.repository.pendingManualImage(eventID: event.id, mode: .fast))
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(),
+            dataRoot: f.root, clock: { f.clock.now })
+        var enabled = false
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { .init(mode: .fast, automaticTravelEnabled: false) }, isReady: { true },
+            isApplicationEnabled: { enabled }, now: { f.clock.now },
+            sleep: { _ in f.clock.set(oldWork.leaseExpiresAt.addingTimeInterval(1)); await Task.yield() })
+        defer { controller.stop() }
+        controller.start()
+        enabled = true
+        XCTAssertTrue(controller.resumeWithoutRunning())
+        XCTAssertFalse(controller.hasOwnedOperations, "Enabling alone must not replay any queued work")
+
+        XCTAssertTrue(model.openPostcardFromMailbox(eventID: event.id))
+        XCTAssertTrue(controller.hasOwnedOperations, "Opening must track the existing request until its old lease is reconciled")
+        await waitUntil { !controller.hasOwnedOperations }
+        XCTAssertTrue(f.generator.imageEventIDs.isEmpty)
+        XCTAssertEqual(model.postcardWorkItems.first { $0.eventID == event.id }?.status, .manualRequired)
+        XCTAssertEqual(try f.repository.imageRetry(for: event.id)?.manualRequests.count, 1)
+        XCTAssertNil(try f.repository.imageRetry(for: event.id)?.activeAttemptToken)
+    }
+
     func testRecoveryResumePreservesPendingQueueUntilExplicitManualRequest() async throws {
         let f = try LifecycleFixture(); defer { f.clean() }
         let event = try await f.exhaustImageRetries()
@@ -798,6 +826,106 @@ final class AutomaticTravelLifecycleTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: journalURL), journal)
         XCTAssertEqual(try f.repository.loadSnapshot(), snapshot)
         XCTAssertEqual(f.generator.narrativeCalls + f.generator.imageCalls, calls)
+    }
+
+    func testOpeningFailedPostcardRetriesOnceAndStillAllowsManualRetry() async throws {
+        let f = try LifecycleFixture()
+        defer { f.clean() }
+        let event = try await f.exhaustImageRetries()
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(),
+            dataRoot: f.root, clock: { f.clock.now })
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { .init(mode: .fast, automaticTravelEnabled: false) },
+            isReady: { true }, now: { f.clock.now },
+            sleep: { seconds in f.clock.advance(seconds); await Task.yield() })
+        defer { controller.stop() }
+        controller.start()
+        XCTAssertEqual(f.generator.imageCalls, 0, "Startup alone must not retry a failed postcard")
+        f.generator.imageWidth = nil
+
+        XCTAssertTrue(model.openPostcardFromMailbox(eventID: event.id))
+        XCTAssertTrue(model.openPostcardFromMailbox(eventID: event.id))
+        let queued = try XCTUnwrap(model.postcardWorkItems.first { $0.eventID == event.id })
+        XCTAssertTrue(queued.isManualQueued, "Opening the failed postcard should queue one retry")
+        XCTAssertEqual(queued.statusLabel, "重新生成已排队")
+        guard queued.isManualQueued else { return }
+        await waitUntil { !controller.hasOwnedOperations }
+        XCTAssertEqual(f.generator.imageEventIDs, [event.id])
+        XCTAssertEqual(try f.repository.imageRetry(for: event.id)?.manualAttemptResults.count, 1)
+        let failed = try XCTUnwrap(model.postcardWorkItems.first { $0.eventID == event.id })
+        XCTAssertEqual(failed.status, .manualRequired)
+        XCTAssertEqual(failed.failureReason, "未能获取可用的图片。")
+
+        controller.stop()
+        controller.start()
+        model.openLatestPostcardFromMenu()
+        XCTAssertFalse(controller.hasOwnedOperations)
+        XCTAssertEqual(try f.repository.imageRetry(for: event.id)?.manualRequests.count, 1)
+
+        f.generator.imageWidth = 1152
+        model.retryPostcard(queued.id)
+        await waitUntil { !controller.hasOwnedOperations }
+        XCTAssertEqual(f.generator.imageEventIDs, [event.id, event.id])
+        XCTAssertEqual(model.postcardWorkItems.first { $0.eventID == event.id }?.status, .ready)
+    }
+
+    func testOpeningFailedPostcardExplainsMissingConfigurationWithoutConsumingRetry() async throws {
+        let f = try LifecycleFixture()
+        defer { f.clean() }
+        let event = try await f.exhaustImageRetries()
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(),
+            dataRoot: f.root, clock: { f.clock.now })
+        var ready = false
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { .init(mode: .fast, automaticTravelEnabled: false) },
+            isReady: { ready }, now: { f.clock.now },
+            sleep: { seconds in f.clock.advance(seconds); await Task.yield() })
+        defer { controller.stop() }
+        controller.start()
+
+        model.openLatestPostcardFromMenu()
+        XCTAssertEqual(model.presentation, .postcard(event.id))
+        XCTAssertEqual(model.postcardRetryMessage(for: event.id), "请先完成生成服务配置，再重试图片。")
+        XCTAssertNil(model.postcardRetryMessage(for: UUID()))
+        XCTAssertTrue(try XCTUnwrap(f.repository.imageRetry(for: event.id)).manualRequests.isEmpty)
+        XCTAssertFalse(controller.hasOwnedOperations)
+
+        ready = true
+        model.openLatestPostcardFromMenu()
+        await waitUntil { !controller.hasOwnedOperations }
+        XCTAssertEqual(f.generator.imageEventIDs, [event.id])
+        XCTAssertEqual(model.postcardWorkItems.first { $0.eventID == event.id }?.status, .ready)
+    }
+
+    func testPostcardShowsRetryInProgressBeforeImageProviderReturns() async throws {
+        let f = try LifecycleFixture()
+        defer { f.clean() }
+        let event = try await f.exhaustImageRetries()
+        let model = AppModel(snapshot: try f.repository.loadSnapshot(), events: try f.repository.events(),
+            dataRoot: f.root, clock: { f.clock.now })
+        let controller = PostcardRecoveryController(repository: f.repository, model: model, worker: f.makeWorker(),
+            settings: { .init(mode: .fast, automaticTravelEnabled: false) },
+            isReady: { true }, now: { f.clock.now },
+            sleep: { seconds in f.clock.advance(seconds); await Task.yield() })
+        defer { controller.stop() }
+        controller.start()
+        f.generator.holdImage = true
+        let item = try XCTUnwrap(model.postcardWorkItems.first { $0.eventID == event.id })
+        model.retryPostcard(item.id)
+        await waitUntil { f.generator.pendingImage != nil }
+
+        let inFlight = model.postcardWorkItems.first { $0.eventID == event.id }
+        XCTAssertEqual(inFlight?.status, .generating)
+        XCTAssertEqual(inFlight?.statusLabel, "正在重新生成图片")
+        XCTAssertTrue(model.openPostcardFromMailbox(eventID: event.id))
+        XCTAssertEqual(f.generator.imageEventIDs, [event.id])
+
+        f.generator.holdImage = false
+        f.generator.pendingImage?.resume()
+        f.generator.pendingImage = nil
+        await waitUntil { !controller.hasOwnedOperations }
+        XCTAssertEqual(f.generator.imageEventIDs, [event.id])
+        XCTAssertEqual(model.postcardWorkItems.first { $0.eventID == event.id }?.status, .ready)
     }
 
     func testQueuedManualRetryResumesOnStartupWhileAutomaticTravelIsPaused() async throws {

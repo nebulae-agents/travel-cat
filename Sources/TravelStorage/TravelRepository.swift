@@ -735,9 +735,9 @@ public final class TravelRepository: @unchecked Sendable {
         }
     }
 
-    /// Queue exactly one additional attempt; repeated clicks while queued or leased are idempotent.
+    /// Queue one additional attempt. Opening a failed card can queue it only before any prior user retry.
     @discardableResult
-    public func requestManualImageRetry(eventID: UUID, mode: TravelMode) throws -> Bool {
+    public func requestManualImageRetry(eventID: UUID, mode: TravelMode, whenOpened: Bool = false) throws -> Bool {
         try withExclusiveLock {
             var events = try readEventsUnlocked()
             var store = try loadRetryStoreUnlocked()
@@ -745,11 +745,12 @@ public final class TravelRepository: @unchecked Sendable {
             guard let index = events.firstIndex(where: { $0.id == eventID }) else {
                 throw RepositoryError.eventNotFound(eventID)
             }
-            if events[index].postcardStatus == .pendingImage { return false }
-            guard events[index].postcardStatus == .imageUnavailable,
-                  var retry = store.entries[retryKey(eventID)] else {
+            let status = events[index].postcardStatus
+            if status == .pendingImage || (whenOpened && status != .imageUnavailable) { return false }
+            guard status == .imageUnavailable, var retry = store.entries[retryKey(eventID)] else {
                 throw RepositoryError.invalidImageTransition
             }
+            guard !whenOpened || retry.canRetryWhenOpened else { return false }
             retry.queueManual(now: clock.now)
             store.entries[retryKey(eventID)] = retry
             try writeRetryStoreUnlocked(store)

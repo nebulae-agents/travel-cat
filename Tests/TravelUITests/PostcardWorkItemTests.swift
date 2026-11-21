@@ -30,10 +30,14 @@ final class PostcardWorkItemTests: XCTestCase {
             postcardStatus: .imageUnavailable, postcardRelativePath: nil)
         var plan = PostcardBacklogPlan(tripID: trip, slots: [.init(id: slot, event: event, isSupplement: true)])
         let now = Date(timeIntervalSince1970: 100)
-        let terminal = PostcardWorkProjection.items(plans: [plan], retries: [:], now: now)[0]
+        var oldRetry = ImageRetry(attemptCount: 3, retryAt: nil, publishedNarrativeHash: "hash",
+                                  terminalStatus: .imageUnavailable)
+        oldRetry.lastFailureReason = "照片尚未完成，已安排重试"
+        let terminal = PostcardWorkProjection.items(plans: [plan], retries: [eventID: oldRetry], now: now)[0]
         XCTAssertEqual(terminal.status, .manualRequired)
         XCTAssertEqual(terminal.eventID, eventID)
-        XCTAssertTrue(terminal.status.label.contains("3 次"))
+        XCTAssertEqual(terminal.statusLabel, "图片生成失败，可以手动重试。")
+        XCTAssertNil(terminal.failureReason, "An older terminal failure must not imply that another retry is scheduled")
         event.postcardStatus = .ready
         plan.slots[0].event = event
         let ready = PostcardWorkProjection.items(plans: [plan], retries: [:], now: now)[0]

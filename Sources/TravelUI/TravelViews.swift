@@ -482,6 +482,9 @@ public struct PostcardView: View {
                 }
                 Text("POSTCARD").font(.caption.monospaced()).foregroundStyle(.secondary)
             }
+            if let workItem { PostcardWorkStatusView(item: workItem, retry: retry) }
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+            if let notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if let presentationReference {
@@ -498,9 +501,6 @@ public struct PostcardView: View {
                         .font(.title2.bold())
                         .accessibilityLabel(PostcardDisplayLocation().resolveSpoken(event.location))
                     Text(event.summary)
-                    if let workItem { PostcardWorkStatusView(item: workItem, retry: retry) }
-                    if let error { Text(error).font(.caption).foregroundStyle(.red) }
-                    if let notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
                     HStack {
                         Label(event.mood.label, systemImage: "sparkles")
                         Spacer()
@@ -1002,7 +1002,7 @@ public struct PetRootView: View {
                     workItem: model.postcardWorkItems.first(where: { $0.eventID == event.id }),
                     travelDate: TripAlbumChronology.dates(events: model.events, workItems: model.postcardWorkItems)[event.id],
                     retry: model.retryPostcard,
-                    error: model.postcardWorkError, notice: model.manualRetryMessage,
+                    error: model.postcardWorkError, notice: model.postcardRetryMessage(for: event.id),
                     isFavourite: model.favouritePostcardIDs.contains(event.id), toggleFavourite: { model.toggleFavourite(event.id) },
                     isUnread: model.unreadPostcardIDs.contains(event.id), recipient: model.postcardRecipient,
                     onSceneryDisplayed: { model.postcardFrontDidDisplay(event.id, relativePath: $0) }, recipientModel: model
@@ -1043,9 +1043,14 @@ private struct PostcardWorkStatusView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if item.status != .ready {
+            if item.status == .generating {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small).accessibilityHidden(true)
+                    Text(item.statusLabel)
+                }
+            } else if item.status != .ready {
                 Text(item.statusLabel)
-                if let reason = item.failureReason, !reason.isEmpty { Text(reason) }
+                if !item.isManualQueued, let reason = item.failureReason, !reason.isEmpty { Text(reason) }
             }
             if item.status == .manualRequired || item.status == .damaged, let retry {
                 Button("手动重试一次") { retry(item.id) }.buttonStyle(.bordered)

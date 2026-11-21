@@ -251,6 +251,11 @@ public struct ImageRetry: Codable, Equatable, Sendable {
         if !manualAttemptResults.isEmpty { try values.encode(manualAttemptResults, forKey: .manualAttemptResults) }
     }
 
+    var canRetryWhenOpened: Bool {
+        // Recovery can leave an unknown prior outcome that needs explicit user confirmation.
+        manualRequests.isEmpty && lastFailureReason?.hasPrefix("恢复安全副本") != true
+    }
+
     mutating func queueManual(now: Date) {
         if let previous = terminalResultHash ?? lastResultHash { manualPriorResultHashes.append(previous) }
         manualRequests.append(now)
