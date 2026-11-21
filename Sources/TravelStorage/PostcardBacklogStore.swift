@@ -136,13 +136,14 @@ public final class PostcardBacklogStore: @unchecked Sendable {
     }
 
     @discardableResult
-    public func requestManualImageRetry(eventID: UUID, mode: TravelMode) throws -> Bool {
+    public func requestManualImageRetry(eventID: UUID, mode: TravelMode, whenOpened: Bool = false) throws -> Bool {
         try repository.withExclusiveLock {
             var state = try load()
             guard let i = state.supplements.firstIndex(where: { $0.id == eventID }),
                   var retry = state.retries.entries[key(eventID)] else { throw RepositoryError.eventNotFound(eventID) }
             if state.supplements[i].postcardStatus == .pendingImage { return false }
             let event = state.supplements[i]
+            guard !whenOpened || (event.postcardStatus == .imageUnavailable && retry.canRetryWhenOpened) else { return false }
             let damagedReady = event.postcardStatus == .ready && !readyImageIsValid(event, retry: retry)
             guard event.postcardStatus == .imageUnavailable || damagedReady else { throw RepositoryError.invalidImageTransition }
             if damagedReady, let path = event.postcardRelativePath {

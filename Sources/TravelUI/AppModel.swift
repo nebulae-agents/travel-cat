@@ -22,12 +22,20 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var postcardWorkItems: [PostcardWorkItem] = []
     @Published public private(set) var postcardWorkError: String?
     @Published public private(set) var manualRetryMessage: String?
+    private var manualRetryEventID: UUID?
     public var retryPostcardAction: (@MainActor (UUID) -> Void)?
+    public var postcardOpenedAction: (@MainActor (UUID) -> Void)?
 
-    public func updatePostcardWork(_ items: [PostcardWorkItem], error: String? = nil, manualRetryMessage: String? = nil) {
+    public func updatePostcardWork(_ items: [PostcardWorkItem], error: String? = nil,
+                                   manualRetryMessage: String? = nil, manualRetryEventID: UUID? = nil) {
+        self.manualRetryEventID = manualRetryEventID
         postcardWorkItems = items
         postcardWorkError = error
         self.manualRetryMessage = manualRetryMessage
+    }
+
+    public func postcardRetryMessage(for eventID: UUID) -> String? {
+        manualRetryEventID == eventID ? manualRetryMessage : nil
     }
 
     public func retryPostcard(_ id: UUID) {
@@ -193,8 +201,7 @@ public final class AppModel: ObservableObject {
                 allowedFromAlbum = false
             }
             guard allowedFromStatus || allowedFromAlbum else { return }
-            postcardReturnPresentation = allowedFromAlbum ? presentation : .status
-            presentation = .postcard(id)
+            presentPostcard(id, returningTo: allowedFromAlbum ? presentation : .status)
         case let .album(tripID):
             guard case let .postcard(eventID) = presentation,
                   events.first(where: { $0.id == eventID })?.tripID == tripID else { return }
@@ -260,7 +267,7 @@ public final class AppModel: ObservableObject {
     public func openLatestPostcardFromMenu() {
         openStatusFromMenu()
         guard let id = latestAvailablePostcardID()?.id else { return }
-        presentation = .postcard(id)
+        presentPostcard(id, returningTo: .status)
     }
 
     /// Exact mailbox navigation never marks read; the visible postcard still acknowledges display.
@@ -268,8 +275,7 @@ public final class AppModel: ObservableObject {
     public func openPostcardFromMailbox(eventID: UUID) -> Bool {
         let matches = arrivedEvents().filter { $0.id == eventID && isPostcard($0) }
         guard matches.count == 1 else { return false }
-        postcardReturnPresentation = .status
-        presentation = .postcard(eventID)
+        presentPostcard(eventID, returningTo: .status)
         return true
     }
 
@@ -297,8 +303,14 @@ public final class AppModel: ObservableObject {
               let event = matchingEvents.first,
               event.tripID == tripID,
               event.postcardStatus == .ready else { return false }
-        presentation = .postcard(eventID)
+        presentPostcard(eventID, returningTo: .status)
         return true
+    }
+
+    private func presentPostcard(_ eventID: UUID, returningTo returnPresentation: PetPresentation) {
+        postcardReturnPresentation = returnPresentation
+        presentation = .postcard(eventID)
+        postcardOpenedAction?(eventID)
     }
 
     @discardableResult

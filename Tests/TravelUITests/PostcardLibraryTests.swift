@@ -23,6 +23,33 @@ final class PostcardLibraryTests: XCTestCase {
         XCTAssertFalse(PostcardExporter.isInsideDataRoot(outside, rootURL: root))
     }
 
+    func testPostcardDetailShowsActiveRetryAboveScrollableContent() throws {
+        var event = postcard()
+        event.postcardStatus = .pendingImage
+        event.postcardRelativePath = nil
+        let work = PostcardWorkItem(id: event.id, tripID: event.tripID, eventID: event.id,
+            isSupplement: false, generatedAt: event.occurredAt, status: .generating,
+            failureReason: "上次生成失败", isImageRetry: true)
+        let view = NSHostingView(rootView: PostcardView(event: event, workItem: work, open: { _ in }))
+        let frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+        let window = NSWindow(contentRect: frame, styleMask: [], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { withExtendedLifetime(window) {} }
+        view.frame = frame
+        view.layoutSubtreeIfNeeded()
+        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        request.regionOfInterest = CGRect(x: 0, y: 0.75, width: 1, height: 0.25)
+        try VNImageRequestHandler(cgImage: XCTUnwrap(bitmap.cgImage)).perform([request])
+        let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined()
+        XCTAssertTrue(text.filter { !$0.isWhitespace }.contains("正在重新生成图片"), text)
+        XCTAssertFalse(text.contains("上次生成失败"), text)
+    }
+
     func testAlbumMessageFaceKeepsPostalRolesVisibleInItsActualGridColumn() throws {
         var event = postcard(location: .init(country: "日本", city: "京都", place: "鸭川河畔"))
         event.postcardStatus = .pendingImage

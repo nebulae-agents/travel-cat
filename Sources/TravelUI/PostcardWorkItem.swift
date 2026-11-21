@@ -8,8 +8,8 @@ public enum PostcardWorkStatus: Equatable, Sendable {
     public var label: String {
         switch self {
         case .pending: "等待生成"
-        case .generating: "正在生成"
-        case .manualRequired: "自动尝试 3 次后已停止；点击重试仅手动尝试一次。"
+        case .generating: "正在生成图片"
+        case .manualRequired: "图片生成失败，可以手动重试。"
         case .damaged: "照片文件缺失或损坏；可手动重新生成一次。"
         case .ready: "已生成"
         }
@@ -24,7 +24,9 @@ public struct PostcardWorkItem: Identifiable, Equatable, Sendable {
     public let generatedAt: Date?
     public let status: PostcardWorkStatus
     public let failureReason: String?
-    public let isManualQueued: Bool
+    public let hasUserRetryRequest: Bool
+    public let isImageRetry: Bool
+    public var isManualQueued: Bool { status == .pending && hasUserRetryRequest }
 
     public var statusLabel: String {
         if status == .manualRequired, failureReason?.hasPrefix("恢复安全副本") == true {
@@ -32,13 +34,16 @@ public struct PostcardWorkItem: Identifiable, Equatable, Sendable {
         }
         if status == .pending {
             if eventID == nil { return "等待生成文字" }
-            if isManualQueued { return "手动重试已排队" }
+            if isManualQueued { return "重新生成已排队" }
+            if isImageRetry { return "等待重试图片" }
             return "等待生成图片"
         }
+        if status == .generating && isImageRetry { return "正在重新生成图片" }
         return status.label
     }
 
-    public init(id: UUID, tripID: UUID, eventID: UUID?, isSupplement: Bool, generatedAt: Date?, status: PostcardWorkStatus, failureReason: String? = nil, isManualQueued: Bool = false) {
+    public init(id: UUID, tripID: UUID, eventID: UUID?, isSupplement: Bool, generatedAt: Date?, status: PostcardWorkStatus, failureReason: String? = nil, isManualQueued: Bool = false, isImageRetry: Bool = false,
+                hasUserRetryRequest: Bool = false) {
         self.id = id
         self.tripID = tripID
         self.eventID = eventID
@@ -46,7 +51,8 @@ public struct PostcardWorkItem: Identifiable, Equatable, Sendable {
         self.generatedAt = generatedAt
         self.status = status
         self.failureReason = failureReason
-        self.isManualQueued = isManualQueued
+        self.hasUserRetryRequest = hasUserRetryRequest || isManualQueued
+        self.isImageRetry = isImageRetry
     }
 }
 
@@ -67,10 +73,14 @@ public enum PostcardWorkProjection {
                 } else {
                     status = .pending
                 }
+                let failureReason = retry?.lastFailureReason
+                let hasUserRetryRequest = retry?.manualRequests.isEmpty == false
+                // Older failures stored a scheduling message even when the attempt was terminal.
                 return PostcardWorkItem(id: slot.id, tripID: plan.tripID, eventID: slot.eventID,
                     isSupplement: slot.isSupplement, generatedAt: slot.event?.occurredAt,
-                    status: status, failureReason: retry?.lastFailureReason,
-                    isManualQueued: status == .pending && !(retry?.manualRequests.isEmpty ?? true))
+                    status: status, failureReason: failureReason == "照片尚未完成，已安排重试" ? nil : failureReason,
+                    isImageRetry: (retry?.attemptCount ?? 0) > 0 || hasUserRetryRequest,
+                    hasUserRetryRequest: hasUserRetryRequest)
             }
         }
     }

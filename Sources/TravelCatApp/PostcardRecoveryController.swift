@@ -3,7 +3,7 @@ import TravelCore
 import TravelStorage
 import TravelUI
 
-/// Manual image requests have their own lifecycle, including while automatic travel
+/// User-triggered image retries have their own lifecycle, including while automatic travel
 /// is paused. The worker remains the sole owner of model locking and pacing.
 @MainActor
 final class PostcardRecoveryController {
@@ -23,7 +23,7 @@ final class PostcardRecoveryController {
     private var isApplicationSuspended = false
     private var resumePendingAutomatically = true
     var hasOwnedOperations: Bool { !tasks.isEmpty }
-    private var manualMessage: String?
+    private var retryNotice: (eventID: UUID, message: String)?
 
     init(repository: TravelRepository, model: AppModel, worker: AutomaticTravelWorker,
          settings: @escaping () -> TravelSettings, isReady: @escaping () -> Bool,
@@ -48,7 +48,7 @@ final class PostcardRecoveryController {
         guard !isApplicationSuspended, isApplicationEnabled() else { return }
         stopped = false
         resumePendingAutomatically = true
-        model.retryPostcardAction = { [weak self] in self?.requestRetry($0) }
+        bindActions()
         refresh()
     }
 
@@ -74,8 +74,13 @@ final class PostcardRecoveryController {
         resumePendingAutomatically = false
         isApplicationSuspended = false
         stopped = false
-        model.retryPostcardAction = { [weak self] in self?.requestRetry($0) }
+        bindActions()
         return true
+    }
+
+    private func bindActions() {
+        model.retryPostcardAction = { [weak self] in self?.requestRetry($0) }
+        model.postcardOpenedAction = { [weak self] in self?.postcardOpened($0) }
     }
 
     func refresh() {
@@ -93,7 +98,7 @@ final class PostcardRecoveryController {
                     ? backlog.imageRetry(for: eventID) : repository.imageRetry(for: eventID)
             }
             model.updatePostcardWork(PostcardWorkProjection.items(plans: plans, retries: retries, now: now(), damagedImageIDs: try backlog.damagedReadyImageIDs()),
-                                     manualRetryMessage: manualMessage)
+                                     manualRetryMessage: retryNotice?.message, manualRetryEventID: retryNotice?.eventID)
             let references: [UUID: PostcardPresentationReference] = [:]
             if let applyContents { applyContents(contents, supplemental, references) }
             else {
@@ -111,36 +116,59 @@ final class PostcardRecoveryController {
         } catch {
             model.updatePostcardWork(model.postcardWorkItems,
                 error: "明信片记录暂时无法读取，原始文件已保留。可在设置中尝试从安全副本恢复；不会清空补发记录。",
-                manualRetryMessage: manualMessage)
+                manualRetryMessage: retryNotice?.message, manualRetryEventID: retryNotice?.eventID)
         }
     }
 
-    func requestRetry(_ eventID: UUID) {
+    private func postcardOpened(_ eventID: UUID) {
         guard !stopped, !isApplicationSuspended, isApplicationEnabled() else { return }
-        guard isReady() else {
-            manualMessage = "请先完成生成服务配置，再手动重试。"
+        if model.postcardWorkError != nil || !model.postcardWorkItems.contains(where: { $0.eventID == eventID }) {
             refresh()
-            return
         }
+        guard model.postcardWorkError == nil,
+              let item = model.postcardWorkItems.first(where: { $0.eventID == eventID }) else { return }
+        if item.status == .manualRequired {
+            requestRetry(eventID, whenOpened: true)
+        } else if item.hasUserRetryRequest, item.status == .pending || item.status == .generating, canRequestRetry(eventID) {
+            // Reconcile the existing lease if its prior owner stopped before publishing a result.
+            schedule(eventID)
+        }
+    }
+
+    private func canRequestRetry(_ eventID: UUID) -> Bool {
+        guard !stopped, !isApplicationSuspended, isApplicationEnabled() else { return false }
+        guard isReady() else {
+            retryNotice = (eventID, "请先完成生成服务配置，再重试图片。")
+            refresh()
+            return false
+        }
+        return true
+    }
+
+    func requestRetry(_ eventID: UUID, whenOpened: Bool = false) {
+        guard canRequestRetry(eventID) else { return }
         do {
             let backlog = try PostcardBacklogStore(root: repository.root)
-            let allEvents = try repository.events() + backlog.supplementalEvents()
+            let supplemental = try backlog.supplementalEvents()
+            let isSupplement = supplemental.contains { $0.id == eventID }
+            let allEvents = try repository.events() + supplemental
             guard let event = allEvents.first(where: { $0.id == eventID }),
                   try backlog.characterProfile(for: event.tripID) == .defaultBlackCat else {
-                manualMessage = "自定义角色暂不支持此生成服务，已保留原记录。"
+                retryNotice = (eventID, "自定义角色暂不支持此生成服务，已保留原记录。")
                 refresh()
                 return
             }
-            if try backlog.supplementalEvents().contains(where: { $0.id == eventID }) {
-                _ = try backlog.requestManualImageRetry(eventID: eventID, mode: settings().mode)
-            } else {
-                _ = try repository.requestManualImageRetry(eventID: eventID, mode: settings().mode)
-            }
-            manualMessage = "已安排一次手动重试；失败后仍会停止。"
+            let mode = settings().mode
+            let queued = try isSupplement
+                ? backlog.requestManualImageRetry(eventID: eventID, mode: mode, whenOpened: whenOpened)
+                : repository.requestManualImageRetry(eventID: eventID, mode: mode, whenOpened: whenOpened)
+            if queued, retryNotice?.eventID == eventID { retryNotice = nil }
             refresh()
-            schedule(eventID)
+            if queued || model.postcardWorkItems.contains(where: { $0.eventID == eventID && $0.isManualQueued }) {
+                schedule(eventID)
+            }
         } catch {
-            manualMessage = "无法安排这次重试，请稍后再试。"
+            retryNotice = (eventID, "无法安排这次重试，请稍后再试。")
             refresh()
         }
     }
@@ -161,9 +189,13 @@ final class PostcardRecoveryController {
             }
             do {
                 while !Task.isCancelled && !stopped && !isApplicationSuspended && isApplicationEnabled() && isReady() {
-                    let outcome = try await worker.step(settings: settings(), manualEventID: eventID)
+                    let outcome = try await worker.step(settings: settings(), manualEventID: eventID) { stage in
+                        guard stage == .imageHandling else { return }
+                        if self.retryNotice?.eventID == eventID { self.retryNotice = nil }
+                        self.refresh()
+                    }
                     guard !Task.isCancelled, !stopped, !isApplicationSuspended, isApplicationEnabled(), isReady() else { return }
-                    manualMessage = outcome.message
+                    retryNotice = (eventID, outcome.message)
                     refresh()
                     let backlog = try PostcardBacklogStore(root: repository.root)
                     let events = try repository.events() + backlog.supplementalEvents()
@@ -173,7 +205,7 @@ final class PostcardRecoveryController {
             } catch is CancellationError {
                 // The persisted lease/request remains available to normal recovery.
             } catch {
-                manualMessage = "手动重试暂时无法完成，已保留请求；修复服务或重新打开应用后继续。"
+                retryNotice = (eventID, "重试暂时无法完成，已保留请求。修复服务或重新打开应用后可继续。")
                 refresh()
             }
         }

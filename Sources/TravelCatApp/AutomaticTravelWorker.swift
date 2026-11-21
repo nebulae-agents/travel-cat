@@ -610,7 +610,7 @@ final class AutomaticTravelWorker {
         } catch {
             try Task.checkCancellation()
             let reason = (error as? CodexTravelExecutor.Failure)?.errorDescription
-                ?? (error as? TravelImageGenerationFailure)?.errorDescription ?? "照片尚未完成，已安排重试"
+                ?? (error as? TravelImageGenerationFailure)?.errorDescription ?? "未能获取可用的图片。"
             let result = ImageResultEnvelope(eventId: work.event.id, status: .failed,
                 attemptedAt: clock(), relativePath: nil, reason: reason, attemptToken: work.attemptToken,
                 attemptCount: work.imageAttemptCount, publishedNarrativeHash: work.publishedNarrativeHash)
