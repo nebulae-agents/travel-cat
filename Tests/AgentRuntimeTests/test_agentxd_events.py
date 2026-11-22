@@ -5,9 +5,11 @@ import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from test_agentxd_runs import RunStore
-from agentxd import Handler
+from agentxd import Handler, serve
 from websockets.sync.client import connect
 
 
@@ -26,9 +28,8 @@ class TestRunEvents(unittest.TestCase):
 
     def subscription(self, after):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        server.store = self.store
         server.authorization = b"Bearer test"
-        server.pilot = type("Lifecycle", (), {"closing": False})()
+        server.pilots = {"pilot": SimpleNamespace(store=self.store, closing=False)}
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         self.addCleanup(server.server_close)
@@ -36,6 +37,21 @@ class TestRunEvents(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return connect(f"ws://127.0.0.1:{server.server_port}/v1/apps/pilot/runs/one/events?after={after}",
                        additional_headers={"Authorization": "Bearer test"}, proxy=None, close_timeout=1)
+
+    def test_loopback_startup_does_not_resolve_hostname(self):
+        endpoint = self.root / ".agentxd-endpoint.json"
+
+        class Ready(Exception):
+            pass
+
+        def ready(_store):
+            self.assertIn(json.loads(endpoint.read_bytes())["port"], range(1, 65536))
+            raise Ready
+
+        with patch("socket.getfqdn", side_effect=AssertionError("unexpected reverse DNS lookup")):
+            with self.assertRaises(Ready):
+                serve(self.root, on_ready=ready)
+        self.assertFalse(endpoint.exists())
 
     def test_reconnect_reads_only_missing_revisions_after_store_reopen(self):
         with self.subscription(0) as client:

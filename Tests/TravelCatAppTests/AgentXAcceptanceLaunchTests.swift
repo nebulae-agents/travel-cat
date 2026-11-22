@@ -50,6 +50,12 @@ final class AgentXAcceptanceLaunchTests: XCTestCase {
         XCTAssertFalse(allowed(env))
         try writeMarker(root.path)
         XCTAssertTrue(allowed(env)) // host may be created by the isolated app on first launch.
+        let binding = ["instanceID": "pi", "providerID": "p", "model": "m",
+                       "baseURL": "https://openrouter.ai/api/v1", "systemPrompt": "system"]
+        let apps: [[String: Any]] = [["appID": "other"], ["appID": "pilot", "pi": binding]]
+        let multi: [String: Any] = ["root": root.path, "version": 2, "apps": apps]
+        try JSONSerialization.data(withJSONObject: multi).write(to: marker)
+        XCTAssertTrue(allowed(env))
         XCTAssertFalse(allowed(["AGENTX_ROOT": root.path, "AGENTX_HOST_DIRECTORY": base.path]))
         try fm.createSymbolicLink(at: host, withDestinationURL: root)
         XCTAssertFalse(allowed(env))

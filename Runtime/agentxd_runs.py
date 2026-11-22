@@ -25,6 +25,16 @@ class CommandError(Exception):
         self.reason = reason
 
 
+def validate_pi_binding(config):
+    required = {"instanceID", "providerID", "model", "baseURL", "systemPrompt"}
+    if (not isinstance(config, dict) or set(config) != required
+            or not all(isinstance(v, str) for v in config.values())
+            or not ID.fullmatch(config["instanceID"])
+            or not ID.fullmatch(config["providerID"])
+            or len(config["systemPrompt"].encode()) > 100_000):
+        raise ValueError("invalid Pi binding")
+
+
 class PilotRuns:
     def __init__(self, store, bundle, factory=PiProcess):
         self.store = store
@@ -34,13 +44,7 @@ class PilotRuns:
         self.workers = {}
         self.closing = False
         if self.config is not None:
-            required = {"instanceID", "providerID", "model", "baseURL", "systemPrompt"}
-            if (not isinstance(self.config, dict) or set(self.config) != required
-                    or not all(isinstance(v, str) for v in self.config.values())
-                    or not ID.fullmatch(self.config["instanceID"])
-                    or not ID.fullmatch(self.config["providerID"])
-                    or len(self.config["systemPrompt"].encode()) > 100_000):
-                raise ValueError("invalid Pi binding")
+            validate_pi_binding(self.config)
         store.recover_audit()
         # The root lock excludes the previous service, but cannot attest to its child's exit.
         for run in store.list_runs():

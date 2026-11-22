@@ -48,11 +48,9 @@ enum AgentXAcceptanceLaunch {
             var info = stat()
             guard lstat(host + "/" + filename, &info) == -1, errno == ENOENT else { return false }
         }
-        let marker = URL(fileURLWithPath: root).appendingPathComponent(".agentxd-pilot.json")
         do {
-            let pilot = try JSONDecoder().decode(AgentXPilot.self, from: AgentXLocalAppZIP.read(marker))
-            try AgentXPackageFiles.validateID(pilot.appID)
-            return pilot.root == root && pilot.pi != nil && !["blackcat", "workbench"].contains(pilot.appID)
+            guard let pilot = try AgentXPilot.readMarker(at: URL(fileURLWithPath: root)) else { return false }
+            return pilot.root == root && pilot.apps.contains { $0.pi != nil }
         } catch { return false }
     }
 }

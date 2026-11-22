@@ -1,5 +1,6 @@
 """Single-writer pilot for an explicitly configured, offline copy of an AgentX root."""
 import argparse
+from contextlib import ExitStack
 import fcntl
 import hmac
 import json
@@ -12,13 +13,15 @@ import stat
 import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from threading import RLock
 
-from agentxd_runs import PilotRuns, CommandError
+from agentxd_runs import PilotRuns, CommandError, validate_pi_binding
 from agentxd_audit import enqueue, SwiftAudit
 
 
 IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,100}")
+PILOT_MARKER_LIMIT = 2 * 1024 * 1024
 
 
 def regular(path):
@@ -48,16 +51,56 @@ def write_json(path, value):
             temporary.unlink(missing_ok=True)
 
 
+def load_pilot_apps(root):
+    marker_path = root / ".agentxd-pilot.json"
+    with os.fdopen(os.open(marker_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise ValueError("invalid pilot ownership marker")
+        marker = stream.read(PILOT_MARKER_LIMIT + 1)
+    if len(marker) > PILOT_MARKER_LIMIT:
+        raise ValueError("pilot ownership marker is too large")
+    if len(marker) != info.st_size:
+        raise ValueError("pilot ownership marker changed while reading")
+    config = json.loads(marker)
+    if not isinstance(config, dict) or not isinstance(config.get("root"), str):
+        raise ValueError("invalid pilot ownership")
+    configured = Path(config["root"])
+    if not configured.is_absolute() or configured.resolve(strict=True) != root:
+        raise ValueError("invalid pilot ownership")
+    versioned = "version" in config or "apps" in config
+    if versioned:
+        if (set(config) != {"root", "version", "apps"} or type(config["version"]) is not int
+                or config["version"] != 2 or config["root"] != str(root)
+                or not isinstance(config["apps"], list) or not config["apps"]):
+            raise ValueError("invalid pilot ownership")
+        entries = config["apps"]
+    else:
+        entries = [config]
+    apps = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or (versioned and not entry.keys() <= {"appID", "pi"}):
+            raise ValueError("invalid pilot ownership")
+        app_id = entry.get("appID")
+        if (not isinstance(app_id, str) or not IDENTIFIER.fullmatch(app_id) or app_id.lower() != app_id
+                or app_id in ("blackcat", "workbench") or app_id in apps):
+            raise ValueError("invalid pilot ownership")
+        if versioned and "pi" in entry:
+            validate_pi_binding(entry["pi"])
+        apps[app_id] = entry
+    return apps
+
+
 class RunStore:
-    def __init__(self, root, audit=None):
+    def __init__(self, root, audit=None, *, config=None):
         self.audit = audit
-        config = read_json(root / ".agentxd-pilot.json")
+        if config is None:
+            apps = load_pilot_apps(root)
+            if len(apps) != 1:
+                raise ValueError("a run store requires a single app")
+            config = next(iter(apps.values()))
         self.config = config
         self.app = config["appID"]
-        configured = Path(config["root"])
-        if (not configured.is_absolute() or configured.resolve(strict=True) != root or not IDENTIFIER.fullmatch(self.app)
-                or self.app.lower() != self.app or self.app in ("blackcat", "workbench")):
-            raise ValueError("invalid pilot ownership")
         self.directory = root / "apps" / self.app / "runs"
         if self.directory.resolve(strict=True) != self.directory or not self.directory.is_dir():
             raise ValueError("invalid runs directory")
@@ -166,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def stream_events(self, run_id, cursor):
+    def stream_events(self, pilot, run_id, cursor):
         # The HTTP parser consumed the opening request. Give its headers to
         # the WebSocket protocol implementation before switching transports.
         from select import select
@@ -177,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
             from websockets.protocol import OPEN
         except ImportError:
             return self.reply(503, {"error": "websocket_runtime_unavailable"})
-        status, batch = self.server.store.events_after(run_id, cursor)
+        status, batch = pilot.store.events_after(run_id, cursor)
         if status != 200:
             return self.reply(status, batch)
         protocol = ServerProtocol(max_size=4096)
@@ -191,7 +234,7 @@ class Handler(BaseHTTPRequestHandler):
                 if data:
                     self.connection.sendall(data)
         flush()
-        while protocol.state is OPEN and not self.server.pilot.closing:
+        while protocol.state is OPEN and not pilot.closing:
             if status != 200:
                 protocol.send_text(json.dumps(batch).encode())
                 protocol.send_close(1000)
@@ -209,29 +252,33 @@ class Handler(BaseHTTPRequestHandler):
                 protocol.receive_data(data)
                 protocol.events_received()
                 flush()
-            status, batch = self.server.store.events_after(run_id, cursor)
+            status, batch = pilot.store.events_after(run_id, cursor)
 
     def handle_run(self):
         server = self.server
         if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), server.authorization):
             return self.reply(401, {})
         parts = self.path.split("/")
-        if parts[:5] != ["", "v1", "apps", server.store.app, "runs"]:
+        if len(parts) < 5 or parts[:3] != ["", "v1", "apps"] or parts[4] != "runs":
             return self.reply(404, {})
+        pilot = server.pilots.get(parts[3])
+        if pilot is None:
+            return self.reply(404, {})
+        store = pilot.store
         route = parts[5:]
         try:
             if self.command == "GET":
                 if len(route) == 2 and route[1] == "audit":
-                    with server.store.lock:
-                        run = server.store.get(route[0])
-                        if server.store.audit is None:
+                    with store.lock:
+                        run = store.get(route[0])
+                        if store.audit is None:
                             raise CommandError(503, "audit_unavailable")
                         try:
-                            count = server.store.audit.verify()
-                            records = server.store.audit.records(route[0])
+                            count = store.audit.verify()
+                            records = store.audit.records(route[0])
                         except (OSError, ValueError):
                             raise CommandError(503, "audit_unavailable") from None
-                        return self.reply(200, {"runId": run["id"], "appID": server.store.app,
+                        return self.reply(200, {"runId": run["id"], "appID": store.app,
                                                 "auditStatus": run.get("auditStatus", "legacy"),
                                                 "verified": True, "chainRecords": count, "records": records})
                 if len(route) == 2 and route[1].partition("?")[0] == "events":
@@ -240,11 +287,11 @@ class Handler(BaseHTTPRequestHandler):
                         return self.reply(400, {"error": "invalid_cursor"})
                     cursor = int(query[1])
                     if self.headers.get("Upgrade", "").lower() == "websocket":
-                        return self.stream_events(route[0], cursor)
-                    return self.reply(*server.store.events_after(route[0], cursor))
+                        return self.stream_events(pilot, route[0], cursor)
+                    return self.reply(*store.events_after(route[0], cursor))
                 if len(route) > 1:
                     return self.reply(404, {})
-                result = server.store.get(route[0]) if route else server.store.list_runs()
+                result = store.get(route[0]) if route else store.list_runs()
                 return self.reply(200, result)
             if self.headers.get("Transfer-Encoding") is not None:
                 return self.reply(400, {})
@@ -259,9 +306,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "POST":
                 key = self.headers.get("Idempotency-Key")
                 if not route:
-                    return self.reply(*server.pilot.create(key, body))
+                    return self.reply(*pilot.create(key, body))
                 if len(route) == 2 and route[1] == "stop" and body == {}:
-                    return self.reply(*server.pilot.stop(route[0], key))
+                    return self.reply(*pilot.stop(route[0], key))
                 return self.reply(404, {})
             if len(route) != 1:
                 return self.reply(405, {})
@@ -269,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
                     or type(body["isRead"]) is not bool or type(body["expectedRevision"]) is not int
                     or body["expectedRevision"] < 0):
                 return self.reply(400, {})
-            self.reply(*server.store.update(route[0], body["expectedRevision"], {"isRead": body["isRead"]}))
+            self.reply(*store.update(route[0], body["expectedRevision"], {"isRead": body["isRead"]}))
         except CommandError as error:
             self.reply(error.status, {"error": error.reason})
         except FileNotFoundError:
@@ -280,21 +327,28 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = do_PATCH = do_POST = handle_run
 
 
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # The endpoint uses a numeric loopback address and needs no hostname.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
     root = root.resolve(strict=True)
     info = root.stat()
     if info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError("pilot root must be private (0700)")
-    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    audit = None
-    try:
+    with ExitStack() as resources:
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        resources.callback(os.close, descriptor)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError("pilot root already in use") from None
         if any((root / name).exists() for name in (".agentx-local-operation.json", ".agentx-transaction.json")):
             raise ValueError("finish the pending desktop transaction before starting the pilot")
-        store = RunStore(root)
+        stores = {app: RunStore(root, config=config) for app, config in load_pilot_apps(root).items()}
         if audit_helper is None and pi_bundle is not None:
             import plistlib
             with regular(pi_bundle / "Contents/Info.plist").open("rb") as stream:
@@ -303,31 +357,25 @@ def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
                 raise ValueError("invalid bundle executable")
             audit_helper = pi_bundle / "Contents/MacOS" / executable
         if audit_helper is not None:
-            audit = SwiftAudit(root, store.app, audit_helper, persistent=True)
-            store.audit = audit
+            for app, store in stores.items():
+                audit = SwiftAudit(root, app, audit_helper, persistent=True)
+                resources.callback(audit.close)
+                store.audit = audit
         endpoint = root / ".agentxd-endpoint.json"
-        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
-            server.daemon_threads = False  # Drain handlers before giving up the root lock.
+        with _LoopbackHTTPServer(("127.0.0.1", 0), Handler) as server, ExitStack() as active:
+            server.daemon_threads = False  # Drain handlers before closing audit sessions and releasing the root.
             token = secrets.token_urlsafe(32)
             server.authorization = ("Bearer " + token).encode()
-            server.store = store
-            server.pilot = PilotRuns(store, pi_bundle)
+            server.pilots = {}
+            for app, store in stores.items():
+                pilot = PilotRuns(store, pi_bundle)
+                active.callback(pilot.close)
+                server.pilots[app] = pilot
+            active.callback(endpoint.unlink, missing_ok=True)
             write_json(endpoint, {"port": server.server_port, "token": token})
-            try:
-                if on_ready:
-                    on_ready(store)
-                server.serve_forever()
-            finally:
-                try:
-                    server.pilot.close()
-                finally:
-                    endpoint.unlink(missing_ok=True)
-    finally:
-        try:
-            if audit is not None:
-                audit.close()
-        finally:
-            os.close(descriptor)
+            if on_ready:
+                on_ready(next(iter(stores.values())) if len(stores) == 1 else stores)
+            server.serve_forever()
 
 
 if __name__ == "__main__":

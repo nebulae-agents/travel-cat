@@ -1,0 +1,272 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AgentX local run API",
+    "version": "1.0.0",
+    "description": "Run access for explicitly managed applications in a private AgentX root. One agentxd process owns those applications' run files. Clients must resolve the port and bearer token from the root's .agentxd-endpoint.json. A disconnected client must not resume direct writes to an owned application's runs."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:{port}",
+      "variables": {
+        "port": { "default": "8080", "description": "Example port. Use the live endpoint's dynamically assigned port." }
+      }
+    }
+  ],
+  "security": [{ "localBearer": [] }],
+  "paths": {
+    "/v1/apps/{appId}/runs": {
+      "parameters": [{ "$ref": "#/components/parameters/AppId" }],
+      "get": {
+        "operationId": "listRuns",
+        "summary": "List runs owned by the requested application",
+        "responses": {
+          "200": {
+            "description": "Application run snapshots",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Run" } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/StorageFailure" }
+        }
+      },
+      "post": {
+        "operationId": "createRun",
+        "summary": "Start a run for the application's bound Pi instance",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRun" } } }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/RunSnapshot" },
+          "201": { "$ref": "#/components/responses/RunSnapshot" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Idempotency key bound to a different request, or the instance has an active run or pending process review." },
+          "422": { "description": "Instance is outside the application binding, or the Pi configuration or context is invalid." },
+          "500": { "$ref": "#/components/responses/StorageFailure" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/apps/{appId}/runs/{runId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/AppId" },
+        { "$ref": "#/components/parameters/RunId" }
+      ],
+      "get": {
+        "operationId": "getRun",
+        "summary": "Read a run snapshot",
+        "responses": {
+          "200": { "$ref": "#/components/responses/RunSnapshot" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/StorageFailure" }
+        }
+      },
+      "patch": {
+        "operationId": "setRunReadFlag",
+        "summary": "Set the read flag for the given revision",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadFlag" } } }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/RunSnapshot" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "Revision conflict. The response contains the current snapshot.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Run" } } }
+          },
+          "500": { "$ref": "#/components/responses/StorageFailure" }
+        }
+      }
+    },
+    "/v1/apps/{appId}/runs/{runId}/stop": {
+      "parameters": [
+        { "$ref": "#/components/parameters/AppId" },
+        { "$ref": "#/components/parameters/RunId" }
+      ],
+      "post": {
+        "operationId": "stopRun",
+        "summary": "Request cancellation of a service-owned execution",
+        "description": "Send an empty JSON object. The cancellation request and confirmed process exit are distinct run states.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false } } }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/RunSnapshot" },
+          "202": { "$ref": "#/components/responses/RunSnapshot" },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Execution was not created by the service or the service cannot confirm ownership of its process." },
+          "500": { "$ref": "#/components/responses/StorageFailure" }
+        }
+      }
+    },
+    "/v1/apps/{appId}/runs/{runId}/events": {
+      "parameters": [
+        { "$ref": "#/components/parameters/AppId" },
+        { "$ref": "#/components/parameters/RunId" }
+      ],
+      "get": {
+        "operationId": "readRunEvents",
+        "summary": "Read retained events after a run revision",
+        "description": "Also accepts an authenticated WebSocket upgrade at the same URI. A cursor outside retention requires a fresh snapshot.",
+        "parameters": [
+          { "name": "after", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "x-websocket-event-schema": { "$ref": "#/components/schemas/RunEvent" },
+        "responses": {
+          "101": { "description": "Switch to WebSocket replay and live events." },
+          "200": {
+            "description": "Available events and latest revision",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventBatch" } } }
+          },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Snapshot required. Includes the latest run revision." },
+          "500": { "$ref": "#/components/responses/StorageFailure" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/apps/{appId}/runs/{runId}/audit": {
+      "parameters": [
+        { "$ref": "#/components/parameters/AppId" },
+        { "$ref": "#/components/parameters/RunId" }
+      ],
+      "get": {
+        "operationId": "getRunAudit",
+        "summary": "Verify the application's retained audit chain and read run metadata",
+        "description": "A verified chain can still have pending events for this run. The audit response contains metadata only. Legacy non-UUID runs have an empty records array.",
+        "responses": {
+          "200": {
+            "description": "Verified chain and retained metadata for the requested run",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunAudit" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/StorageFailure" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "localBearer": { "type": "http", "scheme": "bearer" }
+    },
+    "parameters": {
+      "AppId": { "name": "appId", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[a-z0-9_-]{1,100}$" } },
+      "RunId": { "name": "runId", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,100}$" } },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Reuse the same key to retry the same command. Create keys are scoped by application.",
+        "schema": { "type": "string", "pattern": "^[a-zA-Z0-9_.:-]{1,128}$" }
+      }
+    },
+    "responses": {
+      "RunSnapshot": {
+        "description": "Current run snapshot",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Run" } } }
+      },
+      "InvalidRequest": { "description": "Invalid request JSON, headers, command fields or cursor." },
+      "Unauthorized": { "description": "Missing or invalid local bearer token." },
+      "NotFound": { "description": "Application is outside service ownership, or the requested run or route does not exist." },
+      "StorageFailure": { "description": "Service could not read or safely write the record." },
+      "Unavailable": { "description": "The required local runtime or verified audit chain is unavailable." }
+    },
+    "schemas": {
+      "CreateRun": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["instanceId", "prompt"],
+        "properties": {
+          "instanceId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,100}$" },
+          "prompt": { "type": "string", "minLength": 1, "description": "Nonblank prompt with at most 100000 UTF-8 bytes." }
+        }
+      },
+      "ReadFlag": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedRevision", "isRead"],
+        "properties": {
+          "expectedRevision": { "type": "integer", "minimum": 0 },
+          "isRead": { "type": "boolean" }
+        }
+      },
+      "Run": {
+        "type": "object",
+        "required": ["id", "appID", "revision"],
+        "properties": {
+          "id": { "type": "string" },
+          "appID": { "type": "string" },
+          "instanceID": { "type": "string" },
+          "revision": { "type": "integer", "minimum": 0 },
+          "status": { "type": "string" },
+          "isRead": { "type": "boolean" },
+          "prompt": { "type": "string" },
+          "response": { "type": "string" },
+          "startedAt": { "$ref": "#/components/schemas/SwiftDate" },
+          "endedAt": { "$ref": "#/components/schemas/SwiftDate" },
+          "stopRequestedAt": { "$ref": "#/components/schemas/SwiftDate" },
+          "stopEvidence": { "$ref": "#/components/schemas/StopEvidence" },
+          "requiresProcessReview": { "type": "boolean" },
+          "failure": { "type": "string", "nullable": true }
+        }
+      },
+      "SwiftDate": {
+        "type": "number",
+        "format": "double",
+        "description": "Seconds relative to 2001-01-01T00:00:00Z."
+      },
+      "StopEvidence": {
+        "type": "string",
+        "enum": ["pending", "confirmedExited", "unverified"],
+        "description": "Pending marks the saved cancellation request. Confirmed exit requires matching process evidence."
+      },
+      "RunEvent": {
+        "type": "object",
+        "required": ["eventId", "runId", "revision", "kind", "state"],
+        "properties": {
+          "eventId": { "type": "string" },
+          "runId": { "type": "string" },
+          "revision": { "type": "integer", "minimum": 0 },
+          "kind": { "type": "string" },
+          "state": { "type": "string" },
+          "stopEvidence": { "$ref": "#/components/schemas/StopEvidence" }
+        }
+      },
+      "EventBatch": {
+        "type": "object",
+        "required": ["revision", "events"],
+        "properties": {
+          "revision": { "type": "integer", "minimum": 0 },
+          "events": { "type": "array", "items": { "$ref": "#/components/schemas/RunEvent" } }
+        }
+      },
+      "RunAudit": {
+        "type": "object",
+        "required": ["runId", "appID", "auditStatus", "verified", "chainRecords", "records"],
+        "properties": {
+          "runId": { "type": "string" },
+          "appID": { "type": "string" },
+          "auditStatus": { "type": "string" },
+          "verified": { "type": "boolean" },
+          "chainRecords": { "type": "integer", "minimum": 0 },
+          "records": { "type": "array", "items": { "type": "object" } }
+        }
+      }
+    }
+  }
+}

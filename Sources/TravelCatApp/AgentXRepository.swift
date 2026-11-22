@@ -89,7 +89,7 @@ struct AgentXRepository {
                 guard value.appID == app.id, instance == directory + "/instances/" + value.id else { throw AgentXError.unsafePath }
                 state.instances.append(value)
             }
-            if !includePilotRuns && app.id == pilot?.appID { continue }
+            if !includePilotRuns && pilot?.appIDs.contains(app.id) == true { continue }
             for run in try children(directory + "/runs", extension: "json") {
                 let value = try JSONDecoder().decode(AgentXRun.self, from: Data(contentsOf: safeURL(run)))
                 guard value.appID == app.id, run == directory + "/runs/" + value.id + ".json" else { throw AgentXError.unsafePath }
@@ -109,13 +109,18 @@ struct AgentXRepository {
         return state
     }
 
-    func save(_ state: AgentXState) throws {
-        try recoverTransaction()
+    func save(_ state: AgentXState, preservingRunsFor appIDs: Set<String> = []) throws {
+        let owned = try AgentXPilot.configured(at: root)?.appIDs ?? []
+        let protected = owned.union(appIDs)
+        try recoverTransaction(preservingRunsFor: protected)
         try validate(state)
         var directories = ["manager/providers", "manager/secrets", "manager/templates/assistant", "apps", "shared/inbox", "shared/published", "shared/references", "audit", "backups"]
             + state.instances.flatMap { instance in
                 ["config", "memory", "workspace", "logs"].map { "apps/\(instance.appID)/instances/\(instance.id)/\($0)" }
-            } + state.apps.flatMap { app in ["state", "artifacts", "shared", "runs", "memory"].map { "apps/\(app.id)/\($0)" } }
+            } + state.apps.flatMap { app in
+                let directories = protected.contains(app.id) ? ["state", "artifacts", "shared", "memory"] : ["state", "artifacts", "shared", "runs", "memory"]
+                return directories.map { "apps/\(app.id)/\($0)" }
+            }
         var writes: [String: Data] = [:]
         var settings = try existingDictionary("agentx.yaml")
         let manifest = try safeURL("agentx.yaml")
@@ -228,8 +233,7 @@ struct AgentXRepository {
             item["_order"] = order
             writes[path] = try yaml(item)
         }
-        let pilot = try AgentXPilot.configured(at: root)
-        for run in state.runs where run.appID != pilot?.appID {
+        for run in state.runs where !protected.contains(run.appID) {
             let path = "apps/\(run.appID)/runs/\(run.id).json"
             let url = try safeURL(path)
             if fm.fileExists(atPath: url.path) {
@@ -273,27 +277,24 @@ struct AgentXRepository {
             }
             try fm.removeItem(at: journal)
         } catch {
-            try recoverTransaction()
+            try recoverTransaction(preservingRunsFor: protected)
             throw error
         }
     }
 
     private struct Transaction: Codable { let files: [PreviousFile]; let directories: [String] }
     private struct PreviousFile: Codable { let path: String; let bytes: Data? }
-    private func recoverTransaction() throws {
+    private func recoverTransaction(preservingRunsFor appIDs: Set<String> = []) throws {
         let journal = try safeURL(".agentx-transaction.json")
         guard fm.fileExists(atPath: journal.path) else { return }
         let transaction = try JSONDecoder().decode(Transaction.self, from: Data(contentsOf: journal))
         let previous = transaction.files
-        if let pilot = try AgentXPilot.configured(at: root) {
-            let protected = "apps/" + pilot.appID + "/runs"
-            let targets = previous.map(\.path) + transaction.directories
-            for target in targets {
-                let path = try safeURL(target).path.lowercased()
-                let owned = try safeURL(protected).path.lowercased()
-                guard path != owned, !path.hasPrefix(owned + "/"), !owned.hasPrefix(path + "/") else {
-                    throw AgentXError.invalid("待恢复事务涉及试点运行目录，请先离线处理副本。")
-                }
+        let owned = try AgentXPilot.configured(at: root)?.appIDs ?? []
+        let protected = try owned.union(appIDs).map { try safeURL("apps/\($0)/runs").path.lowercased() }
+        for target in previous.map(\.path) + transaction.directories {
+            let path = try safeURL(target).path.lowercased()
+            guard !protected.contains(where: { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }) else {
+                throw AgentXError.invalid("待恢复事务涉及试点运行目录，请先离线处理副本。")
             }
         }
         for directory in transaction.directories { _ = try safeURL(directory) }

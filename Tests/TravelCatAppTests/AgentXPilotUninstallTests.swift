@@ -19,8 +19,8 @@ final class AgentXPilotUninstallTests: XCTestCase {
             try JSONEncoder().encode(marker).write(to: root.appendingPathComponent(".agentxd-pilot.json"))
         }
         let pilot = try XCTUnwrap(AgentXPilot.configured(at: target))
-        XCTAssertEqual(pilot.appID, "pilot")
-        guard pilot.appID == "pilot" else { return }
+        XCTAssertTrue(pilot.appIDs.contains("pilot"))
+        guard pilot.appIDs.contains("pilot") else { return }
         let lifecycle = AgentXApplicationLifecycle(repository: AgentXRepository(root: target), requireIdle: { _ in
             XCTFail("Pilot ownership should be checked before idle state")
             throw AgentXError.unavailable

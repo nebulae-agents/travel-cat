@@ -56,7 +56,7 @@ struct AgentXManagerView: View {
             VStack(spacing: 0) {
                 AgentXAppHeader(controller: controller, pending: pendingCount)
                 Divider().overlay(AgentXTheme.border)
-                if let issue = controller.pilotConnectionIssue, controller.selectedAppID == controller.pilot?.appID {
+                if let issue = controller.pilotConnectionIssue {
                     Label(issue, systemImage: "wifi.slash").padding(8)
                 }
                 if let error = controller.errorMessage {
@@ -99,7 +99,7 @@ struct AgentXManagerView: View {
             }
         }
         .task {
-            guard controller.pilot != nil else { return }
+            guard controller.hasPilotApps else { return }
             while !Task.isCancelled {
                 await controller.refreshPilotRuns()
                 try? await Task.sleep(for: .seconds(2))
