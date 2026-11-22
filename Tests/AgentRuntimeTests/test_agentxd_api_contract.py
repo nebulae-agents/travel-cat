@@ -13,6 +13,18 @@ REPO = Path(__file__).resolve().parents[2]
 APP_PATH = "/v1/apps/{appId}/runs"
 RUN_PATH = APP_PATH + "/{runId}"
 
+START_WITH_TRACE = """
+import faulthandler
+from pathlib import Path
+import runpy
+import sys
+
+faulthandler.dump_traceback_later(5)
+sys.argv.pop(0)
+sys.path.insert(0, str(Path(sys.argv[0]).parent))
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
 
 class TestAgentxdApiContract(unittest.TestCase):
     def test_documented_routes_and_statuses_match_service(self):
@@ -50,7 +62,8 @@ class TestAgentxdApiContract(unittest.TestCase):
                 "root": str(root), "version": 2, "apps": [{"appID": "alpha"}, {"appID": "beta"}],
             }))
             with subprocess.Popen(
-                [sys.executable, "-B", str(REPO / "Runtime/agentxd.py"), "--root", str(root)],
+                [sys.executable, "-B", "-c", START_WITH_TRACE, str(REPO / "Runtime/agentxd.py"),
+                 "--root", str(root)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -104,7 +117,14 @@ class TestAgentxdApiContract(unittest.TestCase):
             if service.poll() is not None:
                 self.fail(service.stderr.read())
             time.sleep(0.03)
-        self.fail("service did not publish its endpoint")
+        if service.poll() is None:
+            service.terminate()
+        try:
+            _, diagnostic = service.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            service.kill()
+            _, diagnostic = service.communicate(timeout=2)
+        self.fail("service did not publish its endpoint\n" + diagnostic)
 
     @staticmethod
     def exchange(endpoint, method, path, body, authorize=True):
