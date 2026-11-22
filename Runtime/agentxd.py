@@ -13,6 +13,7 @@ import stat
 import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from threading import RLock
 
 from agentxd_runs import PilotRuns, CommandError, validate_pi_binding
@@ -326,6 +327,13 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = do_PATCH = do_POST = handle_run
 
 
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # The endpoint uses a numeric loopback address and needs no hostname.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
     root = root.resolve(strict=True)
     info = root.stat()
@@ -354,7 +362,7 @@ def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
                 resources.callback(audit.close)
                 store.audit = audit
         endpoint = root / ".agentxd-endpoint.json"
-        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, ExitStack() as active:
+        with _LoopbackHTTPServer(("127.0.0.1", 0), Handler) as server, ExitStack() as active:
             server.daemon_threads = False  # Drain handlers before closing audit sessions and releasing the root.
             token = secrets.token_urlsafe(32)
             server.authorization = ("Bearer " + token).encode()
