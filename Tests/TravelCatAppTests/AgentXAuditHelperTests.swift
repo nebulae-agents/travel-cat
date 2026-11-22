@@ -10,6 +10,42 @@ final class AgentXAuditHelperTests: XCTestCase {
         func read(id: String) throws -> String? { reads += 1; return value }
         func save(_ secret: String?, id: String) throws { value = secret; saves += 1 }
     }
+    @MainActor func testVersionTwoMarkerOnlyAuthorizesExplicitMembers() throws {
+        let root = URL(fileURLWithPath: "/private/tmp/agentx-audit-test-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let marker = root.appendingPathComponent(".agentxd-pilot.json")
+        func writeMarker(_ apps: [String]) throws {
+            let body: [String: Any] = ["root": root.path, "version": 2, "apps": apps.map { ["appID": $0] }]
+            try JSONSerialization.data(withJSONObject: body).write(to: marker, options: .atomic)
+        }
+
+        try writeMarker(["pilot", "second"])
+        let helper = try AgentXAuditHelper(root: root.path, appID: "second", credentials: Credentials())
+        XCTAssertThrowsError(try AgentXAuditHelper(root: root.path, appID: "third", credentials: Credentials()))
+        let request = Data(#"{"op":"verify"}"#.utf8)
+        XCTAssertEqual(try helper.execute(request)["ok"] as? Bool, true)
+        try writeMarker(["pilot"])
+        XCTAssertThrowsError(try helper.execute(request))
+    }
+
+    @MainActor func testAuditAuthorizesBothAppsWhenTheirBindingsExceedTheLegacyMarkerLimit() throws {
+        let root = URL(fileURLWithPath: "/private/tmp/agentx-audit-test-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let binding = ["instanceID": "member", "providerID": "provider", "model": "model",
+                       "baseURL": "https://openrouter.ai/api/v1", "systemPrompt": String(repeating: "x", count: 34_000)]
+        let apps: [[String: Any]] = ["pilot", "second"].map { ["appID": $0, "pi": binding] }
+        let data = try JSONSerialization.data(withJSONObject: ["root": root.path, "version": 2, "apps": apps])
+        XCTAssertGreaterThan(data.count, 65_536)
+        try data.write(to: root.appendingPathComponent(".agentxd-pilot.json"))
+        let request = Data(#"{"op":"verify"}"#.utf8)
+        for appID in ["pilot", "second"] {
+            let helper = try AgentXAuditHelper(root: root.path, appID: appID, credentials: Credentials())
+            XCTAssertEqual(try helper.execute(request)["ok"] as? Bool, true)
+        }
+    }
+
     @MainActor func testHelperEncryptedIdempotencyAndValidation() throws {
         let root = URL(fileURLWithPath: "/private/tmp/agentx-audit-test-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])

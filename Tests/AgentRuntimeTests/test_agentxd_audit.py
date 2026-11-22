@@ -130,7 +130,7 @@ class TestAuditedCommands(fixtures.TestPilotCommands):
         self.assertTrue(self.children[0].launched.wait(2))
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         server.authorization = b'Bearer fixture'
-        server.store, server.pilot = self.store, self.service
+        server.pilots = {self.store.app: self.service}
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:

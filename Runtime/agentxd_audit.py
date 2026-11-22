@@ -198,6 +198,12 @@ class SwiftAudit:
         self.call({'op': 'append', 'record': record})
 
     def records(self, run_id):
+        # Legacy records may have non-UUID IDs, which the Swift bridge cannot look up.
+        try:
+            if str(uuid.UUID(run_id)) != run_id.lower():
+                return []
+        except ValueError:
+            return []
         rows = self.call({'op': 'records', 'runId': run_id}).get('records')
         if not isinstance(rows, list):
             raise ValueError('audit helper unavailable')

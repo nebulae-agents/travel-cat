@@ -26,10 +26,14 @@ final class AgentXController: ObservableObject {
     @Published var selectedConfigurationRunID: String?
     let hostStorage: AgentXHostStorage?
     let repository: AgentXRepository
-    private(set) var pilot: AgentXPilot?
+    private var pilotConfiguration: AgentXPilot.Configuration?
+    var hasPilotApps: Bool { pilotConfiguration != nil }
+
+    func pilot(for appID: String) -> AgentXPilot? { pilotConfiguration?.client(for: appID) }
     @Published private var submittingPilotInstances: Set<String> = []
     private var pilotRequests: [String: (prompt: String, key: String, failureGeneration: UInt64?)] = [:]
-    @Published private(set) var pilotConnectionIssue: String?
+    @Published private var pilotConnectionIssues: [String: String] = [:]
+    var pilotConnectionIssue: String? { pilotConnectionIssues[selectedAppID] }
     private let credentials: any TravelServiceCredentialStoring
     private let catalog: AgentXProviderCatalog
     private let autoRefreshCatalogs: Bool
@@ -203,8 +207,8 @@ final class AgentXController: ObservableObject {
         try requirePackageSnapshotIdle()
         do {
             var loaded = try repository.load(includePilotRuns: false)
-            if let pilot {
-                loaded.runs += state.runs.filter { $0.appID == pilot.appID }
+            if let owned = pilotConfiguration?.appIDs {
+                loaded.runs += state.runs.filter { owned.contains($0.appID) }
                 loaded.runs.sort { $0.startedAt < $1.startedAt }
                 try repository.validate(loaded)
             }
@@ -227,7 +231,7 @@ final class AgentXController: ObservableObject {
     @Published private(set) var undoNotice: String?
     var experienceEditorDrafts: [String: Data] = [:]
     private enum UndoPayload {
-        case pilotReadFlags([String: Int])
+        case pilotReadFlags(appID: String, revisions: [String: Int])
         case skin(AgentXFrontSkin, AgentXFrontSkin), blackcat(Bool, Bool), provider(String, Bool, Bool), readFlags([String: Bool])
     }
     private struct UndoOperation { var id: UUID; var expiresAt: Date; var payload: UndoPayload }
@@ -258,7 +262,7 @@ final class AgentXController: ObservableObject {
             return try await client.respond(provider: provider, model: model, secret: secret, messages: messages)
         }
         do {
-            pilot = try AgentXPilot.configured(at: repository.root)
+            pilotConfiguration = try AgentXPilot.configured(at: repository.root)
             state = try repository.load(includePilotRuns: false)
             stopOperations = try stopStore.load()
             for (id, operation) in stopOperations where operation.status != .stopped || operation.persistenceFailure != nil {
@@ -280,7 +284,7 @@ final class AgentXController: ObservableObject {
                 }
             }
             state.currentAppID = AgentXApplicationPolicy.selection(preferred: state.currentAppID ?? state.singleAppID, in: state)
-            try repository.save(state)
+            try repository.save(state, preservingRunsFor: pilotConfiguration?.appIDs ?? [])
             isLoaded = true
             selectedAppID = AgentXApplicationPolicy.selection(preferred: state.currentAppID ?? state.singleAppID, in: state) ?? ""
             singleMode = state.singleAppID != nil
@@ -313,12 +317,11 @@ final class AgentXController: ObservableObject {
 
     private func commit(_ next: AgentXState) throws {
         guard isLoaded else { throw AgentXError.unavailable }
-        if let pilot {
-            guard next.runs.filter({ $0.appID == pilot.appID }) == state.runs.filter({ $0.appID == pilot.appID }) else {
-                throw AgentXError.invalid("试点运行需通过 agentxd 更新。")
-            }
+        let owned = pilotConfiguration?.appIDs ?? []
+        guard next.runs.filter({ owned.contains($0.appID) }) == state.runs.filter({ owned.contains($0.appID) }) else {
+            throw AgentXError.invalid("试点运行需通过 agentxd 更新。")
         }
-        try repository.save(next)
+        try repository.save(next, preservingRunsFor: owned)
         state = next
         didChange?()
     }
@@ -582,7 +585,15 @@ final class AgentXController: ObservableObject {
         if !selectedAppID.isEmpty { openFrontend() }
     }
     func refreshPilotRuns() async {
-        guard let pilot, isLoaded else { return }
+        guard isLoaded, let configuration = pilotConfiguration else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for pilot in configuration.clients {
+                group.addTask { await self.refreshPilotRuns(for: pilot) }
+            }
+        }
+    }
+
+    private func refreshPilotRuns(for pilot: AgentXPilot) async {
         do {
             let updates = try await pilot.runs()
             for run in updates {
@@ -591,17 +602,20 @@ final class AgentXController: ObservableObject {
                       previous < latest else { continue }
                 // The authenticated snapshot also covers expired cursors and older services.
                 try? await pilot.replay(id: run.id, after: previous, through: latest)
-                try Task.checkCancellation()
             }
+            try Task.checkCancellation()
 
             #if DEBUG
             AgentXAcceptanceLaunch.recordMergedRuns(try mergePilotRuns(updates))
             #else
             try mergePilotRuns(updates)
             #endif
-            pilotConnectionIssue = nil
+            if pilotConnectionIssues[pilot.appID] != nil { pilotConnectionIssues[pilot.appID] = nil }
         } catch {
-            if !Task.isCancelled { pilotConnectionIssue = "试点服务不可用，正在等待重新连接。" }
+            let issue = "试点服务不可用，正在等待重新连接。"
+            if !Task.isCancelled, pilotConnectionIssues[pilot.appID] != issue {
+                pilotConnectionIssues[pilot.appID] = issue
+            }
         }
     }
 
@@ -625,7 +639,7 @@ final class AgentXController: ObservableObject {
             next.runs.sort { $0.startedAt < $1.startedAt }
             try repository.validate(next)
             state = next
-            for run in accepted where run.appID == pilot?.appID {
+            for run in accepted {
                 guard let request = pilotRequests[run.instanceID],
                       run.pilotCreateKey == SHA256.hash(data: Data(request.key.utf8)).map({ String(format: "%02x", $0) }).joined() else { continue }
                 // Only the authenticated receipt for this exact request can reconcile its error/draft.
@@ -640,8 +654,7 @@ final class AgentXController: ObservableObject {
         return accepted
     }
 
-    private func setPilotRead(_ value: Bool, id: String, revision: Int) async throws -> Int {
-        guard let pilot else { throw AgentXError.unavailable }
+    private func setPilotRead(_ value: Bool, id: String, revision: Int, pilot: AgentXPilot) async throws -> Int {
         let result = try await pilot.setRead(value, id: id, expected: revision)
         try mergePilotRuns([result.run])
         guard !result.conflict, let version = result.run.revision else {
@@ -650,17 +663,20 @@ final class AgentXController: ObservableObject {
         return version
     }
 
-    private func markPilotRunsRead(_ runs: [AgentXRun]) async throws {
+    private func markPilotRunsRead(_ runs: [AgentXRun], pilot: AgentXPilot) async throws {
         var revisions: [String: Int] = [:]
-        defer { if !revisions.isEmpty { recordUndo(.pilotReadFlags(revisions), title: "已标记为已读") } }
+        defer {
+            if !revisions.isEmpty { recordUndo(.pilotReadFlags(appID: pilot.appID, revisions: revisions), title: "已标记为已读") }
+        }
         for run in runs where run.status.terminal && !run.isRead {
-            guard let revision = run.revision else { throw AgentXError.corrupt }
-            revisions[run.id] = try await setPilotRead(true, id: run.id, revision: revision)
+            guard run.appID == pilot.appID, let revision = run.revision else { throw AgentXError.corrupt }
+            revisions[run.id] = try await setPilotRead(true, id: run.id, revision: revision, pilot: pilot)
         }
     }
 
     func markAllRead() async throws {
-        if selectedAppID == pilot?.appID { return try await markPilotRunsRead(currentRuns) }
+        if let pilot = pilot(for: selectedAppID) { return try await markPilotRunsRead(currentRuns, pilot: pilot) }
+        try AgentXPilot.requireDesktopOwnership(selectedAppID, at: repository.root)
         var next = state
         let flags = Dictionary(uniqueKeysWithValues: next.runs.filter { $0.appID == selectedAppID && $0.status.terminal && !$0.isRead }.map { ($0.id, $0.isRead) })
         for index in next.runs.indices where next.runs[index].appID == selectedAppID && next.runs[index].status.terminal { next.runs[index].isRead = true }
@@ -668,11 +684,13 @@ final class AgentXController: ObservableObject {
         if !flags.isEmpty { recordUndo(.readFlags(flags), title: "已标记全部结果为已读") }
     }
     func markRead(_ id: String) async throws {
-        if let run = state.runs.first(where: { $0.id == id }), run.appID == pilot?.appID {
-            return try await markPilotRunsRead([run])
+        guard let index = state.runs.firstIndex(where: { $0.id == id }), state.runs[index].status.terminal else { return }
+        let run = state.runs[index]
+        if let pilot = pilot(for: run.appID) {
+            return try await markPilotRunsRead([run], pilot: pilot)
         }
+        try AgentXPilot.requireDesktopOwnership(run.appID, at: repository.root)
         var next = state
-        guard let index = next.runs.firstIndex(where: { $0.id == id }), next.runs[index].status.terminal else { return }
         let previous = next.runs[index].isRead
         next.runs[index].isRead = true
         try commit(next)
@@ -826,7 +844,7 @@ final class AgentXController: ObservableObject {
             guard state.apps.first(where: { $0.id == instance.appID })?.canRunHostText == true else { throw AgentXError.invalid("此应用运行框架未接入宿主文本执行器，未发送请求。") }
             guard !isInstanceBusy(instanceID) else { throw AgentXError.invalid("此实例仍在运行，请等待或取消。") }
             guard provider.enabledModels.contains(instance.model) else { throw AgentXCatalogError.invalidSelection }
-            if let pilot, pilot.appID == instance.appID {
+            if let pilot = pilot(for: instance.appID) {
                 guard purpose == nil else { throw AgentXError.invalid("Pi 试点当前支持普通对话，请从应用前台发送。") }
                 guard let binding = pilot.pi, binding.instanceID == instanceID else {
                     throw AgentXError.invalid("当前成员尚未绑定到本机 Pi 服务。")
@@ -951,7 +969,8 @@ final class AgentXController: ObservableObject {
         }
     }
     func cancel(_ id: String) {
-        if let pilot, let run = state.runs.first(where: { $0.id == id }), run.appID == pilot.appID {
+        guard let run = state.runs.first(where: { $0.id == id }) else { return }
+        if let pilot = pilot(for: run.appID) {
             guard !run.status.terminal else { return }
             Task {
                 do { try mergePilotRuns([await pilot.stop(id: id)]) }
@@ -959,7 +978,9 @@ final class AgentXController: ObservableObject {
             }
             return
         }
-        guard let task = tasks[id], state.runs.first(where: { $0.id == id })?.status.terminal == false else { return }
+        guard let task = tasks[id], !run.status.terminal else { return }
+        do { try AgentXPilot.requireDesktopOwnership(run.appID, at: repository.root) }
+        catch { errorMessage = error.localizedDescription; return }
         task.cancel()
         var next = state
         if let index = next.runs.firstIndex(where: { $0.id == id }) {
@@ -980,7 +1001,8 @@ final class AgentXController: ObservableObject {
 
 extension AgentXController {
     func pilotReviewNotice(for instanceID: String) -> String? {
-        guard let pilot, pilot.pi?.instanceID == instanceID,
+        guard let appID = state.instances.first(where: { $0.id == instanceID })?.appID,
+              let pilot = pilot(for: appID), pilot.pi?.instanceID == instanceID,
               state.runs.contains(where: { $0.appID == pilot.appID && $0.instanceID == instanceID && $0.requiresProcessReview == true }) else {
             return nil
         }
@@ -1154,16 +1176,17 @@ extension AgentXController {
         case let .provider(id, old, expected):
             guard let i = next.providers.firstIndex(where: { $0.id == id }), next.providers[i].enabled == expected else { throw conflict() }
             next.providers[i].enabled = old
-        case let .pilotReadFlags(versions):
+        case let .pilotReadFlags(appID, versions):
+            guard let pilot = pilot(for: appID) else { throw AgentXError.unavailable }
             var remaining = versions
             defer {
                 if undoOperation?.id == operation.id {
                     if remaining.isEmpty { undoTask?.cancel(); undoOperation = nil; undoNotice = nil }
-                    else { undoOperation?.payload = .pilotReadFlags(remaining) }
+                    else { undoOperation?.payload = .pilotReadFlags(appID: appID, revisions: remaining) }
                 }
             }
             for (id, version) in versions {
-                _ = try await setPilotRead(false, id: id, revision: version)
+                _ = try await setPilotRead(false, id: id, revision: version, pilot: pilot)
                 remaining[id] = nil
             }
             return

@@ -1,34 +1,126 @@
 import Foundation
+import Darwin
 
 /// Persistent ownership is independent of the short-lived endpoint and its token.
-struct AgentXPilot: Decodable {
-    struct PiBinding: Decodable {
+struct AgentXPilot: Sendable {
+    struct PiBinding: Sendable {
         let instanceID: String
         let providerID: String
         let model: String
+    }
+
+    struct Configuration {
+        struct Application {
+            let appID: String
+            let pi: PiBinding?
+        }
+
+        fileprivate(set) var root: String
+        fileprivate let isVersioned: Bool
+        let apps: [Application]
+        var appIDs: Set<String> { Set(apps.map(\.appID)) }
+        var clients: [AgentXPilot] { apps.map(client) }
+
+        init(data: Data) throws {
+            guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let root = manifest["root"] as? String, root.hasPrefix("/"), !root.contains("\0") else {
+                throw AgentXError.corrupt
+            }
+            self.root = root
+            let versioned = manifest["version"] != nil || manifest["apps"] != nil
+            isVersioned = versioned
+            let entries: [[String: Any]]
+            if versioned {
+                guard Set(manifest.keys) == ["root", "version", "apps"],
+                      let version = manifest["version"] as? NSNumber, version.intValue == 2,
+                      !["f", "d"].contains(String(cString: version.objCType)),
+                      let applications = manifest["apps"] as? [[String: Any]], !applications.isEmpty else {
+                    throw AgentXError.corrupt
+                }
+                entries = applications
+            } else {
+                entries = [manifest]
+            }
+            let parsed = try entries.map { try Self.parseApplication($0, strict: versioned) }
+            guard Set(parsed.map(\.appID)).count == parsed.count else { throw AgentXError.corrupt }
+            apps = parsed
+        }
+
+        private static func parseApplication(_ entry: [String: Any], strict: Bool) throws -> Application {
+            guard !strict || Set(entry.keys).isSubset(of: ["appID", "pi"]),
+                  let appID = entry["appID"] as? String else { throw AgentXError.corrupt }
+            try AgentXPackageFiles.validateID(appID)
+            guard !["blackcat", "workbench"].contains(appID) else { throw AgentXError.unsafePath }
+            guard let rawBinding = entry["pi"] else { return Application(appID: appID, pi: nil) }
+            if !strict && rawBinding is NSNull { return Application(appID: appID, pi: nil) }
+            guard let binding = rawBinding as? [String: Any],
+                  let instanceID = binding["instanceID"] as? String,
+                  let providerID = binding["providerID"] as? String,
+                  let model = binding["model"] as? String else { throw AgentXError.corrupt }
+            if strict {
+                guard Set(binding.keys) == ["instanceID", "providerID", "model", "baseURL", "systemPrompt"],
+                      binding["baseURL"] is String,
+                      let prompt = binding["systemPrompt"] as? String, prompt.utf8.count <= 100_000,
+                      instanceID.wholeMatch(of: /[A-Za-z0-9_-]{1,100}/) != nil,
+                      providerID.wholeMatch(of: /[A-Za-z0-9_-]{1,100}/) != nil else {
+                    throw AgentXError.corrupt
+                }
+            }
+            return Application(appID: appID, pi: PiBinding(instanceID: instanceID, providerID: providerID, model: model))
+        }
+
+        func client(for appID: String) -> AgentXPilot? {
+            apps.first(where: { $0.appID == appID }).map(client)
+        }
+
+        private func client(_ app: Application) -> AgentXPilot {
+            AgentXPilot(appID: app.appID, root: root, pi: app.pi)
+        }
     }
 
     let appID: String
     let root: String
     let pi: PiBinding?
 
-    static func configured(at directory: URL) throws -> Self? {
+    static func readMarker(at directory: URL) throws -> Configuration? {
         let marker = try AgentXPackageFiles.safeURL(".agentxd-pilot.json", root: directory)
-        let bytes: Data
-        do { bytes = try Data(contentsOf: marker) }
-        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
-        let pilot = try JSONDecoder().decode(Self.self, from: bytes)
-        try AgentXPackageFiles.validateID(pilot.appID)
-        let declared = URL(fileURLWithPath: pilot.root).resolvingSymlinksInPath().standardizedFileURL
-        guard !["blackcat", "workbench"].contains(pilot.appID), pilot.root.hasPrefix("/"),
-              declared.path == directory.resolvingSymlinksInPath().standardizedFileURL.path else {
-            throw AgentXError.invalid("试点归属与数据目录不匹配，请检查隔离副本。")
+        let limit = 2 * 1024 * 1024
+        let descriptor = open(marker.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return nil }
+            throw AgentXError.unsafePath
         }
-        return Self(appID: pilot.appID, root: directory.path, pi: pilot.pi)
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_uid == getuid(), info.st_nlink == 1, info.st_size >= 0, info.st_size <= limit else {
+            throw AgentXError.unsafePath
+        }
+        let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        guard let bytes = try file.read(upToCount: limit + 1), bytes.count == info.st_size else {
+            throw AgentXError.corrupt
+        }
+        return try Configuration(data: bytes)
     }
 
-    static func requireDesktopOwnership(_ app: String, at root: URL) throws {
-        if try configured(at: root)?.appID == app {
+    static func configured(at directory: URL) throws -> Configuration? {
+        guard var configuration = try readMarker(at: directory) else { return nil }
+        let matchesRoot: Bool
+        if configuration.isVersioned {
+            guard let physical = realpath(directory.path, nil) else { throw AgentXError.unsafePath }
+            defer { free(physical) }
+            matchesRoot = configuration.root == String(cString: physical)
+        } else {
+            let declared = URL(fileURLWithPath: configuration.root).resolvingSymlinksInPath().standardizedFileURL.path
+            matchesRoot = declared == directory.resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        guard matchesRoot else { throw AgentXError.invalid("试点归属与数据目录不匹配，请检查隔离副本。") }
+        configuration.root = directory.path
+        return configuration
+    }
+
+    static func requireDesktopOwnership(_ appID: String, at root: URL) throws {
+        if try configured(at: root)?.appIDs.contains(appID) == true {
             throw AgentXError.invalid("试点应用的运行由 agentxd 管理，暂不支持此操作。")
         }
     }

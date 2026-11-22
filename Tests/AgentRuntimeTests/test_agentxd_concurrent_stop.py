@@ -40,8 +40,7 @@ class TestConcurrentStop(unittest.TestCase):
         root = Path(fixture.temp.name).resolve()
         token = secrets.token_urlsafe(32)
         with ThreadingHTTPServer(("127.0.0.1", 0), ConcurrentHandler) as server:
-            server.store = fixture.store
-            server.pilot = service
+            server.pilots = {fixture.store.app: service}
             server.authorization = ("Bearer " + token).encode()
             write_json(root / ".agentxd-endpoint.json", {"port": server.server_port, "token": token})
             thread = threading.Thread(target=server.serve_forever)

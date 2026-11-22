@@ -351,7 +351,7 @@ struct AgentXLocalAppTransaction: Codable {
             guard !journal.additions.contains(removing) else { throw AgentXError.corrupt }
         }
         let targets = Set(journal.additions + (journal.removing.map { [$0] } ?? []))
-        if let pilot = try AgentXPilot.configured(at: root), targets.contains(where: { $0.lowercased() == "apps/" + pilot.appID }) {
+        if let pilot = try AgentXPilot.configured(at: root), !targets.isDisjoint(with: pilot.appIDs.map { "apps/" + $0 }) {
             throw AgentXError.invalid("应用包恢复涉及试点目录，请先离线处理副本。")
         }
         guard Set(journal.ownership.keys) == targets else { throw AgentXError.corrupt }

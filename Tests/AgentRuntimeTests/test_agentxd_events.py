@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 
 from test_agentxd_runs import RunStore
 from agentxd import Handler
@@ -26,9 +27,8 @@ class TestRunEvents(unittest.TestCase):
 
     def subscription(self, after):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        server.store = self.store
         server.authorization = b"Bearer test"
-        server.pilot = type("Lifecycle", (), {"closing": False})()
+        server.pilots = {"pilot": SimpleNamespace(store=self.store, closing=False)}
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         self.addCleanup(server.server_close)

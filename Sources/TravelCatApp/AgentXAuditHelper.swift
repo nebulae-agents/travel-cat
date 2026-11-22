@@ -19,12 +19,9 @@ final class AgentXAuditHelper {
         guard String(cString: resolved) == path else { throw Self.invalid }
         try Self.privateDirectory(root)
         try AgentXPackageFiles.validateID(appID)
-        let marker = root.appendingPathComponent(".agentxd-pilot.json")
+        guard let pilot = try AgentXPilot.readMarker(at: root),
+              pilot.root == path, pilot.appIDs.contains(appID) else { throw Self.invalid }
         var info = stat()
-        guard lstat(marker.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
-              info.st_uid == getuid(), info.st_size <= 65536 else { throw Self.invalid }
-        let pilot = try JSONDecoder().decode(AgentXPilot.self, from: Data(contentsOf: marker))
-        guard pilot.root == path, pilot.appID == appID, !["blackcat", "workbench"].contains(appID) else { throw Self.invalid }
         let directory = try AgentXRunAudit.directory(root: root, appID: appID)
         for url in [root.appendingPathComponent("audit"), directory] {
             if lstat(url.path, &info) == 0 { try Self.privateDirectory(url) }
@@ -55,12 +52,8 @@ final class AgentXAuditHelper {
             var info = stat()
             guard lstat(url.path, &info) == 0, UInt64(info.st_dev) == device, UInt64(info.st_ino) == inode else { throw Self.invalid }
         }
-        let marker = URL(fileURLWithPath: rootPath).appendingPathComponent(".agentxd-pilot.json")
-        var info = stat()
-        guard lstat(marker.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
-              info.st_uid == getuid(), info.st_size <= 65536 else { throw Self.invalid }
-        let pilot = try JSONDecoder().decode(AgentXPilot.self, from: Data(contentsOf: marker))
-        guard pilot.root == rootPath, pilot.appID == appID else { throw Self.invalid }
+        guard let pilot = try AgentXPilot.readMarker(at: URL(fileURLWithPath: rootPath)),
+              pilot.root == rootPath, pilot.appIDs.contains(appID) else { throw Self.invalid }
         guard input.count <= Self.maximumInput,
               let request = try JSONSerialization.jsonObject(with: input) as? [String: Any], let op = request["op"] as? String else { throw Self.invalid }
         switch op {

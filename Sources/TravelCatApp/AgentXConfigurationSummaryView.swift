@@ -5,7 +5,7 @@ import SwiftUI
     let instance: AgentXInstance
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            if let pilot = controller.pilot, pilot.appID == instance.appID {
+            if let pilot = controller.pilot(for: instance.appID) {
                 if let binding = pilot.pi, binding.instanceID == instance.id {
                     Text("Pi 服务绑定 · " + binding.providerID + " / " + binding.model).font(.caption)
                 } else {
