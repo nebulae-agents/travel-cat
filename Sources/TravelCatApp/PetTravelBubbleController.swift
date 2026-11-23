@@ -266,6 +266,7 @@ final class PetTravelBubbleController: NSWindowController {
     private final class Session {
         let delivery: PetTravelPromptDelivery
         let isTestJourney: Bool
+        let dismissAfterDelay: Bool
         let onTap: () -> Void
         let onRouteSelected: (PetTravelRoute) -> Void
         let onAvailableForReplacement: () -> Void
@@ -276,12 +277,14 @@ final class PetTravelBubbleController: NSWindowController {
         init(
             delivery: PetTravelPromptDelivery,
             isTestJourney: Bool,
+            dismissAfterDelay: Bool,
             onTap: @escaping () -> Void,
             onRouteSelected: @escaping (PetTravelRoute) -> Void,
             onTestRequested: (() -> Void)?,
             onAvailableForReplacement: @escaping () -> Void
         ) {
             self.delivery = delivery
+            self.dismissAfterDelay = dismissAfterDelay
             self.isTestJourney = isTestJourney
             self.onTap = onTap
             self.onRouteSelected = onRouteSelected
@@ -364,6 +367,7 @@ final class PetTravelBubbleController: NSWindowController {
     func show(
         delivery: PetTravelPromptDelivery,
         isTestJourney: Bool = false,
+        dismissAfterDelay: Bool = false,
         onTap: @escaping () -> Void,
         onRouteSelected: ((PetTravelRoute) -> Void)? = nil,
         onTestRequested: (() -> Void)? = nil,
@@ -383,6 +387,7 @@ final class PetTravelBubbleController: NSWindowController {
         let newSession = Session(
             delivery: delivery,
             isTestJourney: isTestJourney,
+            dismissAfterDelay: dismissAfterDelay,
             onTap: onTap,
             onRouteSelected: onRouteSelected ?? { _ in onTap() },
             onTestRequested: onTestRequested,
@@ -520,7 +525,11 @@ final class PetTravelBubbleController: NSWindowController {
         let generation = timerGeneration
         collapseToken = scheduler.after(expectedSession.isTestJourney ? 2 : Self.collapseDelay) { [weak self, weak expectedSession] in
             guard let self, let expectedSession, self.timerGeneration == generation else { return }
-            self.collapseToPaw(expectedSession)
+            if expectedSession.dismissAfterDelay {
+                self.dismissAndRelease(expectedSession)
+            } else {
+                self.collapseToPaw(expectedSession)
+            }
         }
     }
 
@@ -579,7 +588,7 @@ final class PetTravelBubbleController: NSWindowController {
         guard let selection = locate(),
               let pawPlacement = placement(for: selection, companionSize: Self.pawSize)
         else {
-            failClosed(expectedSession)
+            dismissAndRelease(expectedSession)
             return
         }
         followToken?.cancel()
@@ -774,7 +783,7 @@ final class PetTravelBubbleController: NSWindowController {
                 companionSize: currentCompanionSize
               )
         else {
-            failClosed(expectedSession)
+            dismissAndRelease(expectedSession)
             return
         }
 
@@ -788,7 +797,7 @@ final class PetTravelBubbleController: NSWindowController {
         startFollowing(expectedSession)
     }
 
-    private func failClosed(_ expectedSession: Session) {
+    private func dismissAndRelease(_ expectedSession: Session) {
         guard session === expectedSession else { return }
         let shouldSignalReplacement = !expectedSession.replacementSignaled
         expectedSession.replacementSignaled = true
