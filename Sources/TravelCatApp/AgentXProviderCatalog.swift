@@ -162,6 +162,7 @@ struct AgentXProviderCatalog: Sendable {
     init(transport: @escaping Transport) { self.transport = transport }
     init(session: URLSession? = nil) {
         let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
         config.httpShouldSetCookies = false
         config.urlCredentialStorage = nil
         config.urlCache = nil

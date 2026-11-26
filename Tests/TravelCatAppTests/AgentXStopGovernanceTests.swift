@@ -123,6 +123,7 @@ import XCTest
         state.providers = [.init(id: "p", name: "P", baseURL: "http://localhost:1234", models: ["m"])]
         state.definitions = [.init(id: "d", name: "D", prompt: "Write")]
         state.instances = ["one", "two"].map { .init(id: $0, name: $0, appID: "a", definitionID: "d", providerID: "p", model: "m") }
+        for index in state.apps.indices { state.apps[index].manifest = AgentXApplication.textPermissions }
         try repo.save(state)
         return AgentXController(repository: repo, credentials: AgentXTestCredentials(), respond: respond, autoRefreshCatalogs: false)
     }

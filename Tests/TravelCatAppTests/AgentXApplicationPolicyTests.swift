@@ -35,9 +35,32 @@ final class AgentXApplicationPolicyTests: XCTestCase {
         state.providers = [.init(id: "local", name: "Local", baseURL: "http://localhost:1234", models: ["model"])]
         state.definitions = [.init(id: "writer", name: "Writer", prompt: "Write.")]
         state.instances = ["a", "b"].map { .init(id: $0, name: $0, appID: $0, definitionID: "writer", providerID: "local", model: "model") }
+        for index in state.apps.indices { state.apps[index].manifest = AgentXApplication.textPermissions }
         try repo.save(state)
         return repo
     }
+    func testMissingNetworkPermissionBlocksNativeBeforeResponderAndPersistsEvent() async throws {
+        let repo = try configured()
+        var state = try repo.load()
+        let index = try XCTUnwrap(state.apps.firstIndex { $0.id == "a" })
+        state.apps[index].manifest = nil
+        // Model a genuinely old on-disk manifest. Repository.save deliberately
+        // preserves absent optional fields, so assigning nil is not revocation.
+        try "id: a\nname: A\nkind: chat\nenabled: true\n".write(to: repo.root.appendingPathComponent("apps/a/app.yaml"), atomically: true, encoding: .utf8)
+        var calls = 0
+        let controller = AgentXController(repository: repo, credentials: AgentXTestCredentials(), respond: { _, _, _, _ in
+            calls += 1; return "must not run"
+        }, autoRefreshCatalogs: false)
+        controller.send("blocked", instanceID: "a")
+        await controller.waitForRuns()
+        XCTAssertEqual(calls, 0)
+        XCTAssertTrue(controller.state.runs.isEmpty)
+        XCTAssertNotNil(controller.errorMessage)
+        let policy = try AgentXExecutionPolicy(root: repo.root, application: state.apps[index], provider: XCTUnwrap(state.providers.first))
+        XCTAssertEqual(try policy.events().first?["operation"] as? String, "network.connect")
+        XCTAssertNil(try repo.load().apps.first(where: { $0.id == "a" })?.manifest)
+    }
+
     func testStopWaitsForIgnoringResponderAndOnlyCancelsOwnApp() async throws {
         let repo = try configured()
         var continuations: [String: CheckedContinuation<String, Never>] = [:]

@@ -24,9 +24,11 @@ struct AgentXPiRuntime: AgentXRunAdapter {
     private let runnerURL: URL?
     private let timeout: TimeInterval
     private let ledgerRoot: URL?
+    private let injectedSandbox: AgentXPiSandbox?
 
     init(ledgerRoot: URL? = nil) {
         self.ledgerRoot = ledgerRoot
+        injectedSandbox = nil
         let bundle = Bundle.main.bundleURL
         if bundle.pathExtension == "app" {
             nodeURL = bundle.appendingPathComponent("Contents/Helpers/PiAgent/node")
@@ -35,8 +37,9 @@ struct AgentXPiRuntime: AgentXRunAdapter {
         timeout = 65
     }
     /// Explicit injection supports local process fixtures; production uses the bundled initializer.
-    init(nodeURL: URL, runnerURL: URL, timeout: TimeInterval = 65, ledgerRoot: URL? = nil) {
+    init(nodeURL: URL, runnerURL: URL, timeout: TimeInterval = 65, ledgerRoot: URL? = nil, sandbox: AgentXPiSandbox? = nil) {
         self.ledgerRoot = ledgerRoot
+        injectedSandbox = sandbox
         self.nodeURL = nodeURL; self.runnerURL = runnerURL
         self.timeout = timeout.isFinite ? max(0.01, min(timeout, 300)) : 65
     }
@@ -97,7 +100,7 @@ struct AgentXPiRuntime: AgentXRunAdapter {
               let endpoint = try? JSONDecoder().decode(Endpoint.self, from: payload), endpoint.secret.isEmpty,
               let url = URLComponents(string: endpoint.baseURL), url.scheme?.lowercased() == "http",
               ["127.0.0.1", "[::1]", "::1"].contains(url.host ?? ""), url.user == nil, url.password == nil,
-              url.query == nil, url.fragment == nil else { throw AgentXPiRuntimeError.invalidRequest }
+              url.query == nil, url.fragment == nil else { try rejectScopedEndpoint() }
         return try await run(payload: payload, secret: secret, progress: onProgress)
     }
 
@@ -115,6 +118,13 @@ struct AgentXPiRuntime: AgentXRunAdapter {
         return (try? AgentXPiProcessLedger(root: ledgerRoot).confirmedExited(owner: owner, runID: runID)) == true
     }
 
+    private func rejectScopedEndpoint() throws -> Never {
+        if let sandbox = AgentXPermissionContext.sandbox ?? injectedSandbox {
+            try sandbox.policy.recordDenial("runtime.gateway", runID: AgentXPiExecutionContext.runID)
+        }
+        throw AgentXPiRuntimeError.invalidRequest
+    }
+
     private func run(payload: Data, secret: String?, progress: AgentXRunProgressHandler?) async throws -> String {
         try Task.checkCancellation()
         guard let nodeURL, let runnerURL,
@@ -125,11 +135,24 @@ struct AgentXPiRuntime: AgentXRunAdapter {
         if let limits = try? JSONDecoder().decode(GatewayLimits.self, from: payload) {
             guard progress != nil, limits.secret.isEmpty, (1...300).contains(limits.timeoutSeconds),
                   limits.gatewayToken.wholeMatch(of: /[a-f0-9-]{72}/) != nil,
-                  let url = URLComponents(string: limits.baseURL), url.scheme == "http", url.host == "127.0.0.1" else { throw AgentXPiRuntimeError.invalidRequest }
+                  let url = URLComponents(string: limits.baseURL), url.scheme == "http", url.host == "127.0.0.1" else { try rejectScopedEndpoint() }
             executionTimeout = Double(limits.timeoutSeconds) + 5
         }
+        guard let sandbox = AgentXPermissionContext.sandbox ?? injectedSandbox else {
+            throw AgentXPermissionDenied(operation: "runtime.unscoped")
+        }
+        if let trustedURL = sandbox.gatewayURL {
+            struct Endpoint: Decodable { let baseURL: String; let secret: String }
+            guard let endpoint = try? JSONDecoder().decode(Endpoint.self, from: payload),
+                  endpoint.baseURL == trustedURL, endpoint.secret.isEmpty, (secret ?? "").isEmpty else {
+                try sandbox.policy.deny("runtime.gateway", runID: AgentXPiExecutionContext.runID)
+            }
+        }
+        let profile: String
+        do { profile = try sandbox.profile(node: nodeURL, runner: runnerURL) }
+        catch { try sandbox.policy.deny("runtime.filesystem", runID: AgentXPiExecutionContext.runID) }
         let cancellation = PiCancellation()
-        let configuration = PiChildProcess(nodeURL: nodeURL, runnerURL: runnerURL, payload: payload, timeout: executionTimeout, ledgerRoot: ledgerRoot, runID: AgentXPiExecutionContext.runID, progress: progress)
+        let configuration = PiChildProcess(nodeURL: nodeURL, runnerURL: runnerURL, sandboxProfile: profile, payload: payload, timeout: executionTimeout, ledgerRoot: ledgerRoot, runID: AgentXPiExecutionContext.runID, progress: progress)
         let output: Data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -237,7 +260,7 @@ private struct PiProgressFrames {
 private struct PiChildProcess: Sendable {
     static let maximumRequest = 1_048_576
     private static let maximumOutput = 131_072
-    var nodeURL: URL; var runnerURL: URL; var payload: Data; var timeout: TimeInterval
+    var nodeURL: URL; var runnerURL: URL; var sandboxProfile: String; var payload: Data; var timeout: TimeInterval
     var ledgerRoot: URL?; var runID: String?
     var progress: AgentXRunProgressHandler?
 
@@ -253,8 +276,8 @@ private struct PiChildProcess: Sendable {
         var didLaunch = false
         var didReap = false
         let input = Pipe(), output = Pipe(), diagnostic = Pipe()
-        process.executableURL = nodeURL
-        process.arguments = progress == nil ? [runnerURL.path] : [runnerURL.path, "--stream-loopback"]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+        process.arguments = ["-p", sandboxProfile, nodeURL.path, runnerURL.path] + (progress == nil ? [] : ["--stream-loopback"])
         process.currentDirectoryURL = runnerURL.deletingLastPathComponent()
         process.environment = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "TMPDIR": "/private/tmp",
                                "AGENTX_PI_OWNER_PID": String(getpid())]

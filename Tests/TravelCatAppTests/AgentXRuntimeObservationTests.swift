@@ -48,7 +48,7 @@ final class AgentXRuntimeObservationTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("runtime-count-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         var state = AgentXState()
-        state.apps.append(.init(id: "chat", name: "Chat", kind: .chat))
+        state.apps.append(.textApplication(id: "chat", name: "Chat", kind: .chat))
         state.providers = [.init(id: "p", name: "Provider", baseURL: "https://example.com/v1", models: ["m"])]
         state.definitions = [.init(id: "d", name: "Definition", prompt: "test")]
         state.instances = ["blackcat", "chat"].map {

@@ -5,15 +5,46 @@ import XCTest
 final class AgentXModelGatewayTests: XCTestCase {
     private let secret = "fixture-upstream-private"
     private func gateway(now: @escaping () -> Date = { Date() }, credential: @escaping () throws -> String? = { "fixture-upstream-private" }) throws -> AgentXModelGateway {
-        try AgentXModelGateway(appID: "alpha", runID: "run-1",
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("gateway-policy-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        var app = AgentXApplication(id: "alpha", name: "Alpha", kind: .chat)
+        app.manifest = ["permissions": .object(["network": .array([.string("configured-provider")])])]
+        let provider = AgentXProvider(id: "p", name: "P", baseURL: "http://127.0.0.1:12345/v1", models: ["m"])
+        let permission = try AgentXExecutionPolicy(root: root, application: app, provider: provider)
+        return try AgentXModelGateway(appID: "alpha", runID: "run-1",
             provider: .init(id: "p", name: "P", baseURL: "http://127.0.0.1:12345/v1", models: ["m"]),
             binding: .init(providerID: "p", model: "m", maxOutputTokens: 23, maxRequestBytes: 1024, timeoutSeconds: 2),
-            credential: credential, now: now)
+            permission: permission, credential: credential, now: now)
     }
     private func body(model: String = "m", extra: [String: Any] = [:]) throws -> Data {
         try JSONSerialization.data(withJSONObject: ["model": model, "messages": [["role": "user", "content": "hello"]],
             "stream": true, "max_tokens": 1024].merging(extra) { _, new in new })
     }
+    func testNetworkDenialIsDurableBeforeCredentialAndBudgetAccess() throws {
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("gateway-denial-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = AgentXProvider(id: "p", name: "P", baseURL: "http://127.0.0.1:12345/v1", models: ["m"])
+        let app = AgentXApplication(id: "alpha", name: "Alpha", kind: .chat)
+        let permission = try AgentXExecutionPolicy(root: root, application: app, provider: provider)
+        var credentials = 0, reservations = 0
+        let gateway = try AgentXModelGateway(appID: "alpha", runID: "run-1", provider: provider,
+            binding: .init(providerID: "p", model: "m", maxOutputTokens: 23, maxRequestBytes: 1024, timeoutSeconds: 2),
+            permission: permission, credential: { credentials += 1; return "never-read" }, beforeSubmit: { reservations += 1 })
+        defer { gateway.close() }
+        XCTAssertThrowsError(try gateway.upstreamRequest(path: gateway.path, token: gateway.token, body: body())) {
+            XCTAssertTrue($0 is AgentXPermissionDenied)
+        }
+        XCTAssertEqual(credentials, 0); XCTAssertEqual(reservations, 0)
+        let reloaded = try AgentXExecutionPolicy(root: root, application: app, provider: provider)
+        let events = try reloaded.events()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0]["kind"] as? String, "permission.denied")
+        XCTAssertEqual(events[0]["source"] as? String, "host_policy")
+        XCTAssertEqual(events[0]["runID"] as? String, "run-1")
+    }
+
     func testCredentialIsResolvedOnlyForOneValidBoundSubmission() throws {
         var reads = 0
         let gateway = try gateway(credential: { reads += 1; return self.secret })

@@ -20,6 +20,7 @@ final class AgentXDesktopAppRuns {
     private struct GatewayPlan: Equatable {
         let binding: AgentXGatewayConfiguration.Binding
         let provider: AgentXProvider
+        let permission: AgentXExecutionPolicy
         let credentialProfile: String?
     }
     private let canCreate: (String, AgentXPilot.PiBinding) -> Bool
@@ -353,6 +354,11 @@ final class AgentXDesktopAppRuns {
         let requiresGateway = try budget?.requiresGateway() ?? false
         if lstat(file.path, &info) == -1, errno == ENOENT {
             guard !requiresGateway else { throw AgentXBudgetFailure.unavailable }
+            if runtime is AgentXPiRuntime, let app = configuredApp() {
+                let provider = AgentXProvider(id: pilot.providerID, name: pilot.providerID, baseURL: pilot.baseURL, models: [pilot.model])
+                let permission = try AgentXExecutionPolicy(root: root, application: app, provider: provider)
+                try permission.deny("runtime.gateway", runID: nil)
+            }
             return nil
         }
         guard journal != nil, let state = gatewayState() else { throw AgentXError.unavailable }
@@ -361,7 +367,9 @@ final class AgentXDesktopAppRuns {
         guard binding.providerID == pilot.providerID, binding.model == pilot.model,
               let provider = state.providers.first(where: { $0.id == binding.providerID }), provider.baseURL == pilot.baseURL,
               let member = state.instances.first(where: { $0.appID == appID && $0.id == pilot.instanceID }) else { throw AgentXError.unavailable }
-        return GatewayPlan(binding: binding, provider: provider, credentialProfile: member.credentialProfile ?? provider.credentialProfile)
+        guard let app = configuredApp() else { throw AgentXError.unavailable }
+        let permission = try AgentXExecutionPolicy(root: root, application: app, provider: provider)
+        return GatewayPlan(binding: binding, provider: provider, permission: permission, credentialProfile: member.credentialProfile ?? provider.credentialProfile)
     }
 
     private func gatewaySecret(_ plan: GatewayPlan, pilot: AgentXPilot.PiBinding) throws -> String? {
@@ -557,9 +565,10 @@ final class AgentXDesktopAppRuns {
         var run = initial
         do {
             var payload = payload
+            var sandbox: AgentXPiSandbox?
             if let plan, let pilot = binding {
                 let proxy = try AgentXModelGateway(appID: appID, runID: initial.id, provider: plan.provider,
-                    binding: plan.binding, credential: { try self.gatewaySecret(plan, pilot: pilot) },
+                    binding: plan.binding, permission: plan.permission, credential: { try self.gatewaySecret(plan, pilot: pilot) },
                     beforeSubmit: { try self.budget?.reserve(appID: self.appID, runID: initial.id, provider: plan.provider,
                                                            model: plan.binding.model, maxOutputTokens: plan.binding.maxOutputTokens) },
                     onUsage: { input, output in try self.budget?.observe(appID: self.appID, runID: initial.id, input: input, output: output) },
@@ -569,6 +578,7 @@ final class AgentXDesktopAppRuns {
                     }, onClose: { try self.budget?.abandon(appID: self.appID, runID: initial.id) })
                 gateway = proxy
                 let baseURL = try await proxy.start()
+                sandbox = try plan.permission.sandbox(gatewayURL: baseURL, runID: initial.id)
                 guard var request = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else { throw AgentXError.corrupt }
                 request["baseURL"] = baseURL
                 request["gatewayToken"] = proxy.token
@@ -585,7 +595,9 @@ final class AgentXDesktopAppRuns {
             runtimeInvoked = true
             let proxy = gateway
             run.response = try await withTaskCancellationHandler {
-                try await runtime.execute(runID: initial.id, payload: payload, progress: onProgress)
+                try await AgentXPermissionContext.$sandbox.withValue(sandbox) {
+                    try await runtime.execute(runID: initial.id, payload: payload, progress: onProgress)
+                }
             } onCancel: { Task { @MainActor in proxy?.close() } }
             run.status = .completed
         } catch {

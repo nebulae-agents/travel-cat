@@ -90,6 +90,17 @@ struct AgentXApplication: Codable, Identifiable, Equatable {
     var modules: [String]? = nil
     var version: AgentXManifestValue? = nil
     var manifest: [String: AgentXManifestValue]? = nil
+    /// Explicit defaults for newly created, host-owned text applications only.
+    /// Existing/imported applications without declarations remain deny-default.
+    static let textPermissions: [String: AgentXManifestValue] = ["permissions": .object([
+        "files": .array([.string("self")]), "network": .array([.string("configured-provider")]),
+        "secrets": .array([]), "shell": .bool(false), "schedule": .bool(false)
+    ])]
+    static func textApplication(id: String, name: String, kind: AgentXAppKind) -> Self {
+        var app = Self(id: id, name: name, kind: kind)
+        app.manifest = textPermissions
+        return app
+    }
     var manifestAuthor: String? { manifest?["author"]?.string }
     var manifestSource: String? { manifest?["source"]?.string }
     var requiredRuntime: String? { manifest?["requires"]?.object?["runtime"]?.string ?? runtime }
@@ -268,7 +279,7 @@ struct AgentXState: Codable, Equatable {
     var frontSkin: AgentXFrontSkin? = nil
     var currentAppID: String?
     var singleAppID: String?
-    var apps: [AgentXApplication] = [.init(id: "blackcat", name: "BlackCat", kind: .blackcat)]
+    var apps: [AgentXApplication] = [.textApplication(id: "blackcat", name: "BlackCat", kind: .blackcat)]
     var providers: [AgentXProvider] = []
     var credentialProfiles: [AgentXCredentialProfile]?
     var definitions: [AgentXDefinition] = []

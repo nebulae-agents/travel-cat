@@ -9,13 +9,14 @@ final class AgentXTextRuntimeRoutingTests: XCTestCase {
     private func controller(runtime: String?, endpoint: String, requires: String? = nil,
                             serviceProtocol: AgentXServiceProtocol = .openAICompatible,
                             key: String? = "fixture-key", nativeReply: String = "native reply") throws -> AgentXController {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("AgentXTextRouting-\(UUID())")
+        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("AgentXTextRouting-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let runner = root.appendingPathComponent("runner.sh")
         try """
         /bin/cat >/dev/null
-        printf '%s' '{"version":1,"ok":true,"text":"pi reply"}'
+        if [ "$1" = "--stream-loopback" ]; then printf '%s\\n' '{"event":"text","text":"pi reply"}'; fi
+        printf '%s\\n' '{"version":1,"ok":true,"text":"pi reply"}'
         """.write(to: runner, atomically: true, encoding: .utf8)
         let repository = AgentXRepository(root: root.appendingPathComponent("agentx"))
         var state = AgentXState()
@@ -25,6 +26,11 @@ final class AgentXTextRuntimeRoutingTests: XCTestCase {
         state.definitions = [.init(id: "role", name: "Role", prompt: "Be brief")]
         state.instances = [.init(id: "member", name: "Member", appID: "blackcat", definitionID: "role", providerID: "p", model: "m")]
         try repository.save(state)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: repository.root.path)
+        let usesPi = runtime == "pi-agent-core" || ((runtime == nil || runtime == "host-text") && endpoint == routerURL)
+        if usesPi {
+            try JSONSerialization.data(withJSONObject: ["version": 1, "applications": ["blackcat": ["provider": "p", "model": "m", "max_output_tokens": 23, "max_request_bytes": 1048576, "timeout_seconds": 3]]]).write(to: repository.root.appendingPathComponent("manager/gateway.yaml"))
+        }
         let credentials = AgentXTestCredentials()
         try credentials.save(key, id: state.providers[0].credentialID)
         let catalog = AgentXProviderCatalog { request in
@@ -56,14 +62,14 @@ final class AgentXTextRuntimeRoutingTests: XCTestCase {
             await controller.waitForRuns()
             let runs = try controller.repository.load().runs
             let reply = expected == .pi ? "pi reply" : "native reply"
-            XCTAssertEqual(runs.map(\.status), [.completed, .completed])
+            XCTAssertEqual(runs.map(\.status), [.completed, .completed], controller.errorMessage ?? "no controller error")
             XCTAssertEqual(runs.map(\.response), [reply, reply])
             XCTAssertEqual(runs.map(\.runtimeCore), [expected.rawValue, expected.rawValue])
             XCTAssertEqual(runs.last?.workflowSteps?.first?.runtimeCore, expected.rawValue)
         }
     }
 
-    func testLegacyWorkflowRecordsEachCoreWhenMembersUseDifferentProviders() async throws {
+    func testLegacyWorkflowWithUnconfinedPiMemberIsRejectedBeforeAnyStep() async throws {
         let controller = try controller(runtime: "host-text", endpoint: localURL)
         try controller.addProvider(name: "Router", address: routerURL, models: "m", secret: "fixture-key")
         let router = try XCTUnwrap(controller.state.providers.first { $0.name == "Router" })
@@ -77,11 +83,11 @@ final class AgentXTextRuntimeRoutingTests: XCTestCase {
 
         controller.startWorkflow("Hello", appID: "blackcat")
         await controller.waitForRuns()
-        let run = try XCTUnwrap(controller.repository.load().runs.last)
-        XCTAssertEqual(run.status, .completed)
-        XCTAssertNil(run.runtimeCore)
-        XCTAssertEqual(run.workflowSteps?.map(\.runtimeCore), ["native-http", "pi-agent-core"])
-        XCTAssertEqual(run.workflowSteps?.map(\.output), ["native reply", "pi reply"])
+        XCTAssertTrue(try controller.repository.load().runs.isEmpty)
+        XCTAssertNotNil(controller.errorMessage)
+        let app = try XCTUnwrap(controller.state.apps.first)
+        let permission = try AgentXExecutionPolicy(root: controller.repository.root, application: app, provider: router)
+        XCTAssertEqual(try permission.events().last?["operation"] as? String, "runtime.gateway")
     }
 
     func testUnknownRuntimeConflictAndUnsupportedPiProtocolRejectBothEntries() async throws {
