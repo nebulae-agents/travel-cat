@@ -150,8 +150,8 @@ struct AgentXAppStudioView: View {
                 }
             }
             AgentXCard {
-                Label("预算与限额尚未执行", systemImage: "info.circle").font(.headline)
-                Text("当前页面不提供可强制执行的费用或调用上限。模型覆盖不会自动设置预算，也不改变平台模型服务配置。")
+                Label("此页尚不提供预算设置", systemImage: "info.circle").font(.headline)
+                Text("已启用的托管网关日预算由运行服务检查；其他运行入口不受此项预算约束。模型覆盖不会自动设置预算，也不改变平台模型服务配置。")
                     .foregroundStyle(AgentXTheme.muted)
             }
         }

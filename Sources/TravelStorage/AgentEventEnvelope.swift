@@ -608,19 +608,35 @@ struct JSONPreflightFailure: Error {
     let code: String
 }
 
-struct StrictJSONPreflight {
+package struct StrictJSONPreflight {
     static let maximumBytes = 1_048_576
     private static let maximumDepth = 64
 
     private let bytes: [UInt8]
     private var index = 0
 
+    // HTTP uses the original scalar bytes to distinguish integer revisions from 1.0 or 1e0.
+    // Its reference decoder takes the last duplicate key. Envelope validation rejects duplicates.
+    private var objectFields: [String: Data]?
+
+    package static func objectMembers(_ data: Data) throws -> [String: Data]? {
+        var parser = Self(bytes: Array(data), objectFields: [:])
+        try parser.skipWhitespace()
+        let isObject = parser.bytes.dropFirst(parser.index).first == 0x7B
+        try parser.parseDocument()
+        return isObject ? parser.objectFields : nil
+    }
+
     static func validate(_ data: Data) throws {
         var parser = Self(bytes: Array(data))
-        try parser.skipWhitespace()
-        try parser.parseValue(depth: 0)
-        try parser.skipWhitespace()
-        guard parser.index == parser.bytes.count else { throw JSONPreflightFailure(code: "invalidJSON") }
+        try parser.parseDocument()
+    }
+
+    private mutating func parseDocument() throws {
+        try skipWhitespace()
+        try parseValue(depth: 0)
+        try skipWhitespace()
+        guard index == bytes.count else { throw JSONPreflightFailure(code: "invalidJSON") }
     }
 
     private mutating func parseValue(depth: Int) throws {
@@ -647,14 +663,16 @@ struct StrictJSONPreflight {
             try skipWhitespace()
             guard index < bytes.count, bytes[index] == 0x22 else { throw JSONPreflightFailure(code: "invalidJSON") }
             let key = try parseString()
-            guard keys.insert(key).inserted else {
+            if objectFields == nil && !keys.insert(key).inserted {
                 let diagnostic = String(key.unicodeScalars.prefix(64))
                 throw JSONPreflightFailure(code: "duplicateKey:\(diagnostic)")
             }
             try skipWhitespace()
             guard consume(0x3A) else { throw JSONPreflightFailure(code: "invalidJSON") }
             try skipWhitespace()
+            let start = index
             try parseValue(depth: depth)
+            if depth == 1 && objectFields != nil { objectFields?[key] = Data(bytes[start..<index]) }
             try skipWhitespace()
             if consume(0x7D) { return }
             guard consume(0x2C) else { throw JSONPreflightFailure(code: "invalidJSON") }

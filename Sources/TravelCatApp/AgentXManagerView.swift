@@ -261,7 +261,7 @@ struct AgentXManagerView: View {
             AgentXCard {
                 Label("当前运行能力", systemImage: "checkmark.shield").font(.headline)
                 Text("原生文本对话 · 宿主模型连接 · 无工具执行权限").foregroundStyle(AgentXTheme.running)
-                Text("模型服务支持多协议文本请求；Agent 工作台保留受控 Codex / ACP 路径。设置可登记离线迁移、应用包升级、回滚和状态备份。其他框架与统一预算尚未接入。")
+                Text("模型服务支持多协议文本请求；Agent 工作台保留受控 Codex / ACP 路径。设置可登记离线迁移、应用包升级、回滚和状态备份。宿主模型网关已支持按配置价格执行日预算；其他框架仍有接入边界。")
                     .font(.caption).foregroundStyle(AgentXTheme.muted)
             }
         }
@@ -482,10 +482,11 @@ struct AgentXManagerView: View {
     }
     private var governance: some View {
         Group {
+            AgentXBudgetCard(controller: controller, editable: false)
             AgentXCard {
                 Label("运行与安全边界", systemImage: "checkmark.shield").font(.headline)
                 Text("当前活跃运行：\(controller.state.activeCount) · 未读结果：\(controller.state.unreadCount)")
-                Text("统一预算、费用统计及独立审批审计尚未接入。下方展示已保存的真实运行记录。")
+                Text("宿主模型网关按配置价格预留与结算预算，不代表供应商账单；独立审批审计尚未接入。下方展示真实运行记录。")
                     .foregroundStyle(AgentXTheme.muted)
                 softStopControl
                 Text("全平台应用停止状态").font(.headline)
@@ -498,6 +499,7 @@ struct AgentXManagerView: View {
     }
     private var settings: some View {
         Group {
+            AgentXBudgetCard(controller: controller, editable: true)
             if let storage = controller.hostStorage {
                 AgentXAppLifecycleView(apps: controller.state.apps,
                     coordinator: AgentXOfflineAppLifecycle(root: controller.repository.root, locator: storage.coordinator.locator),
@@ -607,6 +609,54 @@ private struct AgentXChatView: View {
                 }
                 if let reviewNotice { Text(reviewNotice).font(.caption).foregroundStyle(.orange) }
             }
+        }
+    }
+}
+
+@MainActor
+private struct AgentXBudgetCard: View {
+    @ObservedObject var controller: AgentXController
+    let editable: Bool
+    @State private var snapshot: AgentXGatewayBudget.Presentation?
+    @State private var limit = ""
+    @State private var error: String?
+    var body: some View {
+        AgentXCard {
+            HStack {
+                Label("宿主模型日预算", systemImage: "creditcard").font(.headline)
+                Spacer()
+                Button("刷新") { refresh() }
+            }
+            if let snapshot {
+                if snapshot.status == "disabled" {
+                    Text("未启用：请先配置币种、时区及经过核验的模型价格。本页不创建价格或启用预算。")
+                } else {
+                    Text(snapshot.status == "blocked" ? "已阻断新调用" : "已启用")
+                    Text("统计日期：\(snapshot.day)")
+                    Text("币种：\(snapshot.currency) · 时区：\(snapshot.timeZone)")
+                    Text("日限额：\(snapshot.limit) · 已结算：\(snapshot.spent)")
+                    Text("预留 / 待核对：\(snapshot.held) · 可用：\(snapshot.available)")
+                        .monospacedDigit()
+                    if editable, let source = snapshot.source {
+                        TextField("日限额（正十进制数，最多 12 位小数）", text: $limit)
+                        Button("保存日限额") {
+                            do { try controller.saveGatewayBudgetLimit(limit, expectedSource: source); refresh() }
+                            catch { self.error = "保存失败：配置可能已更改或不可用，请刷新后检查。" }
+                        }
+                    }
+                }
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+            Text("金额依据配置价格计算，不是供应商账单。预留及待核对金额继续占用预算，不按零费用处理。仅覆盖宿主模型网关。")
+                .font(.caption).foregroundStyle(AgentXTheme.muted)
+        }.onAppear { refresh() }
+    }
+    private func refresh() {
+        do {
+            let value = try controller.gatewayBudget.presentation()
+            snapshot = value; limit = value.limit; error = nil
+        } catch {
+            snapshot = nil; self.error = "预算不可用：配置或账本未通过校验，无法显示可信余额。"
         }
     }
 }
