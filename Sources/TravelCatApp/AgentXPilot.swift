@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import TravelStorage
 
 /// Persistent ownership is independent of the short-lived endpoint and its token.
 struct AgentXPilot: Sendable {
@@ -7,16 +8,20 @@ struct AgentXPilot: Sendable {
         let instanceID: String
         let providerID: String
         let model: String
+        var baseURL = ""
+        var systemPrompt = ""
     }
 
     struct Configuration {
         struct Application {
             let appID: String
             let pi: PiBinding?
+            var usesEventJournal = false
         }
 
         fileprivate(set) var root: String
         fileprivate let isVersioned: Bool
+        let usesDesktopWriter: Bool
         let apps: [Application]
         var appIDs: Set<String> { Set(apps.map(\.appID)) }
         var clients: [AgentXPilot] { apps.map(client) }
@@ -26,12 +31,14 @@ struct AgentXPilot: Sendable {
                   let root = manifest["root"] as? String, root.hasPrefix("/"), !root.contains("\0") else {
                 throw AgentXError.corrupt
             }
+            guard manifest["writer"] == nil || manifest["writer"] as? String == "desktop" else { throw AgentXError.corrupt }
+            usesDesktopWriter = manifest["writer"] != nil
             self.root = root
             let versioned = manifest["version"] != nil || manifest["apps"] != nil
             isVersioned = versioned
             let entries: [[String: Any]]
             if versioned {
-                guard Set(manifest.keys) == ["root", "version", "apps"],
+                guard Set(manifest.keys).subtracting(["writer"]) == ["root", "version", "apps"],
                       let version = manifest["version"] as? NSNumber, version.intValue == 2,
                       !["f", "d"].contains(String(cString: version.objCType)),
                       let applications = manifest["apps"] as? [[String: Any]], !applications.isEmpty else {
@@ -47,12 +54,15 @@ struct AgentXPilot: Sendable {
         }
 
         private static func parseApplication(_ entry: [String: Any], strict: Bool) throws -> Application {
-            guard !strict || Set(entry.keys).isSubset(of: ["appID", "pi"]),
+            guard !strict || Set(entry.keys).isSubset(of: ["appID", "pi", "runStore"]),
                   let appID = entry["appID"] as? String else { throw AgentXError.corrupt }
             try AgentXPackageFiles.validateID(appID)
             guard !["blackcat", "workbench"].contains(appID) else { throw AgentXError.unsafePath }
-            guard let rawBinding = entry["pi"] else { return Application(appID: appID, pi: nil) }
-            if !strict && rawBinding is NSNull { return Application(appID: appID, pi: nil) }
+            guard entry["runStore"] == nil || entry["runStore"] as? String == "events-v1" else { throw AgentXError.corrupt }
+            let useJournal = entry["runStore"] != nil
+            guard let rawBinding = entry["pi"], strict || !(rawBinding is NSNull) else {
+                return Application(appID: appID, pi: nil, usesEventJournal: useJournal)
+            }
             guard let binding = rawBinding as? [String: Any],
                   let instanceID = binding["instanceID"] as? String,
                   let providerID = binding["providerID"] as? String,
@@ -66,7 +76,9 @@ struct AgentXPilot: Sendable {
                     throw AgentXError.corrupt
                 }
             }
-            return Application(appID: appID, pi: PiBinding(instanceID: instanceID, providerID: providerID, model: model))
+            return Application(appID: appID, pi: PiBinding(instanceID: instanceID, providerID: providerID, model: model,
+                    baseURL: binding["baseURL"] as? String ?? "", systemPrompt: binding["systemPrompt"] as? String ?? ""),
+                    usesEventJournal: useJournal)
         }
 
         func client(for appID: String) -> AgentXPilot? {
@@ -82,9 +94,11 @@ struct AgentXPilot: Sendable {
     let root: String
     let pi: PiBinding?
 
-    static func readMarker(at directory: URL) throws -> Configuration? {
+    private static let markerLimit = 2 * 1024 * 1024
+
+    private static func markerData(at directory: URL) throws -> Data? {
         let marker = try AgentXPackageFiles.safeURL(".agentxd-pilot.json", root: directory)
-        let limit = 2 * 1024 * 1024
+        let limit = markerLimit
         let descriptor = open(marker.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else {
             if errno == ENOENT { return nil }
@@ -100,11 +114,20 @@ struct AgentXPilot: Sendable {
         guard let bytes = try file.read(upToCount: limit + 1), bytes.count == info.st_size else {
             throw AgentXError.corrupt
         }
-        return try Configuration(data: bytes)
+        return bytes
+    }
+
+    static func readMarker(at directory: URL) throws -> Configuration? {
+        try markerData(at: directory).map(Configuration.init(data:))
     }
 
     static func configured(at directory: URL) throws -> Configuration? {
-        guard var configuration = try readMarker(at: directory) else { return nil }
+        guard let configuration = try readMarker(at: directory) else { return nil }
+        return try validate(configuration, at: directory)
+    }
+
+    private static func validate(_ parsed: Configuration, at directory: URL) throws -> Configuration {
+        var configuration = parsed
         let matchesRoot: Bool
         if configuration.isVersioned {
             guard let physical = realpath(directory.path, nil) else { throw AgentXError.unsafePath }
@@ -119,9 +142,25 @@ struct AgentXPilot: Sendable {
         return configuration
     }
 
+    /// Mark an old root only while holding the same lease used by the reference service.
+    static func takeDesktopLease(at directory: URL) throws -> AgentXWriterRootLease {
+        let lease = try AgentXWriterRootLease(root: directory)
+        guard let bytes = try markerData(at: directory) else { throw AgentXError.corrupt }
+        let configuration = try validate(Configuration(data: bytes), at: directory)
+        if !configuration.usesDesktopWriter {
+            guard var marker = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw AgentXError.corrupt }
+            marker["writer"] = "desktop"
+            let data = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys, .withoutEscapingSlashes])
+            guard data.count <= markerLimit else { throw AgentXError.invalid("旧配置加入桌面归属后超出 2 MiB，请精简配置后重试。") }
+            let target = try AgentXPackageFiles.safeURL(".agentxd-pilot.json", root: directory)
+            try AtomicFileWriter().write(data, to: target)
+        }
+        return lease
+    }
+
     static func requireDesktopOwnership(_ appID: String, at root: URL) throws {
-        if try configured(at: root)?.appIDs.contains(appID) == true {
-            throw AgentXError.invalid("试点应用的运行由 agentxd 管理，暂不支持此操作。")
+        if let configuration = try configured(at: root), configuration.appIDs.contains(appID) {
+            throw AgentXError.invalid("试点应用的运行由桌面运行接口管理，暂不支持此操作。")
         }
     }
 
@@ -182,14 +221,16 @@ struct AgentXPilot: Sendable {
 
     func runs() async throws -> [AgentXRun] {
         let (bytes, _) = try await request()
-        let runs = try JSONDecoder().decode([AgentXRun].self, from: bytes)
+        guard let fields = try JSONSerialization.jsonObject(with: bytes) as? [[String: Any]] else { throw AgentXError.corrupt }
+        let runs = try fields.map(AgentXRun.serviceProjection)
         guard runs.allSatisfy({ $0.appID == appID && ($0.revision ?? -1) >= 0 }),
               Set(runs.map(\.id)).count == runs.count else { throw AgentXError.corrupt }
         return runs
     }
 
     private func decodeRun(_ bytes: Data, id: String? = nil) throws -> AgentXRun {
-        let run = try JSONDecoder().decode(AgentXRun.self, from: bytes)
+        guard let fields = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw AgentXError.corrupt }
+        let run = try AgentXRun.serviceProjection(fields)
         guard run.appID == appID, (id == nil || run.id == id), (run.revision ?? -1) >= 0 else { throw AgentXError.corrupt }
         return run
     }

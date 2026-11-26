@@ -27,6 +27,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     private var authorizationTask: Task<Void, Never>?
     private var terminationTask: Task<Void, Never>?
     private var homeLocationTask: Task<Void, Never>?
+    private var desktopRunWriter: AgentXDesktopRunWriter?
     private var agentX: AgentXController?
     private var applicationRuntime: AgentXHostRuntimeLifecycle?
     private(set) var applicationService: AgentXManagedApplicationService?
@@ -89,9 +90,16 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         let hostDirectory = hostEnvironment.hostDirectory
         let agentXRoot: URL
         var migrationNotice: String?
+        var writerLease: AgentXWriterRootLease?
         do {
             let resolved = try AgentXRootCoordinator(locator: hostDirectory.appendingPathComponent("location.json")).resolve(fallback: fallbackRoot)
             let storage = AgentXHostStorage(root: resolved, hostDirectory: hostDirectory)
+            if !AgentXAcceptanceLaunch.isReferenceClient, try AgentXPilot.readMarker(at: resolved) != nil {
+                guard !storage.hasPendingMigration, !storage.offlineLifecycle.hasPendingOperation else {
+                    throw AgentXError.invalid("桌面写入需要已登记的试点目录，请先完成离线操作。")
+                }
+                writerLease = try AgentXPilot.takeDesktopLease(at: resolved)
+            }
             do {
                 let hadPendingMigration = storage.hasPendingMigration
                 agentXRoot = try storage.applyPendingMigration(writersHaveStopped: storage.previousHostHasExited,
@@ -121,7 +129,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         let hasAgentXState = FileManager.default.fileExists(atPath: agentXRoot.appendingPathComponent("agentx.yaml").path)
         let hasAppsDirectory = FileManager.default.fileExists(atPath: agentXRoot.appendingPathComponent("apps").path)
         let manager = AgentXController(repository: AgentXRepository(root: agentXRoot),
-            credentials: KeychainTravelServiceCredentialStore(service: "com.nebulae.agentx.model-services"), hostStorage: hostStorage)
+            credentials: KeychainTravelServiceCredentialStore(service: "com.nebulae.agentx.model-services"), hostStorage: hostStorage, gatewayLease: writerLease)
         if manager.isLoaded && !hasAgentXState {
             do { try manager.setBlackCatEnabled(!UserDefaults.standard.bool(forKey: "TravelCat.desktopPet.hidden")) }
             catch { manager.errorMessage = error.localizedDescription }
@@ -133,6 +141,37 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         self.providerResolver = providerResolver
         workbenchLegacyRoot = hostEnvironment.importsLegacyData ? applicationSupport.appendingPathComponent("TravelCatAgents", isDirectory: true) : nil
         agentX = manager
+        if let writerLease {
+            do {
+                guard manager.isLoaded, let configuration = try AgentXPilot.configured(at: agentXRoot),
+                      configuration.usesDesktopWriter else { throw AgentXError.unavailable }
+                var credentials: any TravelServiceCredentialStoring = KeychainTravelServiceCredentialStore(service: "com.nebulae.agentx.model-services")
+                #if DEBUG
+                if Bundle.main.bundleIdentifier == AgentXAcceptanceLaunch.bundleIdentifier {
+                    guard let encoded = ProcessInfo.processInfo.environment["AGENTX_ACCEPTANCE_AUDIT_KEY"],
+                          Data(base64Encoded: encoded)?.count == 32 else { throw AgentXError.unavailable }
+                    credentials = AgentXFixtureCredential(encoded: encoded,
+                        modelSecret: ProcessInfo.processInfo.environment["AGENTX_ACCEPTANCE_GATEWAY"] == "1" ? "agentx-gateway-fixture-credential" : nil)
+                }
+                #endif
+                let writer = try AgentXDesktopRunWriter(root: agentXRoot, lease: writerLease, apps: configuration.apps,
+                    runtime: AgentXPiRuntime(ledgerRoot: agentXRoot), credentials: credentials,
+                    configuredApp: { [weak manager] id in manager?.state.apps.first { $0.id == id } },
+                    canCreate: { [weak manager] appID, binding in
+                        guard let manager, manager.isLoaded, AgentXApplicationPolicy.isEnabled(appID, in: manager.state) else { return false }
+                        return manager.state.instances.contains {
+                            $0.id == binding.instanceID && $0.appID == appID && $0.model == binding.model && $0.providerID == binding.providerID
+                        } && manager.state.providers.contains {
+                            $0.id == binding.providerID && $0.enabled && $0.baseURL == binding.baseURL && $0.enabledModels.contains(binding.model)
+                        }
+                    }, reportFailure: { [weak manager] appID in
+                        let subject = appID.map { "应用「\($0)」" } ?? "桌面"
+                        manager?.errorMessage = "\(subject)运行接口出现错误，请检查运行记录及审计状态。"
+                    }, gatewayState: { [weak manager] in manager?.state }, gatewayBudget: manager.gatewayBudget)
+                desktopRunWriter = writer
+                writer.start()
+            } catch { showStartupError(error.localizedDescription); return }
+        }
         installApplicationRuntime(manager: manager, storage: hostStorage)
         manager.errorMessage = migrationNotice ?? manager.errorMessage
         manager.didChange = { [weak self] in
@@ -439,6 +478,7 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationTask == nil {
             terminationTask = Task {
+                await desktopRunWriter?.shutdown()
                 let migrationRequested = agentXHostStorage?.hasPendingMigration == true
                 let lifecycleRequested = agentXHostStorage?.offlineLifecycle.hasPendingOperation == true
                 let offlineRequested = migrationRequested || lifecycleRequested

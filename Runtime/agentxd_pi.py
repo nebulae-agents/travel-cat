@@ -51,14 +51,14 @@ class PiProcess:
                 or url.username is not None or url.password is not None or "?" in base_url or "#" in base_url
                 or "\\" in base_url or any(ord(ch) < 32 for ch in base_url) or secret):
             raise ValueError("this pilot requires a credential-free numeric loopback endpoint")
-        if url.port == 0 or not isinstance(model, str) or not 0 < len(model.strip()) <= 512:
+        if url.port == 0 or not isinstance(model, str) or not model.strip() or len(model.encode()) > 512:
             raise ValueError("invalid pilot model configuration")
         if not isinstance(messages, list) or not 1 <= len(messages) <= 512:
             raise ValueError("invalid Pi messages")
         self.node = bundle / "Contents/Helpers/PiAgent/node"
         self.runner = bundle / "Contents/Resources/PiAgent/runner.mjs"
-        request = {"version": 1, "baseURL": base_url, "model": model, "messages": messages, "secret": ""}
-        self.payload = json.dumps(request, ensure_ascii=False, allow_nan=False).encode() + b"\n"
+        request = {"version": 1, "baseURL": base_url, "model": model, "messages": messages, "secret": "", "metadata": {}}
+        self.payload = json.dumps(request, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode() + b"\n"
         if len(self.payload) > self.max_input:
             raise ValueError("Pi request is too large")
         self._stop = threading.Event()

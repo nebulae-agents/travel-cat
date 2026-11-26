@@ -37,6 +37,40 @@ final class AgentXPilotOwnershipTests: XCTestCase {
         return (root, repo, stale)
     }
 
+    func testLegacyCutoverWaitsForTheOwnerAndRevokesReferenceAuditSessions() throws {
+        let root = URL(fileURLWithPath: "/private/tmp/AgentXPilot-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent(".agentxd-pilot.json")
+        let original = try JSONEncoder().encode(["appID": "pilot", "root": root.path])
+        try original.write(to: url)
+        let credentials = AgentXTestCredentials()
+        let helper = try AgentXAuditHelper(root: root.path, appID: "pilot", credentials: credentials)
+        let request = Data(#"{"op":"verify"}"#.utf8)
+        XCTAssertEqual(try helper.execute(request)["ok"] as? Bool, true)
+        try withExtendedLifetime(AgentXWriterRootLease(root: root)) { _ in
+            XCTAssertThrowsError(try AgentXPilot.takeDesktopLease(at: root))
+            XCTAssertEqual(try Data(contentsOf: url), original)
+        }
+        try withExtendedLifetime(AgentXPilot.takeDesktopLease(at: root)) { _ in
+            XCTAssertTrue(try XCTUnwrap(AgentXPilot.configured(at: root)).usesDesktopWriter)
+            XCTAssertThrowsError(try AgentXWriterRootLease(root: root))
+            XCTAssertThrowsError(try helper.execute(request))
+            XCTAssertThrowsError(try AgentXAuditHelper(root: root.path, appID: "pilot", credentials: credentials))
+        }
+    }
+
+    func testWrongDeclaredRootCannotBePromoted() throws {
+        let (root, _, _) = try fixture()
+        let url = root.appendingPathComponent(".agentxd-pilot.json")
+        let wrong = try JSONEncoder().encode(["appID": "pilot", "root": root.deletingLastPathComponent().path])
+        try wrong.write(to: url)
+        XCTAssertThrowsError(try AgentXPilot.takeDesktopLease(at: root))
+        XCTAssertEqual(try Data(contentsOf: url), wrong)
+        XCTAssertNoThrow(try AgentXWriterRootLease(root: root))
+    }
+
     func testNavigationFromStaleSnapshotPreservesServiceResult() throws {
         let (root, repo, original) = try fixture()
         var stale = original
@@ -96,7 +130,7 @@ final class AgentXPilotOwnershipTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Runtime")
         let daemon = Process()
         daemon.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        daemon.arguments = ["-B", runtime.appendingPathComponent("agentxd.py").path, "--root", root.path]
+        daemon.arguments = ["-B", runtime.deletingLastPathComponent().appendingPathComponent("Tests/AgentRuntimeTests/agentxd_reference.py").path, "--root", root.path]
         try daemon.run()
         defer { if daemon.isRunning { daemon.terminate(); daemon.waitUntilExit() } }
         let endpoint = root.appendingPathComponent(".agentxd-endpoint.json")
@@ -214,7 +248,7 @@ final class AgentXPilotOwnershipTests: XCTestCase {
         let originalEndpoint = try Data(contentsOf: endpoint)
         let second = Process(), diagnostic = Pipe()
         second.executableURL = service.executableURL
-        second.arguments = ["-B", runtime.appendingPathComponent("agentxd.py").path, "--root", root.path]
+        second.arguments = ["-B", runtime.deletingLastPathComponent().appendingPathComponent("Tests/AgentRuntimeTests/agentxd_reference.py").path, "--root", root.path]
         second.standardError = diagnostic
         try second.run()
         for _ in 0..<100 where second.isRunning { try await Task.sleep(for: .milliseconds(50)) }

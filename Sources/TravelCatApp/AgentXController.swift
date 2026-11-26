@@ -377,7 +377,7 @@ final class AgentXController: ObservableObject {
         guard isLoaded else { throw AgentXError.unavailable }
         let owned = pilotConfiguration?.appIDs ?? []
         guard next.runs.filter({ owned.contains($0.appID) }) == state.runs.filter({ owned.contains($0.appID) }) else {
-            throw AgentXError.invalid("试点运行需通过 agentxd 更新。")
+            throw AgentXError.invalid("试点运行需通过桌面运行接口更新。")
         }
         try repository.save(next, preservingRunsFor: owned)
         state = next
@@ -682,8 +682,7 @@ final class AgentXController: ObservableObject {
         var next = state
         var accepted: [AgentXRun] = []
         for run in updates {
-            if let index = next.runs.firstIndex(where: { $0.id == run.id }) {
-                guard next.runs[index].appID == run.appID else { throw AgentXError.corrupt }
+            if let index = next.runs.firstIndex(where: { $0.id == run.id && $0.appID == run.appID }) {
                 if (run.revision ?? 0) > (next.runs[index].revision ?? -1) {
                     next.runs[index] = run
                     accepted.append(run)
@@ -741,8 +740,14 @@ final class AgentXController: ObservableObject {
         try commit(next)
         if !flags.isEmpty { recordUndo(.readFlags(flags), title: "已标记全部结果为已读") }
     }
-    func markRead(_ id: String) async throws {
-        guard let index = state.runs.firstIndex(where: { $0.id == id }), state.runs[index].status.terminal else { return }
+    private func runIndex(_ id: String, appID: String? = nil) -> Int? {
+        if let appID { return state.runs.firstIndex { $0.id == id && $0.appID == appID } }
+        let matches = state.runs.indices.filter { state.runs[$0].id == id }
+        return matches.count == 1 ? matches.first : matches.first { state.runs[$0].appID == selectedAppID }
+    }
+
+    func markRead(_ id: String, appID: String? = nil) async throws {
+        guard let index = runIndex(id, appID: appID), state.runs[index].status.terminal else { return }
         let run = state.runs[index]
         if let pilot = pilot(for: run.appID) {
             return try await markPilotRunsRead([run], pilot: pilot)
@@ -844,11 +849,12 @@ final class AgentXController: ObservableObject {
         return try .parse(run.response)
     }
     func applyConfigurationProposal(runID: String) throws {
-        guard let run = state.runs.first(where: { $0.id == runID }) else { throw AgentXError.invalid("建议不存在。") }
+        guard let index = runIndex(runID) else { throw AgentXError.invalid("建议不存在。") }
+        let run = state.runs[index]
         try applyConfigurationProposal(runID: runID, selectedChangeIDs: Set(try configurationProposal(run).changes.map(\.id)))
     }
     func applyConfigurationProposal(runID: String, selectedChangeIDs: Set<String>) throws {
-        guard let runIndex = state.runs.firstIndex(where: { $0.id == runID }) else { throw AgentXError.invalid("建议不存在。") }
+        guard let runIndex = runIndex(runID) else { throw AgentXError.invalid("建议不存在。") }
         let run = state.runs[runIndex]
         try AgentXPilot.requireDesktopOwnership(run.appID, at: repository.root)
         guard run.purpose == .configuration, run.status == .completed, let definitionID = run.configurationDefinitionID,
@@ -1027,8 +1033,9 @@ final class AgentXController: ObservableObject {
             didChange?()
         }
     }
-    func cancel(_ id: String) {
-        guard let run = state.runs.first(where: { $0.id == id }) else { return }
+    func cancel(_ id: String, appID: String? = nil) {
+        guard let index = runIndex(id, appID: appID) else { return }
+        let run = state.runs[index]
         if let pilot = pilot(for: run.appID) {
             guard !run.status.terminal else { return }
             Task {

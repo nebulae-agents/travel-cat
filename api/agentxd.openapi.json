@@ -15,6 +15,32 @@
   ],
   "security": [{ "localBearer": [] }],
   "paths": {
+    "/v1/apps/{appId}/runtime": {
+      "parameters": [{ "$ref": "#/components/parameters/AppId" }],
+      "get": {
+        "operationId": "getDesktopRuntimeStatus",
+        "x-agentx-desktop-only": true,
+        "summary": "Read the application runtime selection, offline Pi readiness, and supported operations",
+        "responses": {
+          "200": { "description": "Adapter capabilities describe the selected configuration. Health checks validate the local binding and bundled assets without contacting a model.",
+            "content": { "application/json": { "schema": {
+              "type": "object", "required": ["appID", "configuredRuntime", "runtimeCore", "health", "capabilities"],
+              "properties": {
+                "appID": { "type": "string" }, "configuredRuntime": { "type": "string", "nullable": true },
+                "runtimeCore": { "type": "string", "nullable": true },
+                "health": { "type": "string", "enum": ["ready", "missing_runtime", "unbound", "invalid_binding", "unsupported_runtime"] },
+                "budget": { "$ref": "#/components/schemas/GatewayBudgetSummary" },
+                "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" },
+                  "description": "Keys start, stop, stream, usage, tools and step. Empty for an unsupported selection. Usage requires provider-reported counts." }
+              }
+            } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "description": "The registered application could not initialize." }
+        }
+      }
+    },
     "/v1/apps/{appId}/runs": {
       "parameters": [{ "$ref": "#/components/parameters/AppId" }],
       "get": {
@@ -217,12 +243,34 @@
           "isRead": { "type": "boolean" },
           "prompt": { "type": "string" },
           "response": { "type": "string" },
+          "usage": { "$ref": "#/components/schemas/ReportedUsage" },
+          "usageStatus": { "type": "string", "enum": ["unknown", "reported"] },
+          "budget": { "$ref": "#/components/schemas/GatewayBudgetReceipt" },
           "startedAt": { "$ref": "#/components/schemas/SwiftDate" },
           "endedAt": { "$ref": "#/components/schemas/SwiftDate" },
           "stopRequestedAt": { "$ref": "#/components/schemas/SwiftDate" },
           "stopEvidence": { "$ref": "#/components/schemas/StopEvidence" },
           "requiresProcessReview": { "type": "boolean" },
           "failure": { "type": "string", "nullable": true }
+        }
+      },
+      "GatewayBudgetSummary": {
+        "type": "object", "required": ["status"],
+        "description": "Root-wide managed gateway budget. Amounts are exact decimal currency strings; held is not a measured charge. Omitted when disabled.",
+        "properties": {
+          "status": { "type": "string", "enum": ["enabled", "blocked", "unavailable"] },
+          "currency": { "type": "string" }, "timeZone": { "type": "string" }, "day": { "type": "string" },
+          "limit": { "type": "string" }, "held": { "type": "string" }, "spent": { "type": "string" }
+        }
+      },
+      "GatewayBudgetReceipt": {
+        "type": "object", "required": ["status"],
+        "description": "Persisted reservation receipt at the recorded lifecycle transition. Actual is null until trusted final usage is settled; cancellation does not refund an uncertain submission.",
+        "properties": {
+          "status": { "type": "string", "enum": ["reserved", "pending", "settled", "unavailable"] },
+          "day": { "type": "string" }, "currency": { "type": "string" }, "reserved": { "type": "string" },
+          "held": { "type": "string" }, "actual": { "type": "string", "nullable": true },
+          "priceSource": { "type": "string" }, "priceRevision": { "type": "string" }
         }
       },
       "SwiftDate": {
@@ -235,6 +283,15 @@
         "enum": ["pending", "confirmedExited", "unverified"],
         "description": "Pending marks the saved cancellation request. Confirmed exit requires matching process evidence."
       },
+      "ReportedUsage": {
+        "type": "object",
+        "description": "Token counts explicitly reported by the provider. Absent when unavailable.",
+        "required": ["inputTokens", "outputTokens"],
+        "properties": {
+          "inputTokens": { "type": "integer", "minimum": 0 },
+          "outputTokens": { "type": "integer", "minimum": 0 }
+        }
+      },
       "RunEvent": {
         "type": "object",
         "required": ["eventId", "runId", "revision", "kind", "state"],
@@ -244,6 +301,9 @@
           "revision": { "type": "integer", "minimum": 0 },
           "kind": { "type": "string" },
           "state": { "type": "string" },
+          "text": { "type": "string", "description": "Visible incremental text for a textDelta event." },
+          "inputTokens": { "type": "integer", "minimum": 0, "description": "Provider input tokens for a usageReported event." },
+          "outputTokens": { "type": "integer", "minimum": 0, "description": "Provider output tokens for a usageReported event." },
           "stopEvidence": { "$ref": "#/components/schemas/StopEvidence" }
         }
       },

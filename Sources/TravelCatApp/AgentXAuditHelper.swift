@@ -20,7 +20,7 @@ final class AgentXAuditHelper {
         try Self.privateDirectory(root)
         try AgentXPackageFiles.validateID(appID)
         guard let pilot = try AgentXPilot.readMarker(at: root),
-              pilot.root == path, pilot.appIDs.contains(appID) else { throw Self.invalid }
+              !pilot.usesDesktopWriter, pilot.root == path, pilot.appIDs.contains(appID) else { throw Self.invalid }
         var info = stat()
         let directory = try AgentXRunAudit.directory(root: root, appID: appID)
         for url in [root.appendingPathComponent("audit"), directory] {
@@ -53,20 +53,20 @@ final class AgentXAuditHelper {
             guard lstat(url.path, &info) == 0, UInt64(info.st_dev) == device, UInt64(info.st_ino) == inode else { throw Self.invalid }
         }
         guard let pilot = try AgentXPilot.readMarker(at: URL(fileURLWithPath: rootPath)),
-              pilot.root == rootPath, pilot.appIDs.contains(appID) else { throw Self.invalid }
+              !pilot.usesDesktopWriter, pilot.root == rootPath, pilot.appIDs.contains(appID) else { throw Self.invalid }
         guard input.count <= Self.maximumInput,
               let request = try JSONSerialization.jsonObject(with: input) as? [String: Any], let op = request["op"] as? String else { throw Self.invalid }
         switch op {
         case "append":
             guard Set(request.keys) == ["op", "record"], let record = request["record"] as? [String: Any] else { throw Self.invalid }
-            try validate(record)
+            try Self.validate(record, appID: appID)
             try store.appendIdempotent(record: record)
             return ["ok": true]
         case "records":
             guard Set(request.keys) == ["op", "runId"], let run = request["runId"] as? String, let id = UUID(uuidString: run) else { throw Self.invalid }
             let records = try store.records(taskID: id)
             // Desktop journals may contain additional fields. Never expose content through this bridge.
-            let filtered = records.filter { $0["appId"] as? String == appID }.map { $0.filter { Self.fields.contains($0.key) } }
+            let filtered = Self.publicRecords(records, appID: appID)
             return ["ok": true, "records": filtered]
         case "verify":
             guard Set(request.keys) == ["op"] else { throw Self.invalid }
@@ -74,8 +74,11 @@ final class AgentXAuditHelper {
         default: throw Self.invalid
         }
     }
+    static func publicRecords(_ records: [[String: Any]], appID: String) -> [[String: Any]] {
+        records.filter { $0["appId"] as? String == appID }.map { $0.filter { Self.fields.contains($0.key) } }
+    }
     private static let fields: Set<String> = ["eventId", "taskId", "appId", "instanceId", "providerId", "model", "promptBytes", "requestTextBytes", "responseBytes", "kind", "timestamp", "status"]
-    private func validate(_ record: [String: Any]) throws {
+    static func validate(_ record: [String: Any], appID: String) throws {
         let required = Self.fields.subtracting(["responseBytes", "status"])
         guard Set(record.keys).isSubset(of: Self.fields), required.isSubset(of: Set(record.keys)), record["appId"] as? String == appID else { throw Self.invalid }
         for key in ["eventId", "taskId"] {
@@ -156,14 +159,24 @@ final class AgentXAuditHelper {
         do {
             guard arguments.count == 5, ["--agentx-audit-helper", "--agentx-audit-session"].contains(arguments[0]),
                   arguments[1] == "--root", arguments[3] == "--app" else { throw invalid }
+            var credentials: any TravelServiceCredentialStoring = KeychainTravelServiceCredentialStore(service: "com.nebulae.agentx.model-services")
+            #if DEBUG
+            if Bundle.main.bundleIdentifier == AgentXAcceptanceLaunch.bundleIdentifier {
+                let environment = ProcessInfo.processInfo.environment
+                guard AgentXAcceptanceLaunch.permits(bundleID: Bundle.main.bundleIdentifier, environment: environment),
+                      arguments[2] == environment["AGENTX_ROOT"], let key = environment["AGENTX_ACCEPTANCE_AUDIT_KEY"],
+                      Data(base64Encoded: key)?.count == 32 else { throw invalid }
+                credentials = AgentXFixtureCredential(encoded: key)
+            }
+            #endif
             if arguments[0] == "--agentx-audit-session" {
-                let helper = try AgentXAuditHelper(root: arguments[2], appID: arguments[4], credentials: KeychainTravelServiceCredentialStore(service: "com.nebulae.agentx.model-services"))
+                let helper = try AgentXAuditHelper(root: arguments[2], appID: arguments[4], credentials: credentials)
                 try writeReply(["ok": true, "ready": true])
                 var buffer = Data()
                 while let input = try readFrame(buffer: &buffer) { try writeReply(helper.execute(input)) }
             } else {
                 let input = try readInput()
-                let helper = try AgentXAuditHelper(root: arguments[2], appID: arguments[4], credentials: KeychainTravelServiceCredentialStore(service: "com.nebulae.agentx.model-services"))
+                let helper = try AgentXAuditHelper(root: arguments[2], appID: arguments[4], credentials: credentials)
                 try writeReply(helper.execute(input))
             }
             exit(0)

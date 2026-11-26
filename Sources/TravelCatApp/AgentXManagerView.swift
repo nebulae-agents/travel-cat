@@ -446,7 +446,7 @@ struct AgentXManagerView: View {
                     Button("进入应用前台") { controller.navigate(to: .chat) }
                 }
             }
-            ForEach(runs) { run in
+            ForEach(runs, id: \.appScopedID) { run in
                 AgentXCard {
                     HStack {
                         Text(controller.state.apps.first { $0.id == run.appID }?.name ?? run.appID).font(.headline)
@@ -458,11 +458,13 @@ struct AgentXManagerView: View {
                     Text(run.prompt).lineLimit(3).textSelection(.enabled)
                     AgentXPilotRunIdentity(run: run)
                     if let failure = run.failure { Text(failure).foregroundStyle(.orange) }
-                    Text(run.startedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(AgentXTheme.muted)
+                    if run.startedAt != .distantPast {
+                        Text(run.startedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(AgentXTheme.muted)
+                    }
                     HStack {
                         Button(run.purpose == .configuration ? "查看配置建议" : run.purpose == .workflow ? "查看工作流" : run.purpose == .characterPreview ? "查看人物试说" : "查看对话") { controller.openRun(run) }.buttonStyle(.borderedProminent)
-                        if run.status.terminal && !run.isRead { Button("标记已读") { performAsync { try await controller.markRead(run.id) } } }
-                        if !run.status.terminal { Button("取消运行") { controller.cancel(run.id) }.disabled(run.status == .cancelling) }
+                        if run.status.terminal && !run.isRead { Button("标记已读") { performAsync { try await controller.markRead(run.id, appID: run.appID) } } }
+                        if !run.status.terminal { Button("取消运行") { controller.cancel(run.id, appID: run.appID) }.disabled(run.status == .cancelling) }
                     }
                 }
             }
@@ -592,7 +594,7 @@ private struct AgentXChatView: View {
                     if !run.response.isEmpty { Text(run.response).textSelection(.enabled) }
                     if let failure = run.failure { Text(failure).foregroundStyle(.orange) }
                     if !run.status.terminal {
-                        HStack { ProgressView().controlSize(.small); Button("取消") { controller.cancel(run.id) }.disabled(run.status == .cancelling) }
+                        HStack { ProgressView().controlSize(.small); Button("取消") { controller.cancel(run.id, appID: run.appID) }.disabled(run.status == .cancelling) }
                     }
                 }
             }

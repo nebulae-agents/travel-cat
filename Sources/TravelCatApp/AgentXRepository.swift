@@ -91,7 +91,14 @@ struct AgentXRepository {
             }
             if !includePilotRuns && pilot?.appIDs.contains(app.id) == true { continue }
             for run in try children(directory + "/runs", extension: "json") {
-                let value = try JSONDecoder().decode(AgentXRun.self, from: Data(contentsOf: safeURL(run)))
+                let bytes = try Data(contentsOf: safeURL(run))
+                let value: AgentXRun
+                if pilot?.appIDs.contains(app.id) == true {
+                    guard let fields = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw AgentXError.corrupt }
+                    value = try AgentXRun.serviceProjection(fields)
+                } else {
+                    value = try JSONDecoder().decode(AgentXRun.self, from: bytes)
+                }
                 guard value.appID == app.id, run == directory + "/runs/" + value.id + ".json" else { throw AgentXError.unsafePath }
                 state.runs.append(value)
             }
@@ -393,11 +400,21 @@ struct AgentXRepository {
         func validIDs(_ ids: [String]) -> Bool {
             Set(ids.map { $0.lowercased() }).count == ids.count && ids.allSatisfy { !$0.isEmpty && $0.utf8.count <= 100 && $0.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") } }
         }
-        guard validIDs(state.apps.map(\.id)), validIDs(state.providers.map(\.id)), validIDs(state.definitions.map(\.id)), validIDs(state.instances.map(\.id)), validIDs(state.runs.map(\.id)),
+        guard validIDs(state.apps.map(\.id)), validIDs(state.providers.map(\.id)), validIDs(state.definitions.map(\.id)), validIDs(state.instances.map(\.id)),
               state.apps.allSatisfy({ $0.id == $0.id.lowercased() }),
               state.apps.allSatisfy({ ($0.id == "blackcat") == ($0.kind == .blackcat) }),
               state.apps.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
               state.definitions.allSatisfy({ !$0.name.isEmpty && (!$0.prompt.isEmpty || $0.draft != nil) }) else { throw AgentXError.invalid("名称、标识或内建 BlackCat 配置无效。") }
+        if !validIDs(state.runs.map(\.id)) {
+            let owned = try AgentXPilot.configured(at: root)?.appIDs ?? []
+            let groups = Dictionary(grouping: state.runs) { $0.id.lowercased() }
+            for runs in groups.values {
+                guard validIDs([runs[0].id]), runs.count == 1 ||
+                        (runs.allSatisfy { owned.contains($0.appID) } && Set(runs.map(\.appID)).count == runs.count) else {
+                    throw AgentXError.invalid("同一应用内的运行标识必须唯一。")
+                }
+            }
+        }
         for app in state.apps { try app.validateManifest() }
         for provider in state.providers {
             guard !provider.name.isEmpty, (!provider.models.isEmpty || provider.isOpenRouter), provider.models.allSatisfy({ !$0.isEmpty }) else { throw AgentXError.invalid("请填写服务名称及模型 ID。") }

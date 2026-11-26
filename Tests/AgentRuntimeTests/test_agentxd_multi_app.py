@@ -14,7 +14,7 @@ import unittest
 from websockets.sync.client import connect
 
 
-RUNTIME = Path(__file__).resolve().parents[2] / "Runtime/agentxd.py"
+RUNTIME = Path(__file__).with_name("agentxd_reference.py")
 
 
 class TestMultiAppRuntime(unittest.TestCase):
@@ -30,7 +30,12 @@ class TestMultiAppRuntime(unittest.TestCase):
             member.mkdir(parents=True)
             (member / "agent.yaml").touch()
         self.endpoint_file = self.root / ".agentxd-endpoint.json"
-        self.helper = self.executable(self.root / "audit-helper", """
+        self.helper = self.audit_helper(self.root / "audit-helper")
+        self.marker(apps=[{"appID": "alpha"}, {"appID": "beta"}])
+
+    @classmethod
+    def audit_helper(cls, path):
+        return cls.executable(path, """
             import json
             from pathlib import Path
             import sys
@@ -57,7 +62,6 @@ class TestMultiAppRuntime(unittest.TestCase):
                 print(json.dumps(dict(response, ok=True)), flush=True)
             (root / ("closed-" + app_id)).touch()
         """)
-        self.marker(apps=[{"appID": "alpha"}, {"appID": "beta"}])
 
     def marker(self, **changes):
         config = dict(root=str(self.root), version=2)
@@ -144,6 +148,25 @@ class TestMultiAppRuntime(unittest.TestCase):
             f"ws://127.0.0.1:{self.endpoint['port']}/v1/apps/{app}/runs/{run_id}/events?after=0",
             additional_headers={"Authorization": "Bearer " + self.endpoint["token"]}, proxy=None, close_timeout=1,
         )
+
+    def test_retired_command_never_opens_a_legacy_root(self):
+        legacy = Path(__file__).resolve().parents[2] / "Runtime/agentxd.py"
+        marker = self.root / ".agentxd-pilot.json"
+        for config in ({"root": str(self.root), "appID": "alpha"},
+                       {"root": str(self.root), "version": 2, "apps": [{"appID": "alpha"}]}):
+            original = json.dumps(config).encode()
+            marker.write_bytes(original)
+            with subprocess.Popen([sys.executable, "-B", str(legacy), "--root", str(self.root)],
+                                  stderr=subprocess.PIPE, text=True) as process:
+                try:
+                    self.await_condition(lambda: process.poll() is not None or self.endpoint_file.exists(), "retired CLI")
+                    self.assertFalse(self.endpoint_file.exists(), "retired command published an endpoint")
+                    self.assertNotEqual(process.returncode, 0)
+                    self.assertIn("retired", process.stderr.read())
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+            self.assertEqual(marker.read_bytes(), original)
 
     def test_same_run_id_stays_with_its_app_for_reads_events_and_updates(self):
         self.seed("alpha", "shared", "completed")
