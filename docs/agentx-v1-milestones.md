@@ -302,3 +302,12 @@ M3 保持进行中：预算界面、真实价格/供应商、长期 pending 人�
 补充验证与格式边界：卡片显示按配置时区计算的统计日期，日期与余额汇总使用同一天；刷新会重新计算日期。保存时将已验证配置序列化为严格 JSON（仍写入 `gateway-budget.yaml`），保留价格、币种、时区和其他有效字段的语义，不保证原 YAML 注释、排版或字节格式保留。原配置字节用于检测并发修改，账本不被限额保存改写。
 
 本轮最终定向自动化验证：18 项 XCTest，跳过 1 项，失败 0 项（预算及宿主网关；日志 `/tmp/agentx-budget-ui-final.log`）。此前全量运行中 TravelCatAppTests 为 1063 项、跳过 10 项、失败 0 项，Swift Testing 93 项通过；但 TravelUITests 图像测试出现 `e5rtError`（precompiled compute operation，code 13），导致全量命令退出 1，不能声称全量通过。全量日志 `/tmp/agentx-budget-ui-full.log`。未进行原生 GUI 验收、安装或远端发布。
+
+## 2026-11-26 壳 v7 本地实现（F-201–205）
+
+用户确认的 `2026-11-26-AgentX-shell-v7-light-frontstage-p3n9` 取代壳 v6 的顶栏与左侧功能带描述。代码改为轻顶栏、设置分区、统一切换/搜索面板与居中场景正文；原有预算设置、配置建议逐项审阅、发布和取消接口保持使用。
+
+导航红测确认默认设置旧值导致 3 处预期断言失败；首轮壳 23 项测试随后通过。新增原入口可达回归和临时原生预览；AgentX 全定向 XCTest 346 项（4 项按环境跳过）、Swift Testing 55 项通过；壳定向25项（1项手动预览跳过）通过。原生交互、深浅主题逐屏、长按/确认停止、正式数据前后比对尚待独立验收，不计为 M6 完成；没有提交、推送、安装或发布。预览说明见 `Tests/ManualAgentWorkbench/ShellV7Preview.md`。
+
+
+壳 v7 原生验收状态（2026-11-26）：隔离 XCTest 预览及具有独立标识的临时应用已启动，但原生交互工具连接返回 unknown or expired node_repl continuation，未完成逐屏截图、键盘及停止手势验收，不记为客户端通过。正式数据前后清单覆盖 7 根 10429 项，内容/结构/权限无变化；AgentXManager 仅 2 项 mtime 变化，TravelPetData 完全一致。记录在 /tmp/agentx-shell-v7-validation/。未安装、提交或发布。

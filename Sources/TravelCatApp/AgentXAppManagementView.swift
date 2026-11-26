@@ -37,7 +37,7 @@ struct AgentXAppManagementView: View {
                     .foregroundStyle(.orange)
             }
             if let notice = model.notice { Text(notice).foregroundStyle(AgentXTheme.accent).textSelection(.enabled) }
-            if model.loadingBackups { HStack { ProgressView().controlSize(.small); Text("正在后台校验卸载备份…").font(.caption) } }
+            if model.loadingBackups { HStack { ProgressView().controlSize(.small); Text("正在校验卸载备份…").font(.caption) } }
             if model.dialog == nil, let failure = model.failure { Text(failure).foregroundStyle(.orange).textSelection(.enabled) }
             Picker("管理内容", selection: $section) {
                 ForEach(["已安装", "本地模板库", "卸载备份"], id: \.self) { Text($0).tag($0) }
@@ -80,8 +80,8 @@ struct AgentXAppManagementView: View {
                     AgentXAppPackageMetadata(app: app, instances: controller.state.instances.filter { $0.appID == app.id })
                     Text("目录：apps/\(app.id)/").font(.caption.monospaced()).textSelection(.enabled)
                     HStack {
-                        Button("进入前台") { controller.openApp(app.id) }.buttonStyle(.borderedProminent).disabled(!canEnter(app))
-                        Button("后台配置") {
+                        Button("打开应用") { controller.openApp(app.id) }.buttonStyle(.borderedProminent).disabled(!canEnter(app))
+                        Button("应用设置") {
                             if controller.selectApplication(app.id) { controller.navigate(to: .configuration) }
                         }.disabled(!canEnter(app))
                         Spacer()
@@ -105,7 +105,7 @@ struct AgentXAppManagementView: View {
     }
     private var library: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("内建文本前台 · 本地模板").font(.headline)
+            Text("内建文本界面 · 本地模板").font(.headline)
             ForEach(AgentXLocalAppPackage.Template.allCases) { template in
                 AgentXCard {
                     Label(template.title, systemImage: template == .scene ? "theatermasks" : "bubble.left.and.bubble.right").font(.headline)
@@ -114,7 +114,7 @@ struct AgentXAppManagementView: View {
                     Button("使用模板…") { model.beginTemplate(template) }.disabled(model.service == nil)
                 }
             }
-            Text("当前支持本地模板、ZIP 和导出目录；仅内建文本或声明式前台，不执行包内代码。").font(.caption).foregroundStyle(AgentXTheme.muted)
+            Text("当前支持本地模板、ZIP 和导出目录；仅内建文本或声明式界面，不执行包内代码。").font(.caption).foregroundStyle(AgentXTheme.muted)
         }
     }
     private var backups: some View {
@@ -235,13 +235,13 @@ struct AgentXAppManagementDialog: View {
                                 Text(definition.prompt).font(.caption).textSelection(.enabled)
                             }
                             if let experience = preview.application.experience?.published?.configuration ?? preview.application.experience?.draft {
-                                Text("前台介绍：" + experience.intro).font(.caption)
+                                Text("应用介绍：" + experience.intro).font(.caption)
                                 Text("应用规则：" + (experience.rules.isEmpty ? "未设置" : experience.rules)).font(.caption)
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                     AgentXAppPackageMetadata(app: preview.application, instances: preview.instances)
-                    Text("运行能力：内建文本对话\(preview.frontend == nil ? "" : "与声明式表单前台")；无包内代码执行。").font(.caption)
+                    Text("运行能力：内建文本对话\(preview.frontend == nil ? "" : "与声明式表单界面")；无包内代码执行。").font(.caption)
                     Text("安装只写入配置并创建实例，保持停用，不自动运行。").font(.caption).foregroundStyle(AgentXTheme.accent)
                     ForEach(preview.missingRequirements, id: \.self) { Text("需处理：" + $0).font(.caption).foregroundStyle(.orange) }
                     if !preview.canInstall { Text("依赖未满足或 ID 冲突：修正上方 ID / 模型，或先在模型服务配置依赖，再重新预览。").font(.caption) }

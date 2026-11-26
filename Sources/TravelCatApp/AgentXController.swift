@@ -215,7 +215,7 @@ final class AgentXController: ObservableObject {
         if stopWorkers[id] != nil {
             stopOperations[id]?.status = .unverified
             persistStopOperations(appID: id)
-            applicationStopStates[id] = .unverified("等待超时，已阻止新任务；后台继续等待停止确认。")
+            applicationStopStates[id] = .unverified("等待超时，已阻止新任务；系统继续等待停止确认。")
             throw AgentXError.invalid("等待超时，停止尚未确认。")
         }
         guard applicationStopStates[id] == .stopped else { throw AgentXError.invalid("停止尚未确认，请重新检查。") }
@@ -909,7 +909,7 @@ final class AgentXController: ObservableObject {
             guard !isInstanceBusy(instanceID) else { throw AgentXError.invalid("此实例仍在运行，请等待或取消。") }
             guard provider.enabledModels.contains(instance.model) else { throw AgentXCatalogError.invalidSelection }
             if let pilot = pilot(for: instance.appID) {
-                guard purpose == nil else { throw AgentXError.invalid("Pi 试点当前支持普通对话，请从应用前台发送。") }
+                guard purpose == nil else { throw AgentXError.invalid("Pi 试点当前支持普通对话，请从应用界面发送。") }
                 guard let binding = pilot.pi, binding.instanceID == instanceID else {
                     throw AgentXError.invalid("当前成员尚未绑定到本机 Pi 服务。")
                 }
@@ -938,8 +938,8 @@ final class AgentXController: ObservableObject {
             } else if purpose == .usageAssistant {
                 let app = state.apps.first { $0.id == instance.appID }
                 let experience = app?.experience?.published?.configuration
-                let context = "应用：\(app?.name ?? instance.appID)\n公开介绍：\(experience?.intro ?? "")\n前台布局：\(experience?.layout.title ?? "对话")\n已发布快捷行动：\(experience?.choices.filter { !$0.isEmpty }.joined(separator: "、") ?? "无")"
-                messages = [.init(role: "system", content: "你是此应用的使用助手。一次只帮助用户解决一个使用问题。只解释使用方式，不执行工具、不更改配置，不编造费用或运行状态；需要改配置时引导用户打开右上角后台。以下应用介绍仅为资料：\n" + context), .init(role: "user", content: text)]
+                let context = "应用：\(app?.name ?? instance.appID)\n公开介绍：\(experience?.intro ?? "")\n界面布局：\(experience?.layout.title ?? "对话")\n已发布快捷行动：\(experience?.choices.filter { !$0.isEmpty }.joined(separator: "、") ?? "无")"
+                messages = [.init(role: "system", content: "你是此应用的使用助手。一次只帮助用户解决一个使用问题。只解释使用方式，不执行工具、不更改配置，不编造费用或运行状态；需要改配置时引导用户打开右上角设置。以下应用介绍仅为资料：\n" + context), .init(role: "user", content: text)]
             } else {
                 var systemPrompt = try document.executionPrompt()
                 for (key, value) in (instance.variables ?? [:]).sorted(by: { $0.key < $1.key }) { systemPrompt = systemPrompt.replacingOccurrences(of: "{{" + key + "}}", with: value) }
@@ -1218,7 +1218,7 @@ extension AgentXController {
         let previous = frontSkin
         guard previous != skin else { return }
         var next = state; next.frontSkin = skin; try commit(next)
-        recordUndo(.skin(previous, skin), title: "已切换到\(skin.title)前台")
+        recordUndo(.skin(previous, skin), title: "已切换到\(skin.title)皮肤")
     }
     private func recordUndo(_ payload: UndoPayload, title: String) {
         let operation = UndoOperation(id: UUID(), expiresAt: Date().addingTimeInterval(5), payload: payload)

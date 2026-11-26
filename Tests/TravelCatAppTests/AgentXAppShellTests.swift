@@ -22,7 +22,7 @@ final class AgentXAppShellTests: XCTestCase {
         c.selectModule("members")
         XCTAssertEqual(c.appArea, .frontend)
         c.openBackstage()
-        XCTAssertEqual(c.page, .configuration)
+        XCTAssertEqual(c.page, .members)
         c.navigate(to: .characters)
         c.openFrontend()
         XCTAssertEqual(c.page, .members)
@@ -34,6 +34,27 @@ final class AgentXAppShellTests: XCTestCase {
         XCTAssertEqual(c.page, .characters)
         XCTAssertEqual(c.appArea, .backstage)
     }
+    func testSettingsStartAtMembersAndRememberEachApplicationsSection() throws {
+        let c = try controller()
+        c.selectModule("artifacts")
+        c.openBackstage()
+        XCTAssertEqual(c.page, .members)
+        c.navigate(to: .appModels)
+        c.openFrontend()
+        XCTAssertEqual(c.currentModuleID, "artifacts")
+        XCTAssertEqual(c.page, .appFiles)
+        XCTAssertTrue(c.selectApplication("a"))
+        c.openBackstage()
+        XCTAssertEqual(c.page, .members)
+        c.navigate(to: .sceneRules)
+        XCTAssertTrue(c.selectApplication("b"))
+        c.openBackstage()
+        XCTAssertEqual(c.page, .appModels)
+        XCTAssertTrue(c.selectApplication("a"))
+        c.openBackstage()
+        XCTAssertEqual(c.page, .sceneRules)
+    }
+
     func testRunAndDockSynchronizeArea() throws {
         let c = try controller()
         c.openBackstage()
@@ -323,6 +344,67 @@ final class AgentXAppShellTests: XCTestCase {
         XCTAssertEqual(c.currentInstances.first?.conversationModel?.model, "two")
         XCTAssertFalse(FileManager.default.fileExists(atPath: repo.root.appendingPathComponent("apps/b/state/frontend-values.json").path))
     }
+    func testSettingsAndPlatformRoutesReturnWithoutLosingModuleDraft() throws {
+        let c = try controller()
+        c.selectModule("artifacts")
+        c.drafts["member"] = "unsent"
+        for page in [AgentXPage.members, .sceneRules, .characters, .workflows, .appModels, .runs, .appFiles, .appSettings, .configuration] {
+            c.navigate(to: page)
+            XCTAssertEqual(c.appArea, .backstage)
+            c.openFrontend()
+            XCTAssertEqual(c.page, .appFiles)
+            XCTAssertEqual(c.currentModuleID, "artifacts")
+        }
+        for page in [AgentXPage.apps, .providers, .backups, .settings, .platformOverview, .definitions, .instances, .governance] {
+            c.navigate(to: page)
+            XCTAssertEqual(c.page, page)
+            c.returnToApplication()
+            XCTAssertEqual(c.page, .appFiles)
+            XCTAssertEqual(c.currentModuleID, "artifacts")
+        }
+        XCTAssertEqual(c.drafts["member"], "unsent")
+        XCTAssertFalse(c.assistantPresented)
+    }
+
+    /// Opt-in interactive fixture. Never reads production data or credentials.
+    func testShellV7InteractivePreview() async throws {
+        guard ProcessInfo.processInfo.environment["AGENTX_SHELL_V7_PREVIEW"] == "1" else { throw XCTSkip("Manual native acceptance only") }
+        let c = try controller(respond: { _, _, _, _ in
+            try await Task.sleep(for: .seconds(20))
+            return "这是隔离预览的模拟回应。输入、运行、停止与发布使用真实界面和控制器。"
+        })
+        try c.addProvider(name: "隔离模拟服务", address: "http://127.0.0.1:1", models: "fixture", secret: "")
+        try c.addDefinition(name: "预览成员", prompt: "仅供壳 v7 本地验收")
+        let provider = try XCTUnwrap(c.state.providers.first)
+        let definition = try XCTUnwrap(c.state.definitions.first)
+        for appID in ["a", "b"] {
+            try c.addInstance(name: "预览成员 " + appID, appID: appID, definitionID: definition.id, providerID: provider.id, model: "fixture")
+            var experience = AgentXAppExperience()
+            experience.title = "隔离预览 · 应用 " + appID
+            experience.intro = "这是一段用于界面验收的场景说明。选择下面的行动后，文字只会进入输入框；可以修改后再发送。"
+            experience.layout = .scene
+            experience.choices = ["先询问当前进展。", "整理下一步行动。", "换一个角度继续。"]
+            try c.saveExperienceDraft(appID: appID, configuration: experience, expectedDraft: nil)
+            try c.publishExperience(appID: appID)
+        }
+        c.openFrontend()
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.regular)
+        let window = NSWindow(contentRect: .init(x: 80, y: 80, width: 1280, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.title = "AgentX Shell v7 — 隔离预览"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: AgentXManagerView(controller: c))
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        print("SHELL_V7_PREVIEW_READY root=\(c.repository.root.path)")
+        defer { c.softStopAll(); window.close() }
+        let seconds = Int(ProcessInfo.processInfo.environment["AGENTX_SHELL_V7_SECONDS"] ?? "600") ?? 600
+        for _ in 0..<min(max(seconds, 1), 1800) {
+            if !window.isVisible { break }
+            try await Task.sleep(for: .seconds(1))
+        }
+    }
+
     func testNativeShellAndPalettesRenderAtBothSizesAndAppearances() async throws {
         _ = NSApplication.shared
         let c = try controller()

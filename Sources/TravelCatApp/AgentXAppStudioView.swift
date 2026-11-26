@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private struct AgentXExperienceEditSession: Codable {
+struct AgentXExperienceEditSession: Codable {
     var configuration: AgentXAppExperience
     var expected: AgentXAppExperience?
     var baseline: AgentXAppExperience
@@ -34,16 +34,10 @@ struct AgentXAppStudioView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(section.title).font(.title2.bold())
-                            Text(app.name + " · 应用后台").foregroundStyle(AgentXTheme.muted)
+                            Text(app.name + " · 应用设置").foregroundStyle(AgentXTheme.muted)
                         }
                         Spacer()
-                        if section != .appFiles {
-                            Button("发布到前台") {
-                                publishAppID = editingAppID
-                                confirmingPublish = true
-                            }.buttonStyle(.borderedProminent).tint(AgentXTheme.accent)
-                                .disabled(!controller.isLoaded || !unpublished || (expected == nil && !isDirty))
-                        }
+
                     }
                     if !app.canRunHostText {
                         Label("此应用尚未接入当前文本执行器。可编辑配置，但发布不代表运行框架已支持。", systemImage: "info.circle")
@@ -73,14 +67,14 @@ struct AgentXAppStudioView: View {
             Button("确认发布") { publish() }
             Button("取消", role: .cancel) { publishAppID = nil }
         } message: {
-            Text("将当前应用的场景、共享记忆、成员模型和前台呈现一起发布。只影响后续运行，不打断正在进行的运行。")
+            Text("将当前应用的场景、共享记忆、成员模型和应用呈现一起发布。只影响后续运行，不打断正在进行的运行。")
         }
     }
 
     private var revisionCard: some View {
         AgentXCard {
             HStack {
-                Label(app?.experience?.published.map { "前台已发布 v\($0.number)" } ?? "前台尚未发布", systemImage: "checkmark.seal")
+                Label(app?.experience?.published.map { "应用已发布 v\($0.number)" } ?? "应用尚未发布", systemImage: "checkmark.seal")
                 Spacer()
                 Text(notice != nil && isDirty ? "草稿保存失败" : (isDirty ? "草稿待保存" : (expected == nil ? "尚无草稿" : "草稿已保存")))
                     .foregroundStyle(isDirty ? AgentXTheme.accent : AgentXTheme.muted)
@@ -159,9 +153,14 @@ struct AgentXAppStudioView: View {
 
     private var presentation: some View {
         AgentXCard {
-            Text("前台呈现").font(.headline)
-            TextField("前台标题（留空使用应用名称）", text: field(\.title)).textFieldStyle(.roundedBorder)
-            Picker("前台布局", selection: field(\.layout)) {
+            Text("应用呈现").font(.headline)
+            HStack {
+                Text("皮肤")
+                Button("简洁") { do { try controller.setFrontSkin(.simple) } catch { notice = error.localizedDescription } }.frame(minHeight: 44)
+                Button("沉浸") { do { try controller.setFrontSkin(.immersive) } catch { notice = error.localizedDescription } }.frame(minHeight: 44)
+            }
+            TextField("应用标题（留空使用应用名称）", text: field(\.title)).textFieldStyle(.roundedBorder)
+            Picker("应用布局", selection: field(\.layout)) {
                 Text(AgentXFrontLayout.conversation.title).tag(AgentXFrontLayout.conversation)
                 Text(AgentXFrontLayout.scene.title).tag(AgentXFrontLayout.scene)
             }
@@ -172,12 +171,12 @@ struct AgentXAppStudioView: View {
                 }
             }
             Divider()
-            Text("前台快捷行动 · 最多 3 项").font(.headline)
+            Text("应用快捷行动 · 最多 3 项").font(.headline)
             Text("留空的项不会显示；开放输入仍可使用。").font(.callout).foregroundStyle(AgentXTheme.muted)
             ForEach(0..<3, id: \.self) { index in
                 TextField("行动 \(index + 1)", text: choice(index)).textFieldStyle(.roundedBorder)
             }
-            Text("这里只修改当前应用的前台呈现。发布后用于后续运行。").font(.callout).foregroundStyle(AgentXTheme.muted)
+            Text("这里只修改当前应用的应用呈现。发布后用于后续运行。").font(.callout).foregroundStyle(AgentXTheme.muted)
         }
     }
 
@@ -189,7 +188,7 @@ struct AgentXAppStudioView: View {
             pathRow("应用配置", suffix: "app.yaml")
             pathRow("应用共享记忆", suffix: "memory")
             pathRow("成员实例", suffix: "instances")
-            pathRow("前台状态", suffix: "state")
+            pathRow("应用状态", suffix: "state")
             pathRow("生成制品", suffix: "artifacts")
             pathRow("应用共享文件", suffix: "shared")
             pathRow("运行记录", suffix: "runs")

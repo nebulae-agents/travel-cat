@@ -75,9 +75,6 @@ struct AgentXFrontendView: View {
         VStack(alignment: .leading, spacing: 16) {
             if let contract {
                 Text(contract.title).font(.title2.bold())
-                Picker("前台模块", selection: $session.selectedModule) {
-                    ForEach(contract.modules, id: \.id) { Text($0.title).tag($0.id) }
-                }.pickerStyle(.segmented)
                 if let module {
                     ForEach(module.fields, id: \.id) { item in
                         VStack(alignment: .leading) {
@@ -92,7 +89,13 @@ struct AgentXFrontendView: View {
                     }
                     if let instance = controller.currentInstances.first(where: { $0.id == controller.selectedInstanceID }) {
                         AgentXModelPicker(controller: controller, instance: instance)
-            AgentXConfigurationSummaryView(controller: controller, instance: instance)
+                        if let pilot = controller.pilot(for: instance.appID) {
+                            if pilot.pi?.instanceID != instance.id {
+                                Text("当前成员尚未绑定到本机 Pi 服务。").font(.caption).foregroundStyle(.orange)
+                            }
+                        } else if (try? controller.effectiveConfiguration(instanceID: instance.id)) == nil {
+                            Text("下次请求配置不可用，请在设置中检查成员与模型。").font(.caption).foregroundStyle(.orange)
+                        }
                     }
                     HStack {
                         Button("保存输入") { save() }.disabled(!ready)
@@ -107,15 +110,17 @@ struct AgentXFrontendView: View {
                     if let reviewNotice { Text(reviewNotice).font(.caption).foregroundStyle(.orange) }
                     if let prompt { DisclosureGroup("发送内容预览") { Text(prompt).textSelection(.enabled) } }
                     if let run = controller.state.runs.last(where: { $0.appID == appID && $0.instanceID == controller.selectedInstanceID && $0.purpose == nil }) {
-                        Text(run.displayedStatus).font(.caption)
-                        AgentXRunConfigurationLabel(run: run)
-                        Text(run.response.isEmpty ? (run.failure ?? "等待结果…") : run.response).textSelection(.enabled)
+                        Text(run.response.isEmpty ? (run.failure ?? "等待结果…") : run.response).font(.system(.body, design: .serif)).lineSpacing(8).textSelection(.enabled)
                         if !run.status.terminal { Button("取消运行") { controller.cancel(run.id) } }
                     }
                 }
             }
             if let notice { Text(notice).font(.caption).textSelection(.enabled) }
-        }.onAppear(perform: load)
+            Text("⌘K 切换应用     ⌘Z 撤回上一步     ⌘, 设置")
+                .font(.caption).foregroundStyle(AgentXTheme.muted).frame(maxWidth: .infinity)
+                .help("撤销输入编辑；不删除已发生的对话。")
+        }.frame(maxWidth: 680).frame(maxWidth: .infinity)
+            .onAppear(perform: load)
             .onChange(of: appID) { _, _ in load() }
     }
     private func load() {
@@ -125,7 +130,7 @@ struct AgentXFrontendView: View {
             contract = loaded.0
             session.restore(contract: loaded.0, persisted: loaded.1)
             ready = true; notice = nil
-        } catch { notice = "应用前台未能加载，未执行任何应用代码或覆盖输入：\(error.localizedDescription)" }
+        } catch { notice = "应用界面未能加载，未执行任何应用代码或覆盖输入：\(error.localizedDescription)" }
     }
     @discardableResult private func save() -> Bool {
         do { try store.save(session.values); notice = "输入已保存在本应用内。"; return true }

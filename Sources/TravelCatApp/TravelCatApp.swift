@@ -1090,6 +1090,8 @@ final class TravelCatAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         agentXWindow?.updateWorkbenchContent { [weak self] in self?.managedWorkbenchContent() ?? AnyView(EmptyView()) }
     }
 
+    func stopAllAgentXTasks() { agentX?.softStopAll() }
+
     func showAgentXManager() {
         guard let agentX else { return }
         if agentXWindow == nil {
@@ -1294,6 +1296,7 @@ struct TravelCatApp: App {
         .commands {
             CommandMenu("Agent") {
                 Button("AgentX 管理平台…") { appDelegate.showAgentXManager() }
+                Button("停止全部宿主文本运行（不含外部工作台）") { appDelegate.stopAllAgentXTasks() }
                 Button("Agent 工作台…") { appDelegate.showAgentWorkbench() }
                     .keyboardShortcut("a", modifiers: [.command, .option])
             }
@@ -1312,6 +1315,7 @@ private struct TravelCatMenuContentView: View {
             .disabled(!appDelegate.hasLatestAlbum)
         Divider()
         Button("AgentX 管理平台…") { appDelegate.showAgentXManager() }
+        Button("停止全部宿主文本运行（不含外部工作台）") { appDelegate.stopAllAgentXTasks() }
         Button("Agent 工作台…") { appDelegate.showAgentWorkbench() }
         Button("模型与连接…") { appDelegate.showGenerationSetup() }
         Button("用品与陪伴…") { appDelegate.showSupplies() }

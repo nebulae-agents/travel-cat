@@ -92,7 +92,7 @@ extension AgentXController {
     func openBackstage() {
         guard currentApp != nil else { page = .apps; return }
         appArea = .backstage
-        navigate(to: backstagePages[selectedAppID] ?? .configuration)
+        navigate(to: backstagePages[selectedAppID] ?? .members)
     }
     func openFrontend() {
         if !page.isPlatform, appArea == .backstage { backstagePages[selectedAppID] = page }

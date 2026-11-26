@@ -1,136 +1,72 @@
 import SwiftUI
 
-/// The narrow rail separates application work (top) from platform administration (bottom).
-@MainActor
-struct AgentXAppRail: View {
-    @ObservedObject var controller: AgentXController
-    @State private var holdingStop = false
-    @State private var confirmingStop = false
-    var body: some View {
-        VStack(spacing: 8) {
-            route(.overview)
-            route(.chat)
-            route(.members)
-            route(.inbox)
-            route(.appFiles)
-            Spacer(minLength: 20)
-            route(.apps)
-            Menu {
-                ForEach([AgentXPage.platformOverview, .providers, .definitions, .instances, .backups, .governance]) { page in
-                    Button(page.title, systemImage: page.icon) { controller.navigate(to: page) }
-                }
-            } label: { Image(systemName: "building.2").frame(width: 36, height: 36) }
-                .menuStyle(.borderlessButton).help("平台基石").accessibilityLabel("平台基石")
-            Button { confirmingStop = true } label: {
-                Image(systemName: holdingStop ? "stop.circle.fill" : "stop.circle")
-            }.buttonStyle(.plain)
-                .foregroundStyle(.red).frame(width: 40, height: 40).contentShape(Rectangle())
-                .onLongPressGesture(minimumDuration: 2, pressing: { holdingStop = $0 }) { controller.softStopAll() }
-                .help("长按 2 秒停止全部宿主文本运行；不含外部工作台")
-                .accessibilityLabel("停止全部宿主文本运行")
-                .confirmationDialog("请求停止全部宿主文本运行？", isPresented: $confirmingStop) {
-                    Button("确认软停止", role: .destructive) { controller.softStopAll() }
-                    Button("取消", role: .cancel) {}
-                } message: { Text("等待取消确认，不含外部工作台。也可长按此按钮 2 秒。") }
-            route(.settings)
-        }.padding(.vertical, 12).frame(width: 48).background(AgentXTheme.sidebar)
-    }
-    private func route(_ page: AgentXPage) -> some View {
-        Button {
-            if page == .chat { controller.openFrontend() } else { controller.navigate(to: page) }
-        } label: {
-            Image(systemName: page.icon).frame(width: 40, height: 40)
-
-        }.buttonStyle(.plain).help(page.title).accessibilityLabel(page.title)
-            .disabled(!page.isPlatform && controller.currentApp == nil)
-    }
-}
-
 @MainActor
 struct AgentXAppHeader: View {
     @ObservedObject var controller: AgentXController
     let pending: Int
+    private var settings: Bool { !controller.page.isPlatform && controller.appArea == .backstage }
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
+        HStack(spacing: 12) {
+            if controller.page.isPlatform || settings {
+                Button {
+                    if controller.page.isPlatform { controller.returnToApplication() } else { controller.openFrontend() }
+                } label: {
+                    Label("回到 \(controller.currentApp?.name ?? "应用")", systemImage: "chevron.left").frame(minHeight: 44)
+                }.buttonStyle(.plain).disabled(controller.currentApp == nil)
+            } else {
                 Button { controller.shellOverlay = .switcher } label: {
                     HStack(spacing: 8) {
                         AgentXApplicationIcon(app: controller.currentApp)
                         Text(controller.currentApp?.name ?? "选择应用").font(.headline).lineLimit(1)
                         Image(systemName: "chevron.down").font(.caption)
-                    }
+                    }.frame(minHeight: 44)
                 }.buttonStyle(.plain).help("切换应用 ⌘K").accessibilityLabel("切换应用")
-                HStack(spacing: 4) {
-                    Button("前台") { controller.openFrontend() }
-                        .tint(controller.appArea == .frontend && !controller.page.isPlatform ? AgentXTheme.accent : .secondary)
-                    Button("后台") { controller.openBackstage() }
-                        .tint(controller.appArea == .backstage && !controller.page.isPlatform ? AgentXTheme.accent : .secondary)
-                }.buttonStyle(.bordered).fixedSize().disabled(controller.currentApp == nil)
-                if controller.page.isPlatform {
-                    Text("› 平台 › \(controller.page.title)").foregroundStyle(AgentXTheme.muted).lineLimit(1)
-                    Button("返回 \(controller.currentApp?.name ?? "应用")") { controller.returnToApplication() }.disabled(controller.currentApp == nil)
-                } else if controller.currentApp != nil {
-                    Text("\(controller.appArea == .frontend ? "前台" : "后台") / \(controller.page.title)")
-                        .lineLimit(1).truncationMode(.middle)
-                        .help("\(controller.currentApp?.name ?? "") / \(controller.appArea == .frontend ? "前台" : "后台") / \(controller.page.title)")
-                        .accessibilityLabel("\(controller.currentApp?.name ?? "") / \(controller.appArea == .frontend ? "前台" : "后台") / \(controller.page.title)")
-                    if let app = controller.currentApp {
-                        AgentXStopStatusButton(controller: controller, appID: app.id)
-                    }
-                }
-                Spacer(minLength: 0)
-                Button { controller.shellOverlay = .search } label: { Image(systemName: "magnifyingglass").accessibilityLabel("搜索当前应用") }
-                    .help("搜索当前应用的模块、成员、运行 ⌘P").disabled(controller.currentApp == nil)
-                Button { controller.navigate(to: .inbox) } label: { Label("\(pending)", systemImage: pending > 0 ? "bell.badge" : "bell") }
-                    .help("当前应用待处理").disabled(controller.currentApp == nil)
-                Menu {
-                    ForEach([AgentXPage.configuration, .sceneRules, .characters, .workflows, .members, .appModels, .runs, .appFiles, .appSettings]) { page in
-                        Button(page.title, systemImage: page.icon) { controller.navigate(to: page) }
-                    }
-                    Divider()
-                    Button("简洁皮肤") { attempt { try controller.setFrontSkin(.simple) } }
-                    Button("沉浸皮肤") { attempt { try controller.setFrontSkin(.immersive) } }
-                } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }
-                    .menuStyle(.borderlessButton).fixedSize().help("后台与应用菜单").accessibilityLabel("后台与应用菜单")
-                    .disabled(controller.currentApp == nil)
             }
-            if !controller.page.isPlatform, let app = controller.currentApp {
-                if controller.appArea == .frontend {
-                    AgentXModuleTabs(controller: controller, appID: app.id).id(app.id)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack {
-                            ForEach([AgentXPage.configuration, .members, .sceneRules, .characters, .workflows, .runs, .appFiles, .appSettings]) { page in
-                                Button(page.title) { controller.navigate(to: page) }
-                                    .buttonStyle(.bordered)
-                                    .tint(controller.page == page ? AgentXTheme.accent : .secondary)
-                            }
-                        }
-                    }
+            Spacer(minLength: 0)
+            if settings {
+                AgentXSettingsDraftActions(controller: controller).id(controller.selectedAppID)
+            } else if !controller.page.isPlatform {
+                if let run = controller.currentRuns.last(where: { !$0.status.terminal }) {
+                    HStack(spacing: 8) {
+                        AgentXStopStatusButton(controller: controller, appID: run.appID,
+                            compactTitle: controller.state.instances.first(where: { $0.id == run.instanceID }).map { $0.name + "正在回应" } ?? "任务进行中")
+                        Button("停止") { controller.cancel(run.id) }.frame(minHeight: 44)
+                            .disabled(run.status == .cancelling).help("停止当前回应")
+                    }.padding(.horizontal, 10).background(AgentXTheme.running.opacity(0.1), in: Capsule())
                 }
+                icon("历史", symbol: "clock.arrow.circlepath") { controller.navigate(to: .runs) }
+                icon("设置", symbol: "slider.horizontal.3", help: "设置 ⌘,") { controller.openBackstage() }
             }
-        }.padding(.horizontal, 20).padding(.vertical, 12)
+        }.padding(.horizontal, 20).padding(.vertical, 8)
     }
-    private func attempt(_ body: () throws -> Void) { do { try body() } catch { controller.errorMessage = error.localizedDescription } }
+    private func icon(_ title: String, symbol: String, help: String? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: symbol).frame(width: 44, height: 44) }
+            .buttonStyle(.plain).help(help ?? title).accessibilityLabel(title).disabled(controller.currentApp == nil)
+    }
 }
 
 @MainActor
-private struct AgentXModuleTabs: View {
+struct AgentXSettingsNavigation: View {
     @ObservedObject var controller: AgentXController
-    @ObservedObject var session: AgentXFrontendSession
-    init(controller: AgentXController, appID: String) {
-        self.controller = controller; session = controller.frontendSession(appID: appID)
-    }
+    @State private var more = false
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(controller.currentModules) { module in
-                    Button(module.title) { controller.selectModule(module.id) }
-                        .buttonStyle(.plain).padding(.horizontal, 12).padding(.vertical, 7)
-                        .background((session.selectedModule == module.id || (session.selectedModule.isEmpty && controller.currentModules.first?.id == module.id)) && controller.page == module.page ? AgentXTheme.accent.opacity(0.16) : .clear, in: Capsule())
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("设置").font(.title3.bold()).padding(12)
+            ForEach([AgentXPage.members, .sceneRules, .characters]) { route($0) }
+            Button { more.toggle() } label: {
+                HStack { Text("更多"); Spacer(); Image(systemName: more ? "chevron.up" : "chevron.down") }.frame(minHeight: 44)
+            }.buttonStyle(.plain).padding(.horizontal, 12).accessibilityLabel(more ? "收起更多设置" : "展开更多设置")
+            if more {
+                ForEach([AgentXPage.workflows, .appModels, .runs, .appFiles, .appSettings]) { route($0) }
             }
-        }
+            Spacer()
+        }.padding(12).frame(width: 200).background(AgentXTheme.sidebar)
+    }
+    private func route(_ page: AgentXPage) -> some View {
+        Button { controller.navigate(to: page) } label: {
+            Text(page.title).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).padding(.horizontal, 12)
+                .background(controller.page == page ? AgentXTheme.accent.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 10))
+        }.buttonStyle(.plain)
     }
 }
 
@@ -140,7 +76,8 @@ struct AgentXShellShortcuts: View {
     var body: some View {
         Group {
             Button("切换应用") { controller.shellOverlay = .switcher }.keyboardShortcut("k", modifiers: .command)
-            Button("搜索当前应用") { if controller.currentApp != nil { controller.shellOverlay = .search } }.keyboardShortcut("p", modifiers: .command)
+            Button("搜索应用与内容") { controller.shellOverlay = .switcher }.keyboardShortcut("p", modifiers: .command)
+            Button("应用设置") { controller.openBackstage() }.keyboardShortcut(",", modifiers: .command)
             ForEach(0..<9) { index in
                 Button("切换应用 \(index + 1)") { controller.selectApplicationShortcut(index) }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)

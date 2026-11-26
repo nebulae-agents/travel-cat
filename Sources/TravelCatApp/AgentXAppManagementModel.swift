@@ -92,7 +92,7 @@ final class AgentXAppManagementModel: ObservableObject {
         do {
             guard let preview, preview.canInstall else { throw AgentXError.invalid("请先完成预览并解决全部缺失依赖，再确认安装。") }
             try availableService().install(preview)
-            creationStep = .installed(appID: preview.application.id); notice = "已安装，默认停用；启用后可进入前台，安装不会启动任务。"
+            creationStep = .installed(appID: preview.application.id); notice = "已安装，默认停用；启用后可打开应用，安装不会启动任务。"
         } catch { failure = error.localizedDescription; self.preview = nil }
     }
     func beginServiceRepair() { preview = nil; repairingServices = true }

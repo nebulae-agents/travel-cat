@@ -21,6 +21,13 @@ struct AgentXModelPicker: View {
         }.sheet(isPresented: $browsing) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack { Text("选择下次请求模型").font(.title2.bold()); Spacer(); Button("完成") { browsing = false }.keyboardShortcut(.cancelAction) }
+                if instance.conversationModel != nil {
+                    Button {
+                        do { try controller.clearConversationModel(instanceID: instance.id); browsing = false }
+                        catch { controller.errorMessage = error.localizedDescription }
+                    } label: { Text("恢复默认模型").frame(minHeight: 44) }
+                        .disabled(controller.isInstanceBusy(instance.id))
+                }
                 AgentXModelBrowser(providers: controller.state.providers, selected: current,
                     busy: controller.isInstanceBusy(instance.id), choose: { entry in
                         try controller.selectConversationModel(instanceID: instance.id, providerID: entry.providerID, model: entry.model.id)

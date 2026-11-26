@@ -52,7 +52,6 @@ struct AgentXManagerView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            AgentXAppRail(controller: controller)
             VStack(spacing: 0) {
                 AgentXAppHeader(controller: controller, pending: pendingCount)
                 Divider().overlay(AgentXTheme.border)
@@ -66,12 +65,25 @@ struct AgentXManagerView: View {
                         if controller.isLoaded { Button("关闭提示") { controller.errorMessage = nil } }
                     }.padding(12).background(Color.red.opacity(0.12))
                 }
+                HStack(spacing: 0) {
+                    if !controller.page.isPlatform && controller.appArea == .backstage {
+                        AgentXSettingsNavigation(controller: controller).id(controller.selectedAppID)
+                    }
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 24) { content }
+                    VStack(alignment: .leading, spacing: 24) {
+                        if !controller.page.isPlatform && controller.appArea == .backstage {
+                            AgentXSettingsAssistantEntry(controller: controller)
+                        }
+                        if controller.usesUsageAssistant && pendingCount > 0 {
+                            Button("\(pendingCount) 项内容等你查看") { controller.navigate(to: .inbox) }.frame(minHeight: 44)
+                        }
+                        content
+                    }
                         .id(AgentXAppNavigationPolicy.contentScope(page: controller.page, appID: controller.selectedAppID))
                         .padding(28)
-                        .frame(maxWidth: isFront && controller.currentApp?.kind != .workbench ? 956 : .infinity, alignment: .leading)
+                        .frame(maxWidth: isFront && controller.currentApp?.kind != .workbench ? 736 : .infinity, alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .center)
+                }
                 }
             }
         }
@@ -111,8 +123,8 @@ struct AgentXManagerView: View {
         }
         .sheet(item: $controller.shellOverlay) { overlay in
             switch overlay {
-            case .switcher: AgentXAppSwitcher(controller: controller)
-            case .search: AgentXAppSearch(controller: controller)
+            case .switcher: AgentXAppSwitcher(controller: controller, travelPending: travelPending, workbenchPending: workbenchPending)
+            case .search: AgentXAppSwitcher(controller: controller, travelPending: travelPending, workbenchPending: workbenchPending)
             }
         }
         .sheet(item: $editor) { presentation in
@@ -225,7 +237,7 @@ struct AgentXManagerView: View {
             } else if module.id == "director-intervention" {
                 AgentXCard {
                     Text("导演干预").font(.title2)
-                    Text("实时模拟干预引擎尚未接入。可在后台修改场景与人物，发布后用于后续对话。")
+                    Text("实时模拟干预引擎尚未接入。可在设置修改场景与人物，发布后用于后续对话。")
                     Button("场景与规则") { controller.navigate(to: .sceneRules) }
                     Button("人物定制") { controller.navigate(to: .characters) }
                 }
@@ -250,7 +262,7 @@ struct AgentXManagerView: View {
             }
             AgentXCard {
                 Label("从模型服务开始", systemImage: "point.3.connected.trianglepath.dotted").font(.headline)
-                Text("① 配置模型服务   →   ② 创建 Agent 定义   →   ③ 新建应用与实例   →   ④ 进入前台对话")
+                Text("① 配置模型服务   →   ② 创建 Agent 定义   →   ③ 新建应用与实例   →   ④ 进入应用对话")
                     .foregroundStyle(AgentXTheme.muted).fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Button("配置模型服务") { controller.navigate(to: .providers) }.buttonStyle(.borderedProminent)
@@ -383,7 +395,7 @@ struct AgentXManagerView: View {
         } else if let app = controller.currentApp,
                   AgentXFrontendStore(root: controller.repository.root, appID: app.id).exists {
             AgentXFrontendView(controller: controller, appID: app.id).id(app.id)
-        } else if controller.currentApp?.experience?.published?.configuration.layout == .scene && controller.frontSkin == .immersive {
+        } else if controller.currentApp?.experience?.published?.configuration.layout == .scene {
             AgentXExperienceFrontView(controller: controller)
         } else {
             if let instance = controller.currentInstance {
@@ -443,7 +455,7 @@ struct AgentXManagerView: View {
             if runs.isEmpty {
                 AgentXCard {
                     Label(inbox ? "暂时没有待处理事项" : "还没有运行记录", systemImage: inbox ? "checkmark.circle" : "clock")
-                    Button("进入应用前台") { controller.navigate(to: .chat) }
+                    Button("进入应用应用") { controller.navigate(to: .chat) }
                 }
             }
             ForEach(runs, id: \.appScopedID) { run in
@@ -501,6 +513,12 @@ struct AgentXManagerView: View {
     }
     private var settings: some View {
         Group {
+            AgentXCard {
+                Text("平台管理").font(.headline)
+                ForEach([AgentXPage.platformOverview, .definitions, .instances, .governance]) { page in
+                    Button(page.title) { controller.navigate(to: page) }.frame(minHeight: 44)
+                }
+            }
             AgentXBudgetCard(controller: controller, editable: true)
             if let storage = controller.hostStorage {
                 AgentXAppLifecycleView(apps: controller.state.apps,
