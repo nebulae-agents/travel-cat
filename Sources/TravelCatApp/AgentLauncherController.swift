@@ -67,8 +67,13 @@ final class AgentLauncherController: NSObject, NSWindowDelegate {
     }
     func hide() { inboxWindow?.orderOut(nil); panel.orderOut(nil) }
     func toggleInbox() {
-        if inboxWindow?.isVisible == true { closeInbox(); return }
         refresh()
+        if let entry = viewState.inbox.singleEntry, case let .postcard(id) = entry.destination {
+            closeInbox()
+            openPostcard(id)
+            return
+        }
+        if inboxWindow?.isVisible == true { closeInbox(); return }
         let window: NSPanel
         if let existing = inboxWindow { window = existing }
         else {

@@ -1,8 +1,32 @@
 import AppKit
+import TravelCore
+import TravelUI
 import XCTest
 @testable import TravelCatApp
 
 final class MailboxInboxTests: XCTestCase {
+    @MainActor func testMailboxClickOpensOnlyASolePostcard() throws {
+        let suite = "MailboxClick-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let snapshot = TripSnapshot.empty(now: Date())
+        func makeCard() -> TripEvent { TripEvent(id: UUID(), tripID: UUID(), previousEventID: nil, occurredAt: .distantPast,
+            phase: .postcardReady, location: nil, transport: nil, summary: "隔离明信片", mood: snapshot.mood,
+            continuityReferences: [], openHook: nil, consumedItemID: nil, postcardStatus: .ready, postcardRelativePath: "postcards/test.png") }
+        let card = makeCard(), another = makeCard()
+        for events in [[card, another], [card]] {
+            let pet = AppModel(snapshot: snapshot, events: events, defaults: defaults)
+            var opened: UUID?
+            let launcher = AgentLauncherController(model: nil, petModel: pet, openPostcard: { opened = $0 },
+                positionStore: MailboxPositionStore(defaults: defaults), action: {})
+            defer { launcher.hide() }
+            launcher.toggleInbox()
+            XCTAssertEqual(opened, events.count == 1 ? card.id : nil)
+            XCTAssertEqual(NSApp.windows.contains { $0.title == "小黑的邮筒 · 消息" && $0.isVisible }, events.count > 1)
+            XCTAssertEqual(pet.unreadPostcardIDs.count, events.count)
+        }
+    }
+
     func testEmptySingleMultipleAndCappedBadge() {
         XCTAssertEqual(MailboxInbox(entries: []).badge, nil)
         let card = MailboxEntry.postcard(id: UUID(), date: .distantPast)

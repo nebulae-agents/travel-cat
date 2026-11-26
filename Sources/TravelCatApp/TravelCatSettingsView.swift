@@ -233,6 +233,7 @@ final class TravelCatEnvironment: ObservableObject {
             },
             route: route,
             stateChanged: promptStateChanged,
+            mailboxAvailable: { petLocator() != nil },
             preferBubble: { $0.followCodexPet },
             applyBubblePreference: { [weak bubbleController] enabled in
                 bubbleController?.settingsDidChange(followCodexPet: enabled)
