@@ -1,7 +1,7 @@
 import Foundation
 
 /// Declarative manifest data; preserved as data, never evaluated as host instructions.
-indirect enum AgentXManifestValue: Codable, Equatable {
+indirect enum AgentXManifestValue: Codable, Equatable, Sendable {
     case string(String), bool(Bool), integer(Int64), unsignedInteger(UInt64), number(Double), array([Self]), object([String: Self]), null
     init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()

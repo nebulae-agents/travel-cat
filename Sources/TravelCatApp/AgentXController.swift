@@ -46,6 +46,7 @@ final class AgentXController: ObservableObject {
     private struct TextRoute {
         let runtime: AgentXTextRuntime
         var usesGateway = false
+        var requiresGateway = false
         let respond: Responder
     }
     private let piRoute: TextRoute
@@ -57,11 +58,20 @@ final class AgentXController: ObservableObject {
     private func textRoute(for app: AgentXApplication, provider: AgentXProvider, instance: AgentXInstance) throws -> TextRoute {
         let direct = try directTextRoute(for: app, provider: provider)
         guard let plan = try hostGateway.plan(appID: app.id, instanceID: instance.id, provider: provider, model: instance.model, state: state) else {
+            if direct.requiresGateway {
+                let permission = try AgentXExecutionPolicy(root: repository.root, application: app, provider: provider)
+                try permission.deny("runtime.gateway", runID: AgentXPiExecutionContext.runID)
+            }
+            let permission = try AgentXExecutionPolicy(root: repository.root, application: app, provider: provider)
+            try permission.requireNetwork(provider.baseURL, runID: AgentXPiExecutionContext.runID)
             return TextRoute(runtime: direct.runtime, respond: { [weak self] provider, model, secret, messages in
                 guard let self, self.isLoaded,
                       try self.hostGateway.plan(appID: app.id, instanceID: instance.id, provider: provider, model: model, state: self.state) == nil else {
                     throw AgentXError.invalid("网关或预算配置已改变，请重新提交任务。")
                 }
+                guard let current = self.state.apps.first(where: { $0.id == app.id }) else { throw AgentXError.unavailable }
+                let currentPermission = try AgentXExecutionPolicy(root: self.repository.root, application: current, provider: provider)
+                try currentPermission.requireNetwork(provider.baseURL, runID: AgentXPiExecutionContext.runID)
                 return try await direct.respond(provider, model, secret, messages)
             })
         }
@@ -308,7 +318,7 @@ final class AgentXController: ObservableObject {
         let budget = gatewayBudget ?? AgentXGatewayBudget(root: repository.root)
         self.gatewayBudget = budget
         self.hostGateway = AgentXHostGateway(root: repository.root, pi: pi, budget: budget, lease: gatewayLease)
-        piRoute = TextRoute(runtime: .pi, respond: respond ?? { provider, model, secret, messages in
+        piRoute = TextRoute(runtime: .pi, requiresGateway: respond == nil, respond: respond ?? { provider, model, secret, messages in
             try await pi.respond(provider: provider, model: model, secret: secret, messages: messages)
         })
         nativeRoute = TextRoute(runtime: .nativeHTTP, respond: respond ?? { provider, model, secret, messages in
@@ -593,7 +603,7 @@ final class AgentXController: ObservableObject {
     }
     func addApp(name: String) throws {
         var next = state
-        let app = AgentXApplication(id: UUID().uuidString.lowercased(), name: try required(name, label: "应用名称"), kind: .chat)
+        let app = AgentXApplication.textApplication(id: UUID().uuidString.lowercased(), name: try required(name, label: "应用名称"), kind: .chat)
         next.apps.append(app)
         try commit(next)
         _ = selectApplication(app.id)

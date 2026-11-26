@@ -15,6 +15,8 @@ final class AgentXModelGateway {
     enum Failure: Error { case unauthorized, invalidRequest, unavailable }
     let token = UUID().uuidString.lowercased() + UUID().uuidString.lowercased()
     let path: String
+    private let permission: AgentXExecutionPolicy
+    private let runID: String
     private let provider: AgentXProvider
     private let binding: AgentXGatewayConfiguration.Binding
     private let credential: () throws -> String?
@@ -35,10 +37,12 @@ final class AgentXModelGateway {
     private var readiness: CheckedContinuation<String, Error>?
     private var responseSecret = ""
 
-    init(appID: String, runID: String, provider: AgentXProvider, binding: AgentXGatewayConfiguration.Binding,
+    init(appID: String, runID: String, provider: AgentXProvider, binding: AgentXGatewayConfiguration.Binding, permission: AgentXExecutionPolicy,
          credential: @escaping () throws -> String?, now: @escaping () -> Date = { Date() },
          beforeSubmit: @escaping () throws -> Void = {}, onUsage: @escaping (Int, Int) throws -> Void = { _, _ in },
          onComplete: @escaping (Bool) throws -> Void = { _ in }, onClose: @escaping () throws -> Void = {}) throws {
+        guard permission.appID == appID else { throw Failure.invalidRequest }
+        self.permission = permission; self.runID = runID
         try AgentXPackageFiles.validateID(appID); try AgentXPackageFiles.validateID(runID)
         guard binding.providerID == provider.id, provider.serviceProtocol == .openAICompatible,
               let url = URLComponents(string: provider.baseURL),
@@ -144,6 +148,8 @@ final class AgentXModelGateway {
             "stream_options": ["include_usage": true], "max_tokens": binding.maxOutputTokens]
         let encoded = try JSONSerialization.data(withJSONObject: normalized)
         guard encoded.count <= binding.maxRequestBytes else { throw Failure.invalidRequest }
+        // Trusted denial is durable before credentials, budget or URLSession submission.
+        try permission.requireNetwork(provider.baseURL, runID: runID)
         used = true
         let secret = try credential() ?? ""
         guard secret.utf8.count <= 8192, !secret.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),

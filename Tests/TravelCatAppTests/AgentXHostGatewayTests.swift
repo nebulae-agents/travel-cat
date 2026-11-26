@@ -55,6 +55,7 @@ final class AgentXHostGatewayTests: XCTestCase {
         let repository = AgentXRepository(root: root)
         var state = AgentXState()
         state.apps[0].runtime = runtime
+        state.apps[0].manifest = ["permissions": .object(["network": .array([.string("configured-provider")]), "files": .array([.string("self")])])]
         state.providers = [.init(id: "p", name: "P", baseURL: "http://127.0.0.1:\(number)/v1", models: ["m"],
             modelSelection: .init(models: [.init(id: "m", enabled: true, contextLength: 100)]))]
         state.definitions = [.init(id: "role", name: "Role", prompt: "Be brief")]
@@ -66,29 +67,26 @@ final class AgentXHostGatewayTests: XCTestCase {
         let credentials = AgentXTestCredentials()
         try credentials.save("host-fixture-key", id: state.providers[0].credentialID)
         // A process fixture verifies Pi's stdin contract without depending on an installed app.
-        let runner = root.appendingPathComponent("runner.py")
+        let runner = root.appendingPathComponent("runner.sh")
         try #"""
-        import sys, json, urllib.request
-        from pathlib import Path
-        p = json.load(sys.stdin)
-        assert p['secret'] == '' and 'host-fixture-key' not in json.dumps(p)
-        assert sys.argv[1] == '--stream-loopback'
-        assert p['baseURL'].startswith('http://127.0.0.1:')
-        assert len(p['gatewayToken']) == 72
-        payload = json.dumps(dict(model=p['model'], messages=p['messages'], stream=True)).encode()
-        req = urllib.request.Request(p['baseURL'] + '/chat/completions', payload, {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + p['gatewayToken']})
-        text = ''; done = False
-        with urllib.request.urlopen(req, timeout=5) as response:
-            for line in response:
-                if line == b'data: [DONE]\n': done = True; break
-                if line.startswith(b'data: {'):
-                    event = json.loads(line[6:]); choices = event.get('choices', [])
-                    if choices: text += choices[0].get('delta', {}).get('content', '')
-        assert done
-        print(json.dumps(dict(event='text', text=text)))
-        print(json.dumps(dict(version=1, ok=True, text=text)))
+        set -eu
+        payload=$(/bin/cat)
+        base=$(printf '%s' "$payload" | /usr/bin/plutil -extract baseURL raw -o - -)
+        token=$(printf '%s' "$payload" | /usr/bin/plutil -extract gatewayToken raw -o - -)
+        messages=$(printf '%s' "$payload" | /usr/bin/plutil -extract messages json -o - -)
+        body=$(printf '{"model":"m","stream":true,"messages":%s}' "$messages")
+        endpoint=${base#http://127.0.0.1:}
+        port=${endpoint%%/*}
+        path=/${endpoint#*/}/chat/completions
+        length=$(printf '%s' "$body" | /usr/bin/wc -c | /usr/bin/tr -d ' ')
+        exec 3<>/dev/tcp/127.0.0.1/$port
+        printf 'POST %s HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %s\r\n\r\n%s' "$path" "$token" "$length" "$body" >&3
+        output=$(/bin/cat <&3)
+        exec 3>&-
+        printf '%s' "$output" | /usr/bin/grep -q 'gateway reply'
+        printf '%s\n' '{"event":"text","text":"gateway reply"}' '{"version":1,"ok":true,"text":"gateway reply"}'
         """#.write(to: runner, atomically: true, encoding: .utf8)
-        let pi = AgentXPiRuntime(nodeURL: realPi?.0 ?? URL(fileURLWithPath: "/usr/bin/python3"), runnerURL: realPi?.1 ?? runner, ledgerRoot: root)
+        let pi = AgentXPiRuntime(nodeURL: realPi?.0 ?? URL(fileURLWithPath: "/bin/sh"), runnerURL: realPi?.1 ?? runner, ledgerRoot: root)
         let controller = AgentXController(repository: repository, credentials: credentials, autoRefreshCatalogs: false, piRuntime: pi)
         return Fixture(controller: controller, root: root, calls: calls)
     }

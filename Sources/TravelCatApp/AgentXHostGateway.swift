@@ -10,6 +10,7 @@ enum AgentXGatewayExecutionContext {
 final class AgentXHostGateway {
     struct Plan: Equatable {
         let appID: String
+        let permission: AgentXExecutionPolicy
         let instanceID: String
         let provider: AgentXProvider
         let binding: AgentXGatewayConfiguration.Binding
@@ -43,7 +44,9 @@ final class AgentXHostGateway {
         }
         // Retained for the Controller lifetime, or shared with the desktop writer.
         try ensureLease()
-        return Plan(appID: appID, instanceID: instanceID, provider: provider, binding: binding,
+        guard let application = state.apps.first(where: { $0.id == appID }) else { throw AgentXError.unavailable }
+        let permission = try AgentXExecutionPolicy(root: root, application: application, provider: provider)
+        return Plan(appID: appID, permission: permission, instanceID: instanceID, provider: provider, binding: binding,
                     credentialProfile: member.credentialProfile ?? provider.credentialProfile)
     }
 
@@ -52,7 +55,7 @@ final class AgentXHostGateway {
         guard let ownerRunID = AgentXPiExecutionContext.runID else { throw AgentXError.unavailable }
         let requestID = AgentXGatewayExecutionContext.requestID ?? ownerRunID
         let appID = plan.appID, budget = budget
-        let proxy = try AgentXModelGateway(appID: appID, runID: requestID, provider: plan.provider, binding: plan.binding,
+        let proxy = try AgentXModelGateway(appID: appID, runID: requestID, provider: plan.provider, binding: plan.binding, permission: plan.permission,
             credential: credential,
             beforeSubmit: { try budget.reserve(appID: appID, runID: requestID, provider: plan.provider,
                                                model: plan.binding.model, maxOutputTokens: plan.binding.maxOutputTokens) },
@@ -74,7 +77,10 @@ final class AgentXHostGateway {
                     payload["maxOutputTokens"] = plan.binding.maxOutputTokens
                     payload["timeoutSeconds"] = plan.binding.timeoutSeconds
                     // Keep the outer workflow run ID for process-stop evidence; billing uses the step ID.
-                    return try await pi.execute(runID: ownerRunID, payload: JSONSerialization.data(withJSONObject: payload), progress: { _ in })
+                    let sandbox = try plan.permission.sandbox(gatewayURL: baseURL, runID: ownerRunID)
+                    return try await AgentXPermissionContext.$sandbox.withValue(sandbox) {
+                        try await pi.execute(runID: ownerRunID, payload: JSONSerialization.data(withJSONObject: payload), progress: { _ in })
+                    }
                 }
                 return try await Self.nativeResponse(baseURL: baseURL, token: proxy.token, model: plan.binding.model,
                                                      messages: messages, timeout: plan.binding.timeoutSeconds)

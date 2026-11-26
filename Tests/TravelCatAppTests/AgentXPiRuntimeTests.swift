@@ -8,19 +8,32 @@ struct AgentXPiRuntimeTests {
     private let provider = AgentXProvider(id: "router", name: "Router", baseURL: "https://openrouter.ai/api/v1", models: ["new/model"])
     private let messages = [AgentXMessage(role: "user", content: "hello")]
     private func fixture(_ script: String) throws -> URL {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pi-runtime-test-\(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("pi-runtime-test-\(UUID().uuidString)/apps/fixture/state")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try script.write(to: directory.appendingPathComponent("runner.sh"), atomically: true, encoding: .utf8)
         return directory
     }
-    private func runtime(_ directory: URL, timeout: TimeInterval = 2) -> AgentXPiRuntime {
-        AgentXPiRuntime(nodeURL: URL(fileURLWithPath: "/bin/sh"), runnerURL: directory.appendingPathComponent("runner.sh"), timeout: timeout)
+    private func sandbox(_ directory: URL, gatewayURL: String? = nil) throws -> AgentXPiSandbox {
+        var app = AgentXApplication(id: "fixture", name: "Fixture", kind: .chat)
+        app.manifest = ["permissions": .object(["files": .array([.string("self")]), "network": .array([.string("configured-provider")])])]
+        let root = directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return try AgentXExecutionPolicy(root: root, application: app, provider: provider).sandbox(gatewayURL: gatewayURL, runID: "fixture")
+    }
+    private func runtime(_ directory: URL, timeout: TimeInterval = 2) throws -> AgentXPiRuntime {
+        AgentXPiRuntime(nodeURL: URL(fileURLWithPath: "/bin/sh"), runnerURL: directory.appendingPathComponent("runner.sh"), timeout: timeout, sandbox: try sandbox(directory))
+    }
+    @Test func unscopedPiCannotLaunchOrReadOutsideRuntime() async throws {
+        let directory = try fixture("/bin/cat >/dev/null; printf '%s' '{\"version\":1,\"ok\":true,\"text\":\"unconfined\"}'")
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
+        await #expect(throws: (any Error).self) {
+            try await AgentXPiRuntime(nodeURL: URL(fileURLWithPath: "/bin/sh"), runnerURL: directory.appendingPathComponent("runner.sh")).respond(provider: provider, model: "new/model", secret: "key", messages: messages)
+        }
     }
     @Test func fastCompletedChildPersistsReapedReceiptForItsRun() async throws {
         let directory = try fixture("/bin/cat >/dev/null; printf '%s' '{\"version\":1,\"ok\":true,\"text\":\"fast\"}'")
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
         let owner = try #require(AgentXStopProcessIdentity.read(getpid()))
-        let instance = AgentXPiRuntime(nodeURL: URL(fileURLWithPath: "/bin/sh"), runnerURL: directory.appendingPathComponent("runner.sh"), ledgerRoot: directory)
+        let instance = AgentXPiRuntime(nodeURL: URL(fileURLWithPath: "/bin/sh"), runnerURL: directory.appendingPathComponent("runner.sh"), ledgerRoot: directory, sandbox: try sandbox(directory))
         for _ in 0..<12 {
             let answer = try await AgentXPiExecutionContext.$runID.withValue("fast-run") {
                 try await instance.respond(provider: provider, model: "new/model", secret: "key", messages: messages)
@@ -41,7 +54,7 @@ struct AgentXPiRuntimeTests {
         case "$(/usr/bin/env)" in *NODE_OPTIONS*|*OPENROUTER*|*HTTP_PROXY*|*private-fixture-key*) exit 5;; esac
         printf '%s' '{"version":1,"ok":true,"text":"confirmed"}'
         """#)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
         var selected = provider
         selected.modelSelection = .init(models: [.init(id: "new/model", contextLength: 131072)])
         let result = try await runtime(directory).respond(provider: selected, model: "new/model", secret: "private-fixture-key", messages: messages)
@@ -56,8 +69,8 @@ struct AgentXPiRuntimeTests {
         while [ ! -f acknowledged ]; do /bin/sleep 0.01; done
         printf '%s\n' '{"event":"text","text":"二"}' '{"event":"usage","input":9,"output":2}' '{"version":1,"ok":true,"text":"一二"}'
         """#)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let instance = runtime(directory)
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
+        let instance = try runtime(directory)
         let local = AgentXProvider(id: "loop", name: "Loop", baseURL: "http://127.0.0.1:1/v1", models: ["model"])
         let payload = try instance.prepare(provider: local, model: "model", secret: nil, messages: messages)
         let adapter: any AgentXRunAdapter = instance
@@ -78,8 +91,8 @@ struct AgentXPiRuntimeTests {
 
     @Test func streamingChecksBothEndpointAndCredentialBeforeLaunching() async throws {
         let directory = try fixture("touch launched")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let instance = runtime(directory)
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
+        let instance = try runtime(directory)
         let local = AgentXProvider(id: "local", name: "Loop", baseURL: "http://127.0.0.1:1/v1", models: ["model"])
         for (endpoint, pipeSecret, explicitSecret) in [(provider, "test-key", ""), (local, "test-key", ""), (local, "", "test-key")] {
             let payload = try instance.prepare(provider: endpoint, model: "model", secret: pipeSecret, messages: messages)
@@ -88,6 +101,20 @@ struct AgentXPiRuntimeTests {
             }
         }
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launched").path))
+        #expect(try sandbox(directory).policy.events().count == 3)
+    }
+
+    @Test func payloadCannotChooseAnotherLoopbackPort() async throws {
+        let directory = try fixture("touch launched")
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
+        let scope = try sandbox(directory, gatewayURL: "http://127.0.0.1:1/v1")
+        let runtime = AgentXPiRuntime(nodeURL: URL(fileURLWithPath: "/bin/sh"), runnerURL: directory.appendingPathComponent("runner.sh"), sandbox: scope)
+        let other = AgentXProvider(id: "local", name: "Other", baseURL: "http://127.0.0.1:2/v1", models: ["m"])
+        let payload = try runtime.prepare(provider: other, model: "m", secret: nil, messages: messages)
+        await #expect(throws: AgentXPermissionDenied.self) { try await runtime.execute(runID: "wrong-port", payload: payload, progress: nil) }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launched").path))
+        #expect(try scope.policy.events().first?["runID"] as? String == "wrong-port")
+        #expect(try scope.policy.events().first?["operation"] as? String == "runtime.gateway")
     }
 
     @Test func streamingCallbackFailureReapsChildAndDropsQueuedProgress() async throws {
@@ -98,8 +125,8 @@ struct AgentXPiRuntimeTests {
         printf '%s\n' '{"event":"text","text":"first"}' '{"event":"text","text":"second"}'
         while :; do :; done
         """#)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let instance = runtime(directory)
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
+        let instance = try runtime(directory)
         let local = AgentXProvider(id: "loop", name: "Loop", baseURL: "http://127.0.0.1:1/v1", models: ["model"])
         let payload = try instance.prepare(provider: local, model: "model", secret: nil, messages: messages)
         var calls = 0
@@ -118,7 +145,7 @@ struct AgentXPiRuntimeTests {
     @Test func invalidProtocolAndNonzeroExitAreGenericErrors() async throws {
         for script in ["/bin/cat >/dev/null; printf 'private-fixture-key'", "/bin/cat >/dev/null; printf '%s' '{\"version\":1,\"ok\":true,\"text\":\"bad\"}'; exit 4", "/bin/cat >/dev/null; printf '%s' '{\"version\":2,\"ok\":true,\"text\":\"bad\"}'", "/bin/cat >/dev/null; printf '%s' '{\"version\":1,\"ok\":false,\"code\":\"private-fixture-key\"}'"] {
             let directory = try fixture(script)
-            defer { try? FileManager.default.removeItem(at: directory) }
+            defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
             do {
                 _ = try await runtime(directory).respond(provider: provider, model: "new/model", secret: "private-fixture-key", messages: messages)
                 Issue.record("Invalid result unexpectedly succeeded")
@@ -139,7 +166,7 @@ struct AgentXPiRuntimeTests {
     }
     @Test func requestAndResponseBoundsFailWithoutPipeDeadlocks() async throws {
         let directory = try fixture("/bin/cat >/dev/null; /usr/bin/head -c 200000 /dev/zero")
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
         await #expect(throws: AgentXPiRuntimeError.invalidResponse) {
             try await runtime(directory).respond(provider: provider, model: "new/model", secret: "key", messages: messages)
         }
@@ -149,12 +176,12 @@ struct AgentXPiRuntimeTests {
     }
     @Test func stderrIsDrainedWithoutExposingItsContents() async throws {
         let directory = try fixture("/bin/cat >/dev/null; /usr/bin/head -c 200000 /dev/zero >&2; printf '%s' '{\"version\":1,\"ok\":true,\"text\":\"ok\"}'")
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
         #expect(try await runtime(directory).respond(provider: provider, model: "new/model", secret: "key", messages: messages) == "ok")
     }
     @Test func timeoutKillsUncooperativeChildAndReapsIt() async throws {
         let directory = try fixture("trap '' TERM\nprintf '%s' $$ > \"$0.pid\"\nwhile :; do :; done")
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
         await #expect(throws: AgentXPiRuntimeError.timeout) {
             try await runtime(directory, timeout: 0.15).respond(provider: provider, model: "new/model", secret: "key", messages: messages)
         }
@@ -163,7 +190,7 @@ struct AgentXPiRuntimeTests {
     }
     @Test func cancellationKillsUncooperativeChildAndReapsIt() async throws {
         let directory = try fixture("trap '' TERM\nprintf '%s' $$ > \"$0.pid\"\nwhile :; do :; done")
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
         let operation = Task { try await runtime(directory).respond(provider: provider, model: "new/model", secret: "key", messages: messages) }
         let pidFile = directory.appendingPathComponent("runner.sh.pid")
         for _ in 0..<100 where !FileManager.default.fileExists(atPath: pidFile.path) { try await Task.sleep(for: .milliseconds(10)) }
@@ -177,7 +204,7 @@ struct AgentXPiRuntimeTests {
         let node = try #require(ProcessInfo.processInfo.environment["AGENTX_PI_TEST_NODE"])
         let runner = try #require(ProcessInfo.processInfo.environment["AGENTX_PI_TEST_RUNNER"])
         let directory = try fixture("")
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
         let serverScript = directory.appendingPathComponent("server.mjs")
         try #"""
         import http from 'node:http';
@@ -213,10 +240,10 @@ struct AgentXPiRuntimeTests {
         for _ in 0..<300 where !FileManager.default.fileExists(atPath: portFile.path) { try await Task.sleep(for: .milliseconds(10)) }
         let port = try String(contentsOf: portFile, encoding: .utf8)
         let local = AgentXProvider(id: "local", name: "Local fixture", baseURL: "http://127.0.0.1:\(port)/v1", models: ["new/model-a", "new/model-b"])
-        let runtime = AgentXPiRuntime(nodeURL: URL(fileURLWithPath: node), runnerURL: URL(fileURLWithPath: runner), timeout: 5)
+        let runtime = AgentXPiRuntime(nodeURL: URL(fileURLWithPath: node), runnerURL: URL(fileURLWithPath: runner), timeout: 5, sandbox: try sandbox(directory, gatewayURL: local.baseURL))
         let history = [AgentXMessage(role: "system", content: "system"), .init(role: "user", content: "old question"), .init(role: "assistant", content: "old answer"), .init(role: "user", content: "next")]
         for model in local.models {
-            #expect(try await runtime.respond(provider: local, model: model, secret: "fixture-key", messages: history) == "reply:\(model)")
+            #expect(try await runtime.respond(provider: local, model: model, secret: nil, messages: history) == "reply:\(model)")
         }
         let data = try Data(contentsOf: directory.appendingPathComponent("requests.json"))
         let requests = try #require(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
@@ -228,7 +255,7 @@ struct AgentXPiRuntimeTests {
             #expect(sent[1]["content"] as? String == "old question")
             #expect(sent[2]["content"] as? String == "old answer")
         }
-        let operation = Task { try await runtime.respond(provider: local, model: "new/model-b", secret: "fixture-key", messages: [.init(role: "user", content: "hang")]) }
+        let operation = Task { try await runtime.respond(provider: local, model: "new/model-b", secret: nil, messages: [.init(role: "user", content: "hang")]) }
         let hanging = directory.appendingPathComponent("hanging")
         for _ in 0..<300 where !FileManager.default.fileExists(atPath: hanging.path) { try await Task.sleep(for: .milliseconds(10)) }
         #expect(FileManager.default.fileExists(atPath: hanging.path))
