@@ -7,6 +7,16 @@ import SwiftUI
 enum AgentXAcceptanceLaunch {
     static let bundleIdentifier = "local.agentx.pi-run.acceptance"
 
+    static var isReferenceClient: Bool {
+        #if DEBUG
+        let env = ProcessInfo.processInfo.environment
+        return Bundle.main.bundleIdentifier == bundleIdentifier && env["AGENTX_REFERENCE_CLIENT"] == "1"
+            && permits(bundleID: bundleIdentifier, environment: env)
+        #else
+        return false
+        #endif
+    }
+
     #if DEBUG
     static func recordMergedRuns(_ runs: [AgentXRun]) {
         guard Bundle.main.bundleIdentifier == bundleIdentifier else { return }
@@ -62,6 +72,18 @@ enum AgentXAcceptanceLaunch {
 enum TravelCatEntryPoint {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == "--agentx-app-writer-probe" {
+            #if DEBUG
+            do {
+                umask(0o077)
+                let probe = try AgentXWriterProbe(arguments: arguments)
+                withExtendedLifetime(probe) { probe.run() }
+                return
+            } catch {}
+            #endif
+            FileHandle.standardError.write(Data("AgentX writer probe unavailable.\n".utf8))
+            exit(78)
+        }
         if arguments.contains(where: { $0.hasPrefix("--agentx-audit") }) {
             AgentXAuditHelper.dispatch(arguments: arguments)
         }

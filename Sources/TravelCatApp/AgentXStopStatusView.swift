@@ -26,9 +26,11 @@ extension AgentXStopOperation {
 struct AgentXStopStatusButton: View {
     @ObservedObject var controller: AgentXController
     let appID: String
+    var compactTitle: String? = nil
     @State private var showing = false
     var body: some View {
         Button { showing = true } label: {
+            if let compactTitle { Text(compactTitle).font(.caption).frame(minHeight: 44) } else {
             TimelineView(.periodic(from: .now, by: 2)) { _ in
                 let current = controller.currentRuntimeSnapshot(for: appID)
                 VStack(alignment: .leading, spacing: 3) {
@@ -40,7 +42,8 @@ struct AgentXStopStatusButton: View {
                     }
                 }.font(.caption).lineLimit(2)
             }
-        }.buttonStyle(.plain).accessibilityLabel("任务与停止详情")
+            }
+        }.buttonStyle(.plain).help("任务与停止详情").accessibilityLabel("任务与停止详情")
             .sheet(isPresented: $showing) { AgentXStopStatusView(controller: controller, appID: appID) }
     }
 }
@@ -114,7 +117,7 @@ struct AgentXStopStatusView: View {
                             Task { @MainActor in
                                 defer { checking = false }
                                 do { try await controller.setApplicationEnabled(appID, enabled: false) }
-                                catch { failureOperationID = controller.stopOperations[appID]?.id; failure = "停止仍未确认，请查看逐项状态；后台继续收集结束证据。" }
+                                catch { failureOperationID = controller.stopOperations[appID]?.id; failure = "停止仍未确认，请查看逐项状态；系统继续收集结束证据。" }
                             }
                         }.disabled(checking)
                     }

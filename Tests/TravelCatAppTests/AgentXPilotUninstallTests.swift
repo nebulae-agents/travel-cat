@@ -26,7 +26,7 @@ final class AgentXPilotUninstallTests: XCTestCase {
             throw AgentXError.unavailable
         })
         XCTAssertThrowsError(try lifecycle.uninstall("pilot")) {
-            XCTAssertEqual($0.localizedDescription, "试点应用的运行由 agentxd 管理，暂不支持此操作。")
+            XCTAssertEqual($0.localizedDescription, "试点应用的运行由桌面运行接口管理，暂不支持此操作。")
         }
     }
 }

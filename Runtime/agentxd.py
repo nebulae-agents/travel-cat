@@ -1,5 +1,7 @@
-"""Single-writer pilot for an explicitly configured, offline copy of an AgentX root."""
-import argparse
+"""Reference implementation of the run API, retained for isolated contract tests."""
+if __name__ == "__main__":
+    raise SystemExit("agentxd is retired. Quit the old service and open the Travel Cat desktop application.")
+
 from contextlib import ExitStack
 import fcntl
 import hmac
@@ -8,9 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
-import signal
 import stat
-import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import TCPServer
@@ -65,6 +65,10 @@ def load_pilot_apps(root):
     config = json.loads(marker)
     if not isinstance(config, dict) or not isinstance(config.get("root"), str):
         raise ValueError("invalid pilot ownership")
+    if "writer" in config:
+        if config["writer"] == "desktop":
+            raise ValueError("pilot root is owned by the desktop application")
+        raise ValueError("invalid pilot writer")
     configured = Path(config["root"])
     if not configured.is_absolute() or configured.resolve(strict=True) != root:
         raise ValueError("invalid pilot ownership")
@@ -126,7 +130,7 @@ class RunStore:
     def record_event(run, kind):
         revision = run["revision"]
         event = {"eventId": f'{run["id"]}:{revision}', "runId": run["id"],
-                 "revision": revision, "kind": kind, "state": run["status"]}
+                 "revision": revision, "kind": kind, "state": run.get("status", "unknown")}
         if run.get("stopEvidence"):
             event["stopEvidence"] = run["stopEvidence"]
         run["events"] = (run.get("events", []) + [event])[-64:]
@@ -135,10 +139,14 @@ class RunStore:
         run = self.get(run_id)
         revision = run["revision"]
         events = run.get("events", [])
-        oldest_cursor = events[0]["revision"] - 1 if events else revision
-        if not oldest_cursor <= cursor <= revision:
-            return 409, {"error": "snapshot_required", "revision": revision}
-        return 200, {"revision": revision, "events": [e for e in events if e["revision"] > cursor]}
+        # Legacy snapshots may have a newer revision than their last stored
+        # event. Advance only when the entire requested suffix is available.
+        count = revision - cursor
+        if 0 <= count <= min(len(events), 64):
+            batch = events[-count:] if count else []
+            if all(event["revision"] == n for n, event in enumerate(batch, cursor + 1)):
+                return 200, {"revision": revision, "events": batch}
+        return 409, {"error": "snapshot_required", "revision": revision}
 
     def flush_audit(self, run):
         if run.get("auditStatus") != "pending":
@@ -376,19 +384,3 @@ def serve(root, on_ready=None, *, pi_bundle=None, audit_helper=None):
             if on_ready:
                 on_ready(next(iter(stores.values())) if len(stores) == 1 else stores)
             server.serve_forever()
-
-
-if __name__ == "__main__":
-    def stop(_signal, _frame):
-        raise SystemExit(0)
-
-    signal.signal(signal.SIGTERM, stop)
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--pi-bundle", type=Path, help="Existing application bundle with the embedded Pi runtime")
-    parser.add_argument("--audit-helper", type=Path, help="Absolute Swift app executable with audit helper support (defaults to Pi bundle executable)")
-    args = parser.parse_args()
-    try:
-        serve(args.root, pi_bundle=args.pi_bundle, audit_helper=args.audit_helper)
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        sys.exit("agentxd: " + str(error))

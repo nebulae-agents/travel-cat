@@ -45,7 +45,9 @@ def run(args):
     port, token = endpoint(args.root)
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     path = "/v1/apps/" + args.app + "/runs"
-    if args.operation != "list":
+    if args.command == "runtime":
+        path = "/v1/apps/" + args.app + "/runtime"
+    elif args.operation != "list":
         path += "/" + args.run
     if args.operation == "events":
         if args.after < 0:
@@ -68,6 +70,11 @@ def run(args):
         data = json.load(response)
     finally:
         connection.close()
+    if args.command == "runtime":
+        if not isinstance(data, dict) or data.get("appID") != args.app or "capabilities" not in data:
+            raise ValueError("invalid runtime report from service")
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return
     if args.operation == "audit":
         if not isinstance(data, dict) or data.get("runId") != args.run or data.get("appID") != args.app:
             raise ValueError("invalid audit response from service")
@@ -88,6 +95,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=os.environ.get("AGENTX_ROOT"), help="pilot root (default: AGENTX_ROOT)")
     commands = parser.add_subparsers(dest="command", required=True)
+    status = commands.add_parser("runtime").add_subparsers(dest="operation", required=True).add_parser("status")
+    status.add_argument("--app", required=True, type=identifier)
     ops = commands.add_parser("run").add_subparsers(dest="operation", required=True)
     for name in ("list", "show", "stop", "events", "audit"):
         op = ops.add_parser(name)

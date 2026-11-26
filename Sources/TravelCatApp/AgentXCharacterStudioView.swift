@@ -188,7 +188,7 @@ struct AgentXCharacterStudioView: View {
         }
     }
     private func statusText(_ status: AgentXRunStatus) -> String {
-        switch status { case .running: "正在生成…"; case .cancelling: "正在取消…"; case .cancelled: "已取消"; case .failed: "生成失败"; case .completed: "运行结束（没有文本结果）" }
+        switch status { case .running: "正在生成…"; case .cancelling: "正在取消…"; case .cancelled: "已取消"; case .failed: "生成失败"; case .completed: "运行结束（没有文本结果）"; case .unknown: "状态未记录" }
     }
     private func restore() {
         confirmingPublish = false

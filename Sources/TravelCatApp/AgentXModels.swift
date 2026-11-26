@@ -10,17 +10,17 @@ enum AgentXPage: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "应用总览"
         case .platformOverview: "全平台总览"
-        case .module: "前台模块"
+        case .module: "应用模块"
         case .apps: "所有应用"
-        case .chat: "前台 · 参与"
-        case .configuration: "后台 · 生成与优化"
-        case .characters: "人物定制"
+        case .chat: "参与"
+        case .configuration: "生成与优化"
+        case .characters: "人物"
         case .workflows: "工作流"
-        case .members: "成员与工作流"
+        case .members: "成员"
         case .sceneRules: "场景与规则"
         case .appModels: "模型与限额"
         case .appFiles: "目录与制品"
-        case .appSettings: "应用设置"
+        case .appSettings: "应用"
         case .backups: "备份与迁移"
         case .governance: "预算与审计"
         case .instances: "Agent 实例"
@@ -190,7 +190,7 @@ struct AgentXInstance: Codable, Identifiable, Equatable {
     var credentialProfile: String? = nil
 }
 enum AgentXRunStatus: String, Codable {
-    case running, cancelling, cancelled, failed, completed
+    case running, cancelling, cancelled, failed, completed, unknown
     var terminal: Bool { self != .running && self != .cancelling }
     var label: String {
         switch self {
@@ -199,6 +199,7 @@ enum AgentXRunStatus: String, Codable {
         case .cancelled: "○ 已取消"
         case .failed: "! 失败"
         case .completed: "✓ 完成"
+        case .unknown: "状态未记录"
         }
     }
 }
@@ -207,6 +208,7 @@ enum AgentXProposalStage { case review, saved, published }
 enum AgentXRunPurpose: String, Codable { case configuration, characterPreview, workflow, usageAssistant }
 
 struct AgentXRun: Codable, Identifiable, Equatable {
+    var appScopedID: String { "\(appID)/\(id)" }
     var id: String
     var appID: String
     var instanceID: String
@@ -234,6 +236,22 @@ struct AgentXRun: Codable, Identifiable, Equatable {
     var stopEvidence: String? = nil
     var requiresProcessReview: Bool? = nil
     var pilotCreateKey: String? = nil
+
+    /// Historical API records can contain only identity and revision. These
+    /// defaults belong to the UI projection, never to the stored JSON.
+    static func serviceProjection(_ fields: [String: Any]) throws -> Self {
+        var values = fields
+        for (key, fallback): (String, Any) in [
+            "instanceID": "", "prompt": "", "response": "", "isRead": false,
+            "startedAt": Date.distantPast.timeIntervalSinceReferenceDate
+        ] where values[key] == nil {
+            values[key] = fallback
+        }
+        if values["status"] == nil || (values["status"] as? String).map({ AgentXRunStatus(rawValue: $0) == nil }) == true {
+            values["status"] = AgentXRunStatus.unknown.rawValue
+        }
+        return try JSONDecoder().decode(Self.self, from: JSONSerialization.data(withJSONObject: values))
+    }
 
     var displayedStatus: String {
         switch stopEvidence {

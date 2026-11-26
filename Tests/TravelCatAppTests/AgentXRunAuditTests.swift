@@ -17,6 +17,31 @@ final class AgentXRunAuditTests: XCTestCase {
         try controller.addInstance(name: "I", appID: "blackcat", definitionID: controller.state.definitions[0].id, providerID: controller.state.providers[0].id, model: "m")
         return controller
     }
+    func testInterruptedRecoveryWithoutAStartedRecordLeavesCredentialsAlone() throws {
+        let credentials = AgentXTestCredentials()
+        let audit = AgentXRunAudit(root: try root(), credentials: credentials)
+        let run = AgentXRun(id: UUID().uuidString, appID: "pilot", instanceID: "pi", prompt: "fixture", status: .failed)
+        XCTAssertThrowsError(try audit.finishInterrupted(run))
+        XCTAssertTrue(credentials.secrets.isEmpty)
+    }
+
+    func testInterruptedAuditIsRetryableAndPreservesAnEarlierTerminalReceipt() throws {
+        let audit = AgentXRunAudit(root: try root(), credentials: AgentXTestCredentials())
+        for previous in [AgentXRunStatus.failed, .completed] {
+            let run = AgentXRun(id: UUID().uuidString, appID: "pilot", instanceID: "pi", prompt: "private fixture", status: .failed)
+            let ticket = try audit.begin(run: run, providerID: "local", model: "fixture", requestBytes: 24)
+            if previous == .completed { try audit.finish(ticket, status: .completed, responseBytes: 7) }
+            for _ in 0..<2 {
+                let warning = try audit.finishInterrupted(run)
+                XCTAssertEqual(warning != nil, previous == .completed)
+            }
+            let records = try audit.records(appID: run.appID, runID: run.id)
+            XCTAssertEqual(records.compactMap { $0["kind"] as? String }, ["model.request.started", "model.request." + previous.rawValue])
+            XCTAssertEqual(records.last?["requestTextBytes"] as? Int, 24)
+            XCTAssertNil(records.last?["prompt"])
+        }
+    }
+
     func testRequestAndCompletionUseOriginalAppAndEncryptedMetadataOnly() async throws {
         let root = try root(), credentials = AgentXTestCredentials()
         let controller = try configured(root, credentials: credentials, respond: { _, _, _, _ in "response-canary" })

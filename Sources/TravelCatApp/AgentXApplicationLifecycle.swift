@@ -157,6 +157,7 @@ final class AgentXApplicationLifecycle {
         }
         app.manifest = app.manifest?.filter { ["author", "source", "requires", "permissions", "ui"].contains($0.key) }
         var package = AgentXLocalAppPackage(application: app, instances: instances, definitions: definitions)
+        if let issue = package.runtimeRequirementIssue { throw AgentXError.invalid(issue) }
         let frontendPath = "apps/\(appID)/payload/frontend.json"
         let frontendURL = try AgentXPackageFiles.safeURL(frontendPath, root: repository.root)
         if fm.fileExists(atPath: frontendURL.path) {

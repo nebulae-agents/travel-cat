@@ -2,6 +2,7 @@ import Foundation
 import UserNotifications
 import XCTest
 import TravelCore
+import TravelUI
 @testable import TravelStorage
 @testable import TravelCatApp
 
@@ -9,6 +10,70 @@ import TravelCore
 final class PetTravelPromptServiceTests: XCTestCase {
     // Fixed UTC noon, independent of the runner's time zone and wall clock.
     private let noon = Date(timeIntervalSince1970: 1_787_140_800)
+
+    func testAvailableMailboxAcknowledgesPostcardWithoutReadingAndReleasesNextPrompt() async throws {
+        let harness = try makeHarness()
+        let ids = try prepareReadyPostcard(in: harness)
+        let suite = "MailboxPrompt-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(snapshot: try harness.repository.loadSnapshot(), events: try harness.repository.events(), defaults: defaults)
+        var shown: [PetTravelPromptDelivery] = []
+        let service = PetTravelPromptService(coordinator: harness.coordinator,
+            showBubble: { delivery, _, _ in shown.append(delivery); return true },
+            postNotification: { _ in XCTFail("Mailbox must receive postcard without notification"); return false },
+            route: { _ in XCTFail("Delivery must not navigate") }, calendar: utcCalendar(), clock: { self.noon },
+            mailboxAvailable: { true })
+        service.ingestCurrent(settings: .init(), now: noon)
+        XCTAssertEqual(try harness.coordinator.pendingCount, 0)
+        XCTAssertTrue(shown.isEmpty)
+        XCTAssertEqual(model.unreadPostcardIDs, [ids.eventID])
+        _ = try publish(phase: .returning, tripID: ids.tripID, in: harness.repository)
+        let returned = try publish(phase: .resting, tripID: ids.tripID, in: harness.repository)
+        service.ingestCurrent(settings: .init(), now: noon)
+        await waitUntil { !shown.isEmpty }
+        XCTAssertEqual(shown, [.prompt(.returned(eventID: returned.id, tripID: returned.tripID, mood: returned.mood.label))])
+        XCTAssertEqual(model.unreadPostcardIDs, [ids.eventID])
+        await service.suspendAndWait()
+    }
+
+    func testUnavailableMailboxFallsBackToNotification() async throws {
+        let harness = try makeHarness()
+        _ = try prepareReadyPostcard(in: harness)
+        var bubbles = 0
+        var notifications = 0
+        let service = PetTravelPromptService(coordinator: harness.coordinator,
+            showBubble: { _, _, _ in bubbles += 1; return false },
+            postNotification: { _ in notifications += 1; return true }, route: { _ in },
+            calendar: utcCalendar(), clock: { self.noon }, mailboxAvailable: { false })
+        service.ingestCurrent(settings: .init(), now: noon)
+        await waitUntil { notifications == 1 && !service.hasPendingOrStorageError }
+        XCTAssertEqual(bubbles, 1)
+        XCTAssertEqual(try harness.coordinator.pendingCount, 0)
+        await service.suspendAndWait()
+    }
+
+    func testMailboxAcknowledgementErrorCanRetry() async throws {
+        let harness = try makeHarness()
+        _ = try prepareReadyPostcard(in: harness)
+        let failure = PetTravelPromptCoordinatorError.persistenceFailed("mailbox-commit-validation")
+        var fail = true
+        let service = PetTravelPromptService(coordinator: harness.coordinator,
+            showBubble: { _, _, _ in XCTFail("Mailbox handles postcard"); return false },
+            postNotification: { _ in XCTFail("Mailbox handles postcard"); return false }, route: { _ in },
+            calendar: utcCalendar(), clock: { self.noon }, mailboxAvailable: {
+                if fail { harness.coordinator.afterCommittingPromptTransaction = { _ in throw failure } }
+                return true
+            })
+        service.ingestCurrent(settings: .init(), now: noon)
+        XCTAssertEqual(service.storageError, failure)
+        fail = false
+        harness.coordinator.afterCommittingPromptTransaction = nil
+        service.retry(settings: .init(), now: noon)
+        XCTAssertNil(service.storageError)
+        XCTAssertEqual(try harness.coordinator.pendingCount, 0)
+        await service.suspendAndWait()
+    }
 
     func testSuspendWaitsForDeliveryWithoutAcknowledgingPendingAndResumeDoesNotReplay() async throws {
         let harness = try makeHarness()

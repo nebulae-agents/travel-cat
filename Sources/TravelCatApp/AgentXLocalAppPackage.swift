@@ -39,6 +39,9 @@ struct AgentXLocalAppPackage {
         for instance in instances { files["instances/\(instance.id)/config/agent.yaml"] = Data(try YAMLEncoder().encode(instance).utf8) }
         for definition in definitions { files["definitions/\(definition.id).yaml"] = Data(try YAMLEncoder().encode(definition).utf8) }
         if let frontend {
+            guard AgentXTextRuntime(declared: application.runtime) == .hostText else {
+                throw AgentXError.invalid("SDK 声明式表单要求应用使用 host-text 运行时。")
+            }
             let manifest = AppManifest(id: application.id, name: application.name, version: frontendVersion, dataSchemaVersion: 1,
                 hostAPIMajor: 1, kind: "chat", runtime: "host-text", modules: frontend.modules.map(\.id))
             files["manifest.json"] = try JSONEncoder().encode(manifest)
@@ -61,7 +64,8 @@ struct AgentXLocalAppPackage {
         let contract = try decodeStrictJSON(AppFrontendContract.self, bytes: bytes, maximumBytes: 256 * 1024)
         let manifest = try decodeStrictJSON(AppManifest.self, bytes: metadata, maximumBytes: 64 * 1024)
         try contract.validate(); try manifest.validate(hostAPIMajor: 1)
-        guard manifest.id == application.id, manifest.name == application.name, manifest.kind == "chat", manifest.runtime == "host-text",
+        guard manifest.id == application.id, manifest.name == application.name, manifest.kind == "chat",
+              manifest.runtime == AgentXTextRuntime.hostText.rawValue, AgentXTextRuntime(declared: application.runtime) == .hostText,
               manifest.paths == AppManifest.Paths(appID: application.id), manifest.dataSchemaVersion == 1,
               Set(manifest.modules) == Set(contract.modules.map(\.id)), Set(application.declaredModules) == Set(manifest.modules) else { throw AgentXError.invalid("前端、SDK 清单与 app.yaml 不匹配。") }
         return (contract, manifest.version)
@@ -168,13 +172,23 @@ struct AgentXLocalAppPackage {
         }
         return copy
     }
+    var runtimeRequirementIssue: String? {
+        guard let runtime = AgentXTextRuntime(declared: application.runtime) else {
+            return "不支持的应用运行时：" + (application.runtime ?? "")
+        }
+        if let required = application.manifest?["requires"]?.object?["runtime"]?.string, required != runtime.rawValue {
+            return "运行时依赖 " + required + " 与应用运行时 " + runtime.rawValue + " 不一致"
+        }
+        return nil
+    }
+
     func missingRequirements(in state: AgentXState) -> [String] {
         var missing: [String] = []
         if !Set(application.manifest?.keys.map { $0 } ?? []).isSubset(of: ["author", "source", "requires", "permissions", "ui"]) { missing.append("未知 manifest 能力字段") }
         if !Set(application.manifest?["requires"]?.object?.keys.map { $0 } ?? []).isSubset(of: ["runtime", "providers"]) { missing.append("未知运行依赖") }
         if !Set(application.manifest?["ui"]?.object?.keys.map { $0 } ?? []).isSubset(of: ["modules", "icon"]) { missing.append("未知前端能力") }
         if let modules = application.manifest?["ui"]?.object?["modules"]?.strings, Set(modules) != Set(application.declaredModules) { missing.append("两处模块清单不一致") }
-        if application.runtime != "host-text" || application.requiredRuntime != "host-text" { missing.append("仅支持 host-text 运行时") }
+        if let runtimeRequirementIssue { missing.append(runtimeRequirementIssue) }
         if application.declaredModules.isEmpty || (frontend == nil && !Set(application.declaredModules).isSubset(of: Self.supportedBuiltinModules)) { missing.append("存在未支持的模块") }
         let permissions = application.declaredPermissions
         for (key, value) in permissions {

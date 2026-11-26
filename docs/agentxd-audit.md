@@ -4,10 +4,9 @@
 
 ## 启动和查询
 
-在隔离试点根使用已有启动命令；`--pi-bundle` 默认选用该包 `CFBundleExecutable` 对应的可执行文件作为 helper。包必须包含本轮 helper，否则新运行以 `audit_unavailable` 拒绝。开发构建可用 `--audit-helper /absolute/path/to/TravelCatApp` 指定已构建的新版 Swift 可执行文件，仍使用原 Pi bundle 的运行时。helper 路径须为无软链接、当前用户或 root 所有、非组/其他用户可写的普通可执行文件。
+新版由普通桌面提供运行接口和加密审计。打开使用该私有根的 Travel Cat，再运行下面的命令查询。旧 Python 启动命令已退役；其参考实现只用于隔离验收。下文保留当时 Python 调用 Swift helper 的审计设计。
 
 ```sh
-python3 Runtime/agentxd.py --root /absolute/private/pilot-root --pi-bundle /absolute/TravelCat.app --audit-helper /absolute/TravelCatApp
 Scripts/agentx --root /absolute/private/pilot-root run audit --app pilot --run RUN_UUID
 ```
 

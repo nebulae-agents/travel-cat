@@ -6,6 +6,7 @@ Send the printed prompt in the desktop. After cli-evidence.json appears, inspect
 desktop receipt, quit normally, run launch again, and use 'verify WORKSPACE'.
 """
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -246,6 +248,28 @@ def await_daemon_ready(endpoint, previous, daemon, *, timeout=75):
     raise RuntimeError("daemon readiness timed out")
 
 
+def reference_environment(workspace, root):
+    # Older prepared workspaces have no fixture key. Create it on first reference
+    # launch, then reuse it across restarts without consulting the system Keychain.
+    path = workspace / ".reference-audit-key"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(os.urandom(32))
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+            raise ValueError("invalid reference fixture key file")
+        key = stream.read(33)
+    if len(key) != 32:
+        raise ValueError("invalid reference fixture key")
+    return dict(os.environ, AGENTX_ROOT=str(root), AGENTX_HOST_DIRECTORY=str(workspace / "host"),
+                AGENTX_REFERENCE_CLIENT="1", AGENTX_ACCEPTANCE_AUDIT_KEY=base64.b64encode(key).decode())
+
+
 def launch(workspace, bundle, *, daemon_args=None, inspect=None, audit_helper=None):
     exe = temporary_app(workspace)
     root = workspace / "root"
@@ -255,13 +279,13 @@ def launch(workspace, bundle, *, daemon_args=None, inspect=None, audit_helper=No
     put(workspace / "runtime.json", {"node": str(node.resolve())})
     endpoint = root / ".agentxd-endpoint.json"
     old = endpoint.read_bytes() if endpoint.exists() else None
-    args = [sys.executable, "-B", str(REPO / "Runtime/agentxd.py"), "--root", str(root), "--pi-bundle", str(bundle),
+    args = [sys.executable, "-B", str(REPO / "Tests/AgentRuntimeTests/agentxd_reference.py"), "--root", str(root), "--pi-bundle", str(bundle),
             "--audit-helper", str((audit_helper or exe).resolve(strict=True))]
-    daemon = subprocess.Popen(daemon_args if daemon_args is not None else args)
+    env = reference_environment(workspace, root)
+    daemon = subprocess.Popen(daemon_args if daemon_args is not None else args, env=env)
     try:
         await_daemon_ready(endpoint, old, daemon)
         with (workspace / "gui.log").open("a") as log:
-            env = dict(os.environ, AGENTX_ROOT=str(root), AGENTX_HOST_DIRECTORY=str(workspace / "host"))
             app = subprocess.Popen([str(exe)], env=env, stdout=log, stderr=log)
             try:
                 lock_path = "/private/tmp/local.agentx.pi-run.acceptance.user-%d.desktop.lock" % os.getuid()

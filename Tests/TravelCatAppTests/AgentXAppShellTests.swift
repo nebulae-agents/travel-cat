@@ -22,7 +22,7 @@ final class AgentXAppShellTests: XCTestCase {
         c.selectModule("members")
         XCTAssertEqual(c.appArea, .frontend)
         c.openBackstage()
-        XCTAssertEqual(c.page, .configuration)
+        XCTAssertEqual(c.page, .members)
         c.navigate(to: .characters)
         c.openFrontend()
         XCTAssertEqual(c.page, .members)
@@ -34,6 +34,27 @@ final class AgentXAppShellTests: XCTestCase {
         XCTAssertEqual(c.page, .characters)
         XCTAssertEqual(c.appArea, .backstage)
     }
+    func testSettingsStartAtMembersAndRememberEachApplicationsSection() throws {
+        let c = try controller()
+        c.selectModule("artifacts")
+        c.openBackstage()
+        XCTAssertEqual(c.page, .members)
+        c.navigate(to: .appModels)
+        c.openFrontend()
+        XCTAssertEqual(c.currentModuleID, "artifacts")
+        XCTAssertEqual(c.page, .appFiles)
+        XCTAssertTrue(c.selectApplication("a"))
+        c.openBackstage()
+        XCTAssertEqual(c.page, .members)
+        c.navigate(to: .sceneRules)
+        XCTAssertTrue(c.selectApplication("b"))
+        c.openBackstage()
+        XCTAssertEqual(c.page, .appModels)
+        XCTAssertTrue(c.selectApplication("a"))
+        c.openBackstage()
+        XCTAssertEqual(c.page, .sceneRules)
+    }
+
     func testRunAndDockSynchronizeArea() throws {
         let c = try controller()
         c.openBackstage()
@@ -323,6 +344,28 @@ final class AgentXAppShellTests: XCTestCase {
         XCTAssertEqual(c.currentInstances.first?.conversationModel?.model, "two")
         XCTAssertFalse(FileManager.default.fileExists(atPath: repo.root.appendingPathComponent("apps/b/state/frontend-values.json").path))
     }
+    func testSettingsAndPlatformRoutesReturnWithoutLosingModuleDraft() throws {
+        let c = try controller()
+        c.selectModule("artifacts")
+        c.drafts["member"] = "unsent"
+        for page in [AgentXPage.members, .sceneRules, .characters, .workflows, .appModels, .runs, .appFiles, .appSettings, .configuration] {
+            c.navigate(to: page)
+            XCTAssertEqual(c.appArea, .backstage)
+            c.openFrontend()
+            XCTAssertEqual(c.page, .appFiles)
+            XCTAssertEqual(c.currentModuleID, "artifacts")
+        }
+        for page in [AgentXPage.apps, .providers, .backups, .settings, .platformOverview, .definitions, .instances, .governance] {
+            c.navigate(to: page)
+            XCTAssertEqual(c.page, page)
+            c.returnToApplication()
+            XCTAssertEqual(c.page, .appFiles)
+            XCTAssertEqual(c.currentModuleID, "artifacts")
+        }
+        XCTAssertEqual(c.drafts["member"], "unsent")
+        XCTAssertFalse(c.assistantPresented)
+    }
+
     func testNativeShellAndPalettesRenderAtBothSizesAndAppearances() async throws {
         _ = NSApplication.shared
         let c = try controller()

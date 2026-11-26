@@ -52,7 +52,6 @@ struct AgentXManagerView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            AgentXAppRail(controller: controller)
             VStack(spacing: 0) {
                 AgentXAppHeader(controller: controller, pending: pendingCount)
                 Divider().overlay(AgentXTheme.border)
@@ -66,12 +65,25 @@ struct AgentXManagerView: View {
                         if controller.isLoaded { Button("关闭提示") { controller.errorMessage = nil } }
                     }.padding(12).background(Color.red.opacity(0.12))
                 }
+                HStack(spacing: 0) {
+                    if !controller.page.isPlatform && controller.appArea == .backstage {
+                        AgentXSettingsNavigation(controller: controller).id(controller.selectedAppID)
+                    }
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 24) { content }
+                    VStack(alignment: .leading, spacing: 24) {
+                        if !controller.page.isPlatform && controller.appArea == .backstage {
+                            AgentXSettingsAssistantEntry(controller: controller)
+                        }
+                        if controller.usesUsageAssistant && pendingCount > 0 {
+                            Button("\(pendingCount) 项内容等你查看") { controller.navigate(to: .inbox) }.frame(minHeight: 44)
+                        }
+                        content
+                    }
                         .id(AgentXAppNavigationPolicy.contentScope(page: controller.page, appID: controller.selectedAppID))
                         .padding(28)
-                        .frame(maxWidth: isFront && controller.currentApp?.kind != .workbench ? 956 : .infinity, alignment: .leading)
+                        .frame(maxWidth: isFront && controller.currentApp?.kind != .workbench ? 736 : .infinity, alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .center)
+                }
                 }
             }
         }
@@ -111,8 +123,8 @@ struct AgentXManagerView: View {
         }
         .sheet(item: $controller.shellOverlay) { overlay in
             switch overlay {
-            case .switcher: AgentXAppSwitcher(controller: controller)
-            case .search: AgentXAppSearch(controller: controller)
+            case .switcher: AgentXAppSwitcher(controller: controller, travelPending: travelPending, workbenchPending: workbenchPending)
+            case .search: AgentXAppSwitcher(controller: controller, travelPending: travelPending, workbenchPending: workbenchPending)
             }
         }
         .sheet(item: $editor) { presentation in
@@ -225,7 +237,7 @@ struct AgentXManagerView: View {
             } else if module.id == "director-intervention" {
                 AgentXCard {
                     Text("导演干预").font(.title2)
-                    Text("实时模拟干预引擎尚未接入。可在后台修改场景与人物，发布后用于后续对话。")
+                    Text("实时模拟干预引擎尚未接入。可在设置修改场景与人物，发布后用于后续对话。")
                     Button("场景与规则") { controller.navigate(to: .sceneRules) }
                     Button("人物定制") { controller.navigate(to: .characters) }
                 }
@@ -250,7 +262,7 @@ struct AgentXManagerView: View {
             }
             AgentXCard {
                 Label("从模型服务开始", systemImage: "point.3.connected.trianglepath.dotted").font(.headline)
-                Text("① 配置模型服务   →   ② 创建 Agent 定义   →   ③ 新建应用与实例   →   ④ 进入前台对话")
+                Text("① 配置模型服务   →   ② 创建 Agent 定义   →   ③ 新建应用与实例   →   ④ 进入应用对话")
                     .foregroundStyle(AgentXTheme.muted).fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Button("配置模型服务") { controller.navigate(to: .providers) }.buttonStyle(.borderedProminent)
@@ -261,7 +273,7 @@ struct AgentXManagerView: View {
             AgentXCard {
                 Label("当前运行能力", systemImage: "checkmark.shield").font(.headline)
                 Text("原生文本对话 · 宿主模型连接 · 无工具执行权限").foregroundStyle(AgentXTheme.running)
-                Text("模型服务支持多协议文本请求；Agent 工作台保留受控 Codex / ACP 路径。设置可登记离线迁移、应用包升级、回滚和状态备份。其他框架与统一预算尚未接入。")
+                Text("模型服务支持多协议文本请求；Agent 工作台保留受控 Codex / ACP 路径。设置可登记离线迁移、应用包升级、回滚和状态备份。宿主模型网关已支持按配置价格执行日预算；其他框架仍有接入边界。")
                     .font(.caption).foregroundStyle(AgentXTheme.muted)
             }
         }
@@ -383,7 +395,7 @@ struct AgentXManagerView: View {
         } else if let app = controller.currentApp,
                   AgentXFrontendStore(root: controller.repository.root, appID: app.id).exists {
             AgentXFrontendView(controller: controller, appID: app.id).id(app.id)
-        } else if controller.currentApp?.experience?.published?.configuration.layout == .scene && controller.frontSkin == .immersive {
+        } else if controller.currentApp?.experience?.published?.configuration.layout == .scene {
             AgentXExperienceFrontView(controller: controller)
         } else {
             if let instance = controller.currentInstance {
@@ -443,10 +455,10 @@ struct AgentXManagerView: View {
             if runs.isEmpty {
                 AgentXCard {
                     Label(inbox ? "暂时没有待处理事项" : "还没有运行记录", systemImage: inbox ? "checkmark.circle" : "clock")
-                    Button("进入应用前台") { controller.navigate(to: .chat) }
+                    Button("进入应用应用") { controller.navigate(to: .chat) }
                 }
             }
-            ForEach(runs) { run in
+            ForEach(runs, id: \.appScopedID) { run in
                 AgentXCard {
                     HStack {
                         Text(controller.state.apps.first { $0.id == run.appID }?.name ?? run.appID).font(.headline)
@@ -458,11 +470,13 @@ struct AgentXManagerView: View {
                     Text(run.prompt).lineLimit(3).textSelection(.enabled)
                     AgentXPilotRunIdentity(run: run)
                     if let failure = run.failure { Text(failure).foregroundStyle(.orange) }
-                    Text(run.startedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(AgentXTheme.muted)
+                    if run.startedAt != .distantPast {
+                        Text(run.startedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(AgentXTheme.muted)
+                    }
                     HStack {
                         Button(run.purpose == .configuration ? "查看配置建议" : run.purpose == .workflow ? "查看工作流" : run.purpose == .characterPreview ? "查看人物试说" : "查看对话") { controller.openRun(run) }.buttonStyle(.borderedProminent)
-                        if run.status.terminal && !run.isRead { Button("标记已读") { performAsync { try await controller.markRead(run.id) } } }
-                        if !run.status.terminal { Button("取消运行") { controller.cancel(run.id) }.disabled(run.status == .cancelling) }
+                        if run.status.terminal && !run.isRead { Button("标记已读") { performAsync { try await controller.markRead(run.id, appID: run.appID) } } }
+                        if !run.status.terminal { Button("取消运行") { controller.cancel(run.id, appID: run.appID) }.disabled(run.status == .cancelling) }
                     }
                 }
             }
@@ -482,10 +496,11 @@ struct AgentXManagerView: View {
     }
     private var governance: some View {
         Group {
+            AgentXBudgetCard(controller: controller, editable: false)
             AgentXCard {
                 Label("运行与安全边界", systemImage: "checkmark.shield").font(.headline)
                 Text("当前活跃运行：\(controller.state.activeCount) · 未读结果：\(controller.state.unreadCount)")
-                Text("统一预算、费用统计及独立审批审计尚未接入。下方展示已保存的真实运行记录。")
+                Text("宿主模型网关按配置价格预留与结算预算，不代表供应商账单；独立审批审计尚未接入。下方展示真实运行记录。")
                     .foregroundStyle(AgentXTheme.muted)
                 softStopControl
                 Text("全平台应用停止状态").font(.headline)
@@ -498,6 +513,13 @@ struct AgentXManagerView: View {
     }
     private var settings: some View {
         Group {
+            AgentXCard {
+                Text("平台管理").font(.headline)
+                ForEach([AgentXPage.platformOverview, .definitions, .instances, .governance]) { page in
+                    Button(page.title) { controller.navigate(to: page) }.frame(minHeight: 44)
+                }
+            }
+            AgentXBudgetCard(controller: controller, editable: true)
             if let storage = controller.hostStorage {
                 AgentXAppLifecycleView(apps: controller.state.apps,
                     coordinator: AgentXOfflineAppLifecycle(root: controller.repository.root, locator: storage.coordinator.locator),
@@ -590,7 +612,7 @@ private struct AgentXChatView: View {
                     if !run.response.isEmpty { Text(run.response).textSelection(.enabled) }
                     if let failure = run.failure { Text(failure).foregroundStyle(.orange) }
                     if !run.status.terminal {
-                        HStack { ProgressView().controlSize(.small); Button("取消") { controller.cancel(run.id) }.disabled(run.status == .cancelling) }
+                        HStack { ProgressView().controlSize(.small); Button("取消") { controller.cancel(run.id, appID: run.appID) }.disabled(run.status == .cancelling) }
                     }
                 }
             }
@@ -607,6 +629,54 @@ private struct AgentXChatView: View {
                 }
                 if let reviewNotice { Text(reviewNotice).font(.caption).foregroundStyle(.orange) }
             }
+        }
+    }
+}
+
+@MainActor
+private struct AgentXBudgetCard: View {
+    @ObservedObject var controller: AgentXController
+    let editable: Bool
+    @State private var snapshot: AgentXGatewayBudget.Presentation?
+    @State private var limit = ""
+    @State private var error: String?
+    var body: some View {
+        AgentXCard {
+            HStack {
+                Label("宿主模型日预算", systemImage: "creditcard").font(.headline)
+                Spacer()
+                Button("刷新") { refresh() }
+            }
+            if let snapshot {
+                if snapshot.status == "disabled" {
+                    Text("未启用：请先配置币种、时区及经过核验的模型价格。本页不创建价格或启用预算。")
+                } else {
+                    Text(snapshot.status == "blocked" ? "已阻断新调用" : "已启用")
+                    Text("统计日期：\(snapshot.day)")
+                    Text("币种：\(snapshot.currency) · 时区：\(snapshot.timeZone)")
+                    Text("日限额：\(snapshot.limit) · 已结算：\(snapshot.spent)")
+                    Text("预留 / 待核对：\(snapshot.held) · 可用：\(snapshot.available)")
+                        .monospacedDigit()
+                    if editable, let source = snapshot.source {
+                        TextField("日限额（正十进制数，最多 12 位小数）", text: $limit)
+                        Button("保存日限额") {
+                            do { try controller.saveGatewayBudgetLimit(limit, expectedSource: source); refresh() }
+                            catch { self.error = "保存失败：配置可能已更改或不可用，请刷新后检查。" }
+                        }
+                    }
+                }
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+            Text("金额依据配置价格计算，不是供应商账单。预留及待核对金额继续占用预算，不按零费用处理。仅覆盖宿主模型网关。")
+                .font(.caption).foregroundStyle(AgentXTheme.muted)
+        }.onAppear { refresh() }
+    }
+    private func refresh() {
+        do {
+            let value = try controller.gatewayBudget.presentation()
+            snapshot = value; limit = value.limit; error = nil
+        } catch {
+            snapshot = nil; self.error = "预算不可用：配置或账本未通过校验，无法显示可信余额。"
         }
     }
 }

@@ -174,7 +174,7 @@ struct AgentXEditorView: View {
                 })).frame(height: 240).border(AgentXTheme.border).accessibilityLabel("系统提示词")
                 Text("表单仅编辑正文，文件模式中的 frontmatter 与附件保持原样。").font(.caption).foregroundStyle(AgentXTheme.muted)
             }
-            Text("保存草稿不会改变前台。发布后新请求使用新版本，进行中的请求保持原版本。当前仅执行 host-text 文本模型，无工具执行。").font(.caption).foregroundStyle(AgentXTheme.muted)
+            Text("保存草稿不会改变应用行为。发布后新请求使用新版本，进行中的请求保持原版本。当前仅执行 host-text 文本模型，无工具执行。").font(.caption).foregroundStyle(AgentXTheme.muted)
             if let id = savedDefinitionID, let definition = controller.state.definitions.first(where: { $0.id == id }), !(definition.revisions ?? []).isEmpty {
                 Picker("发布历史", selection: $historyRevision) {
                     Text("选择版本").tag(0)

@@ -33,7 +33,7 @@ struct AgentXAppConfigurationView: View {
                             .font(.callout).foregroundStyle(AgentXTheme.muted)
                     }
                     Spacer()
-                    Button("回到前台", systemImage: "play.fill") { controller.openApp(app.id) }
+                    Button("回到应用", systemImage: "play.fill") { controller.openApp(app.id) }
                         .buttonStyle(.borderedProminent)
                 }
                 ViewThatFits(in: .horizontal) {
@@ -44,7 +44,7 @@ struct AgentXAppConfigurationView: View {
                     VStack(spacing: 20) { assistant; status }
                 }
             }
-            .confirmationDialog("发布定义到前台？", isPresented: Binding(get: { publishing != nil }, set: { if !$0 { publishing = nil } }), titleVisibility: .visible) {
+            .confirmationDialog("发布定义到应用？", isPresented: Binding(get: { publishing != nil }, set: { if !$0 { publishing = nil } }), titleVisibility: .visible) {
                 if let definition = publishing {
                     Button("发布新版本") { perform { try controller.publishDefinition(id: definition.id); notice = "新版本已发布；正在运行和固定版本的实例保持原配置。" }; publishing = nil }
                     Button("取消", role: .cancel) { publishing = nil }
@@ -103,7 +103,7 @@ struct AgentXAppConfigurationView: View {
                     if !proposal.status.terminal {
                         HStack {
                             ProgressView().controlSize(.small)
-                            Text("正在生成，前台输入已保留…").font(.caption)
+                            Text("正在生成，应用输入已保留…").font(.caption)
                             Spacer()
                             Button("取消生成") { controller.cancel(proposal.id) }.disabled(proposal.status == .cancelling)
                         }
@@ -172,7 +172,7 @@ struct AgentXAppConfigurationView: View {
     private var status: some View {
         VStack(spacing: 16) {
             AgentXCard {
-                Label("前台现状", systemImage: "rectangle.on.rectangle").font(.headline)
+                Label("应用现状", systemImage: "rectangle.on.rectangle").font(.headline)
                 Text("\(controller.currentInstances.count) 个成员")
                 let runs = controller.state.runs.filter { $0.appID == controller.selectedAppID }
                 Text("\(runs.filter { !$0.status.terminal }.count) 个运行中 · \(runs.filter { $0.status.terminal && !$0.isRead }.count) 个待查看")

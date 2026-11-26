@@ -184,6 +184,7 @@ final class PetTravelPromptService {
     private let calendar: Calendar
     private let scheduler: BubbleScheduling
     private let clock: () -> Date
+    private let mailboxAvailable: () -> Bool
     private let preferBubble: (TravelSettings) -> Bool
     private let applyBubblePreference: ApplyBubblePreference
     private var queue: [PetTravelPromptDelivery] = []
@@ -210,6 +211,7 @@ final class PetTravelPromptService {
         calendar: Calendar = .current,
         scheduler: BubbleScheduling = TimerBubbleScheduler(),
         clock: @escaping () -> Date = Date.init,
+        mailboxAvailable: @escaping () -> Bool = { false },
         preferBubble: @escaping (TravelSettings) -> Bool = { _ in true },
         applyBubblePreference: @escaping ApplyBubblePreference = { _ in }
     ) {
@@ -221,6 +223,7 @@ final class PetTravelPromptService {
         self.calendar = calendar
         self.scheduler = scheduler
         self.clock = clock
+        self.mailboxAvailable = mailboxAvailable
         self.preferBubble = preferBubble
         self.applyBubblePreference = applyBubblePreference
     }
@@ -357,6 +360,16 @@ final class PetTravelPromptService {
         isDelivering = true
         let currentAttempt = UUID()
         attemptID = currentAttempt
+
+        if case .prompt(.postcardReady) = next, mailboxAvailable() {
+            cancelUnavailableRetry()
+            // The mailbox reads the independent postcard unread state. A delivery
+            // acknowledgement advances the reminder queue without reading the card.
+            if acknowledgeSuccessfulDelivery(next, attemptID: currentAttempt) {
+                operations.start { [weak self] in self?.finishCurrent(attemptID: currentAttempt) }
+            }
+            return
+        }
 
         if bubbleEnabled, showBubble(
             next,

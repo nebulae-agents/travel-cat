@@ -15,8 +15,8 @@ struct AgentXAssistantPanel: View {
     }
     private var unavailable: String? {
         if !controller.isLoaded { return "应用数据尚未加载完成。" }
-        if controller.currentApp?.canRunHostText != true { return "此应用使用专用工作台，请进入后台查看可用能力。" }
-        guard let instance else { return "先在后台添加成员，并连接模型服务，即可使用助手。" }
+        if controller.currentApp?.canRunHostText != true { return "此应用使用专用工作台，请进入设置查看可用能力。" }
+        guard let instance else { return "先在设置添加成员，并连接模型服务，即可使用助手。" }
         if controller.isInstanceBusy(instance.id) { return "此成员正在运行，请等待完成或取消当前请求。" }
         return nil
     }
@@ -52,7 +52,7 @@ struct AgentXAssistantPanel: View {
                 .accessibilityLabel(isFront ? "向使用助手提问" : "向配置助手描述调整")
             if let unavailable { Text(unavailable).font(.caption).foregroundStyle(AgentXTheme.muted) }
             HStack {
-                Button(isFront ? "打开后台" : "审阅配置建议") {
+                Button(isFront ? "打开设置" : "审阅配置建议") {
                     controller.assistantPresented = false
                     controller.navigate(to: .configuration)
                 }

@@ -66,6 +66,7 @@ class PilotRuns:
     def create(self, key, body):
         digest = self.key_digest(key)
         if (not isinstance(body, dict) or set(body) != {"instanceId", "prompt"}
+                or not isinstance(body["instanceId"], str) or not ID.fullmatch(body["instanceId"])
                 or not isinstance(body["prompt"], str) or not body["prompt"].strip()
                 or len(body["prompt"].encode()) > 100_000):
             raise CommandError(400, "invalid_run")
@@ -93,12 +94,13 @@ class PilotRuns:
             member = self.store.directory.parent / "instances" / instance / "config/agent.yaml"
             if member.resolve() != member or not member.is_file():
                 raise CommandError(422, "unbound_instance")
-            runs = [r for r in self.store.list_runs() if r["instanceID"] == instance]
+            runs = [r for r in self.store.list_runs() if r.get("instanceID") == instance]
             if any(r.get("status") in ACTIVE or r.get("requiresProcessReview") for r in runs):
                 raise CommandError(409, "instance_busy")
             messages = [{"role": "system", "content": config["systemPrompt"]}]
-            history = sorted((r for r in runs if r["status"] == "completed" and not r.get("purpose")),
-                             key=lambda r: r["startedAt"])
+            history = sorted((r for r in runs if r.get("status") == "completed" and not r.get("purpose")
+                              and all(key in r for key in ("startedAt", "prompt", "response"))),
+                             key=lambda r: (r["startedAt"], r["id"]))
             for turn in history[-20:]:
                 messages.extend([{"role": "user", "content": turn["prompt"]},
                                  {"role": "assistant", "content": turn["response"]}])

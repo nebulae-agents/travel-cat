@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 const runner = process.env.AGENTX_PI_RUNNER ?? new URL('./runner.mjs', import.meta.url).pathname;
 const secret = 'private-test-key-never-log';
-function run(payload, { timeout = 2000, signal } = {}) {
+function run(payload, { timeout = 2000, signal, stream = false } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [runner], { env: { PATH: '/usr/bin:/bin', AGENTX_PI_TIMEOUT_MS: String(timeout) }, signal });
+    const child = spawn(process.execPath, stream ? [runner, '--stream-loopback'] : [runner], { env: { PATH: '/usr/bin:/bin', AGENTX_PI_TIMEOUT_MS: String(timeout) }, signal });
     let out = '', err = '';
     child.stdout.on('data', x => { out += x; }); child.stderr.on('data', x => { err += x; });
     child.on('error', reject);
@@ -102,4 +103,93 @@ test('escaped text cannot exceed the stdout envelope bound or reflect a credenti
       assert.ok(!result.out.includes(secret));
     });
   }
+});
+
+test('opt-in Pi sends visible text before completion and only provider-reported usage', async () => {
+  for (const usage of [undefined, { prompt_tokens: 9, completion_tokens: 2 }, { prompt_tokens: 0, completion_tokens: 0 }, { prompt_tokens: 9 }]) {
+    let finish;
+    await fixture(async (req, res) => {
+      let raw = ''; for await (const chunk of req) raw += chunk;
+      assert.equal(req.headers.authorization, undefined);
+      assert.equal(JSON.parse(raw).stream_options.include_usage, true);
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const write = obj => res.write('data: ' + JSON.stringify(obj) + '\n\n');
+      const choice = (delta, finish_reason = null) => write({ choices: [{ index: 0, delta, finish_reason }] });
+      finish = () => {
+        choice({ content: '二' }, 'stop');
+        if (usage) write({ choices: [], usage });
+        res.end('data: [DONE]\n\n');
+      };
+      choice({ reasoning_content: 'hidden', content: '一' });
+    }, async base => {
+      const child = spawn(process.execPath, [runner, '--stream-loopback'], { env: { AGENTX_PI_TIMEOUT_MS: '2000' } });
+      const closed = once(child, 'close');
+      const frames = [];
+      child.stdin.end(JSON.stringify({ ...request(base), secret: '' }));
+      for await (const line of createInterface({ input: child.stdout })) {
+        const value = JSON.parse(line);
+        frames.push(value);
+        if (value.event === 'text' && frames.length === 1) finish();
+      }
+      const [code] = await closed;
+      assert.equal(code, 0);
+      const expected = [{ event: 'text', text: '一' }, { event: 'text', text: '二' }];
+      if (Number.isInteger(usage?.completion_tokens)) expected.push({ event: 'usage', input: usage.prompt_tokens, output: usage.completion_tokens });
+      expected.push({ version: 1, ok: true, text: '一二' });
+      assert.deepEqual(frames, expected);
+    });
+  }
+});
+
+test('streaming rejects credentials and external endpoints before any progress', async () => {
+  for (const payload of [request('http://127.0.0.1:1/v1'), { ...request('https://openrouter.ai/api/v1'), secret: '' }]) {
+    const result = await run(payload, { stream: true });
+    assert.deepEqual(result.value, { version: 1, ok: false, code: 'invalid_request' });
+    assert.equal(result.err, '');
+  }
+});
+test('streaming never emits tool arguments or thinking as text', async () => {
+  await fixture((req, res) => sse(res, {
+    reasoning_content: 'private reasoning',
+    tool_calls: [{ index: 0, id: 'x', type: 'function', function: { name: 'tool', arguments: 'private arguments' } }]
+  }, 'tool_calls'), async base => {
+    const result = await run({ ...request(base), secret: '' }, { stream: true });
+    assert.deepEqual(result.value, { version: 1, ok: false, code: 'tools_disabled' });
+    assert.equal(result.err, '');
+  });
+});
+
+test('gateway mode sends only the temporary token and configured output limit', async () => {
+  const token = 'a'.repeat(72);
+  let seen;
+  await fixture(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    seen = { auth: req.headers.authorization, body: JSON.parse(raw) };
+    sse(res);
+  }, async base => {
+    const payload = { ...request(base), secret: '', gatewayToken: token, maxOutputTokens: 7, timeoutSeconds: 2 };
+    const result = await run(payload, { stream: true });
+    const lines = result.out.trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(lines.at(-1).ok, true);
+    assert.equal(seen.auth, `Bearer ${token}`);
+    assert.equal(seen.body.max_tokens ?? seen.body.max_completion_tokens, 7);
+    assert.ok(!result.out.includes(token));
+  });
+  const bad = { ...request('https://openrouter.ai/api/v1'), gatewayToken: token, maxOutputTokens: 7, timeoutSeconds: 2 };
+  const result = await run(bad, { stream: true });
+  assert.equal(result.value?.code, 'invalid_request');
+});
+
+test('gateway reports measured usage before a later upstream stream failure', async () => {
+  await fixture((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end('data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3}}\n\n' +
+      'data: not-json\n\n');
+  }, async base => {
+    const result = await run({ ...request(base), secret: '', gatewayToken: 'a'.repeat(72), maxOutputTokens: 7, timeoutSeconds: 2 }, { stream: true });
+    const frames = result.out.trim().split('\n').map(JSON.parse);
+    assert.equal(frames.at(-1).ok, false);
+    assert.ok(frames.some(frame => frame.event === 'usage' && frame.input === 11 && frame.output === 3));
+  });
 });

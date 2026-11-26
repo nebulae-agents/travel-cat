@@ -33,6 +33,53 @@ final class AgentXLocalAppPackageTests: XCTestCase {
         XCTAssertNoThrow(try state.definitions.first { $0.id == instance.definitionID }?.publishedDocument().executionPrompt())
         XCTAssertThrowsError(try service.install(preview))
     }
+    func testRuntimeSelectionSurvivesInstallExportAndReimport() throws {
+        let repo = try repository()
+        let service = AgentXApplicationLifecycle(repository: repo, requireIdle: { _ in })
+        for runtime in ["pi-agent-core", "native-http", "host-text"] {
+            var package = AgentXLocalAppPackage.template(.conversation, appID: runtime, providerID: "local", model: "model")
+            package.application.runtime = runtime
+            package.application.manifest?["requires"] = .object(["runtime": .string(runtime)])
+            let source = try directory(), exported = try directory().appendingPathComponent("export")
+            try AgentXPackageFiles.write(package.files(), to: source)
+            let original = try service.preview(directory: source)
+            XCTAssertTrue(original.canInstall, original.missingRequirements.joined(separator: ", "))
+            try service.install(original)
+            try service.exportApplication(runtime, to: exported)
+            let copy = try service.preview(directory: exported, appIDOverride: runtime + "-copy")
+            XCTAssertTrue(copy.canInstall, copy.missingRequirements.joined(separator: ", "))
+            try service.install(copy)
+            let installed = try XCTUnwrap(repo.load().apps.first { $0.id == copy.application.id })
+            XCTAssertEqual(installed.runtime, runtime)
+            XCTAssertEqual(installed.manifest?["requires"]?.object?["runtime"], .string(runtime))
+        }
+    }
+
+    func testUnknownAndConflictingRuntimeDeclarationsBlockInstallAndExport() throws {
+        let repo = try repository()
+        let service = AgentXApplicationLifecycle(repository: repo, requireIdle: { _ in })
+        try service.install(service.previewTemplate(.conversation, appID: "existing", providerID: "local", model: "model"))
+        for (runtime, required) in [("other", "other"), ("native-http", "pi-agent-core")] {
+            var package = AgentXLocalAppPackage.template(.conversation, appID: "incoming", providerID: "local", model: "model")
+            package.application.runtime = runtime
+            package.application.manifest?["requires"] = .object(["runtime": .string(required)])
+            let source = try directory()
+            try AgentXPackageFiles.write(package.files(), to: source)
+            let preview = try service.preview(directory: source)
+            XCTAssertFalse(preview.canInstall)
+            XCTAssertThrowsError(try service.install(preview))
+
+            var state = try repo.load()
+            let index = try XCTUnwrap(state.apps.firstIndex { $0.id == "existing" })
+            state.apps[index].runtime = runtime
+            state.apps[index].manifest?["requires"] = .object(["runtime": .string(required)])
+            try repo.save(state)
+            let exported = try directory().appendingPathComponent("export")
+            XCTAssertThrowsError(try service.exportApplication("existing", to: exported))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: exported.path))
+        }
+    }
+
     func testSourceChangeRequiresNewPreviewAndExportRemapsDuplicateIDs() throws {
         let repo = try repository()
         let service = AgentXApplicationLifecycle(repository: repo, requireIdle: { _ in })
@@ -166,6 +213,40 @@ final class AgentXLocalAppPackageTests: XCTestCase {
         try service.install(service.preview(directory: exported, appIDOverride: "forms-again"))
         XCTAssertEqual(try AgentXFrontendStore(root: repo.root, appID: "forms-again").load().0, contract)
     }
+    func testFormManifestCannotMaskAnExplicitAdapterInAppYAML() throws {
+        let repo = try repository()
+        let service = AgentXApplicationLifecycle(repository: repo, requireIdle: { _ in })
+        var package = AgentXLocalAppPackage.template(.conversation, appID: "form", providerID: "local", model: "model")
+        package.application.modules = ["compose"]
+        package.frontend = AppFrontendContract(title: "Compose", modules: [
+            .init(id: "compose", title: "Compose", fields: [.init(id: "topic", label: "Topic")],
+                  submit: .init(title: "Send", prompt: "Write about {{topic}}"))
+        ])
+        var files = try package.files()
+        for runtime in ["pi-agent-core", "native-http"] {
+            package.application.runtime = runtime
+            files["app.yaml"] = Data(try YAMLEncoder().encode(package.application).utf8)
+            let source = try directory()
+            try AgentXPackageFiles.write(files, to: source)
+            XCTAssertThrowsError(try service.preview(directory: source))
+        }
+    }
+
+    func testOmittedRuntimeRemainsLegacyAndExplicitRequirementCannotSelectAdapter() throws {
+        let service = AgentXApplicationLifecycle(repository: try repository(), requireIdle: { _ in })
+        var package = AgentXLocalAppPackage.template(.conversation, appID: "legacy", providerID: "local", model: "model")
+        package.application.runtime = nil
+        let source = try directory()
+        try AgentXPackageFiles.write(package.files(), to: source)
+        let legacy = try service.preview(directory: source)
+        XCTAssertTrue(legacy.canInstall)
+        XCTAssertNil(legacy.application.runtime)
+        package.application.manifest?["requires"] = .object(["runtime": .string("pi-agent-core")])
+        try AgentXPackageFiles.write(package.files(), to: source)
+        let conflicting = try service.preview(directory: source)
+        XCTAssertFalse(conflicting.canInstall)
+    }
+
     func testSceneModulesAndMemberReferencesAreRemapped() throws {
         let repo = try repository(), source = try directory()
         let service = AgentXApplicationLifecycle(repository: repo, requireIdle: { _ in })

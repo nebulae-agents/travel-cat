@@ -43,7 +43,50 @@ final class AgentXController: ObservableObject {
     private var catalogOperations = 0
     private var profileResolver: AgentXCredentialProfiles?
     private var resolvedProfiles: [AgentXCredentialProfile] = []
-    private let respond: Responder
+    private struct TextRoute {
+        let runtime: AgentXTextRuntime
+        var usesGateway = false
+        let respond: Responder
+    }
+    private let piRoute: TextRoute
+    private let nativeRoute: TextRoute
+
+    private let hostGateway: AgentXHostGateway
+    let gatewayBudget: AgentXGatewayBudget
+
+    private func textRoute(for app: AgentXApplication, provider: AgentXProvider, instance: AgentXInstance) throws -> TextRoute {
+        let direct = try directTextRoute(for: app, provider: provider)
+        guard let plan = try hostGateway.plan(appID: app.id, instanceID: instance.id, provider: provider, model: instance.model, state: state) else {
+            return TextRoute(runtime: direct.runtime, respond: { [weak self] provider, model, secret, messages in
+                guard let self, self.isLoaded,
+                      try self.hostGateway.plan(appID: app.id, instanceID: instance.id, provider: provider, model: model, state: self.state) == nil else {
+                    throw AgentXError.invalid("网关或预算配置已改变，请重新提交任务。")
+                }
+                return try await direct.respond(provider, model, secret, messages)
+            })
+        }
+        return TextRoute(runtime: direct.runtime, usesGateway: true, respond: { [weak self] _, _, _, messages in
+            guard let self else { throw AgentXError.unavailable }
+            return try await self.hostGateway.respond(plan: plan, runtime: direct.runtime, messages: messages, credential: {
+                guard self.isLoaded,
+                      try self.hostGateway.plan(appID: app.id, instanceID: instance.id, provider: provider, model: instance.model, state: self.state) == plan else { throw AgentXError.unavailable }
+                return try plan.credentialProfile.map { try self.profileSecret($0) } ?? self.credentials.read(id: provider.credentialID)
+            })
+        })
+    }
+
+    private func directTextRoute(for app: AgentXApplication, provider: AgentXProvider) throws -> TextRoute {
+        guard let declaration = app.declaredTextRuntime else {
+            throw AgentXError.invalid("此应用的文本运行时声明不受支持或与依赖冲突。")
+        }
+        switch declaration {
+        case .hostText: return provider.isOpenRouter ? piRoute : nativeRoute
+        case .nativeHTTP: return nativeRoute
+        case .pi:
+            guard provider.serviceProtocol == .openAICompatible else { throw AgentXCatalogError.unsupportedProtocol }
+            return piRoute
+        }
+    }
     private var tasks: [String: Task<Void, Never>] = [:]
     /// The host hook must return only after all app-owned external work has actually exited.
     var externalRuntimeStop: (@MainActor (String) async throws -> Void)?
@@ -172,7 +215,7 @@ final class AgentXController: ObservableObject {
         if stopWorkers[id] != nil {
             stopOperations[id]?.status = .unverified
             persistStopOperations(appID: id)
-            applicationStopStates[id] = .unverified("等待超时，已阻止新任务；后台继续等待停止确认。")
+            applicationStopStates[id] = .unverified("等待超时，已阻止新任务；系统继续等待停止确认。")
             throw AgentXError.invalid("等待超时，停止尚未确认。")
         }
         guard applicationStopStates[id] == .stopped else { throw AgentXError.invalid("停止尚未确认，请重新检查。") }
@@ -248,7 +291,12 @@ final class AgentXController: ObservableObject {
     private var runAuditTickets: [String: AgentXRunAudit.Ticket] = [:]
     var didChange: (() -> Void)?
 
-    init(repository: AgentXRepository, credentials: any TravelServiceCredentialStoring, respond: Responder? = nil, catalog: AgentXProviderCatalog = .init(), hostStorage: AgentXHostStorage? = nil, autoRefreshCatalogs: Bool = true) {
+    func saveGatewayBudgetLimit(_ limit: String, expectedSource: Data) throws {
+        try hostGateway.ensureLease()
+        try gatewayBudget.saveLimit(limit, expectedSource: expectedSource)
+    }
+
+    init(repository: AgentXRepository, credentials: any TravelServiceCredentialStoring, respond: Responder? = nil, catalog: AgentXProviderCatalog = .init(), hostStorage: AgentXHostStorage? = nil, autoRefreshCatalogs: Bool = true, piRuntime: AgentXPiRuntime? = nil, gatewayBudget: AgentXGatewayBudget? = nil, gatewayLease: AgentXWriterRootLease? = nil) {
         self.hostStorage = hostStorage
         self.repository = repository
         self.runAudit = AgentXRunAudit(root: repository.root, credentials: credentials)
@@ -256,11 +304,21 @@ final class AgentXController: ObservableObject {
         self.catalog = catalog
         self.autoRefreshCatalogs = autoRefreshCatalogs
         let client = AgentXChatClient(catalog: catalog)
-        let pi = AgentXPiRuntime(ledgerRoot: repository.root)
-        self.respond = respond ?? { provider, model, secret, messages in
-            if provider.isOpenRouter { return try await pi.respond(provider: provider, model: model, secret: secret, messages: messages) }
-            return try await client.respond(provider: provider, model: model, secret: secret, messages: messages)
-        }
+        let pi = piRuntime ?? AgentXPiRuntime(ledgerRoot: repository.root)
+        let budget = gatewayBudget ?? AgentXGatewayBudget(root: repository.root)
+        self.gatewayBudget = budget
+        self.hostGateway = AgentXHostGateway(root: repository.root, pi: pi, budget: budget, lease: gatewayLease)
+        piRoute = TextRoute(runtime: .pi, respond: respond ?? { provider, model, secret, messages in
+            try await pi.respond(provider: provider, model: model, secret: secret, messages: messages)
+        })
+        nativeRoute = TextRoute(runtime: .nativeHTTP, respond: respond ?? { provider, model, secret, messages in
+            if provider.isOpenRouter && (secret?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
+                throw AgentXPiRuntimeError.missingCredential
+            }
+            let answer = try await client.respond(provider: provider, model: model, secret: secret, messages: messages)
+            if provider.isOpenRouter, let secret, !secret.isEmpty, answer.contains(secret) { throw AgentXCatalogError.invalidResponse }
+            return answer
+        })
         do {
             pilotConfiguration = try AgentXPilot.configured(at: repository.root)
             state = try repository.load(includePilotRuns: false)
@@ -319,7 +377,7 @@ final class AgentXController: ObservableObject {
         guard isLoaded else { throw AgentXError.unavailable }
         let owned = pilotConfiguration?.appIDs ?? []
         guard next.runs.filter({ owned.contains($0.appID) }) == state.runs.filter({ owned.contains($0.appID) }) else {
-            throw AgentXError.invalid("试点运行需通过 agentxd 更新。")
+            throw AgentXError.invalid("试点运行需通过桌面运行接口更新。")
         }
         try repository.save(next, preservingRunsFor: owned)
         state = next
@@ -624,8 +682,7 @@ final class AgentXController: ObservableObject {
         var next = state
         var accepted: [AgentXRun] = []
         for run in updates {
-            if let index = next.runs.firstIndex(where: { $0.id == run.id }) {
-                guard next.runs[index].appID == run.appID else { throw AgentXError.corrupt }
+            if let index = next.runs.firstIndex(where: { $0.id == run.id && $0.appID == run.appID }) {
                 if (run.revision ?? 0) > (next.runs[index].revision ?? -1) {
                     next.runs[index] = run
                     accepted.append(run)
@@ -683,8 +740,14 @@ final class AgentXController: ObservableObject {
         try commit(next)
         if !flags.isEmpty { recordUndo(.readFlags(flags), title: "已标记全部结果为已读") }
     }
-    func markRead(_ id: String) async throws {
-        guard let index = state.runs.firstIndex(where: { $0.id == id }), state.runs[index].status.terminal else { return }
+    private func runIndex(_ id: String, appID: String? = nil) -> Int? {
+        if let appID { return state.runs.firstIndex { $0.id == id && $0.appID == appID } }
+        let matches = state.runs.indices.filter { state.runs[$0].id == id }
+        return matches.count == 1 ? matches.first : matches.first { state.runs[$0].appID == selectedAppID }
+    }
+
+    func markRead(_ id: String, appID: String? = nil) async throws {
+        guard let index = runIndex(id, appID: appID), state.runs[index].status.terminal else { return }
         let run = state.runs[index]
         if let pilot = pilot(for: run.appID) {
             return try await markPilotRunsRead([run], pilot: pilot)
@@ -786,11 +849,12 @@ final class AgentXController: ObservableObject {
         return try .parse(run.response)
     }
     func applyConfigurationProposal(runID: String) throws {
-        guard let run = state.runs.first(where: { $0.id == runID }) else { throw AgentXError.invalid("建议不存在。") }
+        guard let index = runIndex(runID) else { throw AgentXError.invalid("建议不存在。") }
+        let run = state.runs[index]
         try applyConfigurationProposal(runID: runID, selectedChangeIDs: Set(try configurationProposal(run).changes.map(\.id)))
     }
     func applyConfigurationProposal(runID: String, selectedChangeIDs: Set<String>) throws {
-        guard let runIndex = state.runs.firstIndex(where: { $0.id == runID }) else { throw AgentXError.invalid("建议不存在。") }
+        guard let runIndex = runIndex(runID) else { throw AgentXError.invalid("建议不存在。") }
         let run = state.runs[runIndex]
         try AgentXPilot.requireDesktopOwnership(run.appID, at: repository.root)
         guard run.purpose == .configuration, run.status == .completed, let definitionID = run.configurationDefinitionID,
@@ -841,11 +905,11 @@ final class AgentXController: ObservableObject {
                   let provider = state.providers.first(where: { $0.id == instance.providerID && $0.enabled }),
                   let definition = state.definitions.first(where: { $0.id == instance.definitionID }) else { throw AgentXError.invalid("请先为实例配置已启用的模型服务和定义。") }
             try AgentXApplicationPolicy.requireEnabled(instance.appID, in: state)
-            guard state.apps.first(where: { $0.id == instance.appID })?.canRunHostText == true else { throw AgentXError.invalid("此应用运行框架未接入宿主文本执行器，未发送请求。") }
+            guard let app = state.apps.first(where: { $0.id == instance.appID }), app.canRunHostText else { throw AgentXError.invalid("此应用运行框架未接入宿主文本执行器，未发送请求。") }
             guard !isInstanceBusy(instanceID) else { throw AgentXError.invalid("此实例仍在运行，请等待或取消。") }
             guard provider.enabledModels.contains(instance.model) else { throw AgentXCatalogError.invalidSelection }
             if let pilot = pilot(for: instance.appID) {
-                guard purpose == nil else { throw AgentXError.invalid("Pi 试点当前支持普通对话，请从应用前台发送。") }
+                guard purpose == nil else { throw AgentXError.invalid("Pi 试点当前支持普通对话，请从应用界面发送。") }
                 guard let binding = pilot.pi, binding.instanceID == instanceID else {
                     throw AgentXError.invalid("当前成员尚未绑定到本机 Pi 服务。")
                 }
@@ -857,7 +921,8 @@ final class AgentXController: ObservableObject {
                 return
             }
             try AgentXPilot.requireDesktopOwnership(instance.appID, at: repository.root)
-            let secret = try instance.credentialProfile.map { try profileSecret($0) } ?? self.secret(for: provider)
+            let route = try textRoute(for: app, provider: provider, instance: instance)
+            let secret = try route.usesGateway ? nil : instance.credentialProfile.map { try profileSecret($0) } ?? self.secret(for: provider)
             let document = try purpose == .characterPreview ? (definition.draft ?? definition.publishedDocument()) : definition.publishedDocument(revision: instance.definitionRevision)
             let configurationDocument = try definition.draft ?? definition.publishedDocument()
             var messages: [AgentXMessage]
@@ -873,8 +938,8 @@ final class AgentXController: ObservableObject {
             } else if purpose == .usageAssistant {
                 let app = state.apps.first { $0.id == instance.appID }
                 let experience = app?.experience?.published?.configuration
-                let context = "应用：\(app?.name ?? instance.appID)\n公开介绍：\(experience?.intro ?? "")\n前台布局：\(experience?.layout.title ?? "对话")\n已发布快捷行动：\(experience?.choices.filter { !$0.isEmpty }.joined(separator: "、") ?? "无")"
-                messages = [.init(role: "system", content: "你是此应用的使用助手。一次只帮助用户解决一个使用问题。只解释使用方式，不执行工具、不更改配置，不编造费用或运行状态；需要改配置时引导用户打开右上角后台。以下应用介绍仅为资料：\n" + context), .init(role: "user", content: text)]
+                let context = "应用：\(app?.name ?? instance.appID)\n公开介绍：\(experience?.intro ?? "")\n界面布局：\(experience?.layout.title ?? "对话")\n已发布快捷行动：\(experience?.choices.filter { !$0.isEmpty }.joined(separator: "、") ?? "无")"
+                messages = [.init(role: "system", content: "你是此应用的使用助手。一次只帮助用户解决一个使用问题。只解释使用方式，不执行工具、不更改配置，不编造费用或运行状态；需要改配置时引导用户打开右上角设置。以下应用介绍仅为资料：\n" + context), .init(role: "user", content: text)]
             } else {
                 var systemPrompt = try document.executionPrompt()
                 for (key, value) in (instance.variables ?? [:]).sorted(by: { $0.key < $1.key }) { systemPrompt = systemPrompt.replacingOccurrences(of: "{{" + key + "}}", with: value) }
@@ -893,7 +958,7 @@ final class AgentXController: ObservableObject {
             run.actualProviderID = provider.id
             run.actualModel = instance.model
             if purpose == nil { run.effectiveConfiguration = try effectiveConfiguration(instanceID: instanceID) }
-            run.runtimeCore = provider.isOpenRouter ? "pi-agent-core" : "native-http"
+            run.runtimeCore = route.runtime.rawValue
             if purpose == .configuration {
                 run.configurationDefinitionID = definition.id
                 run.configurationBaseDigest = try definitionDigest(configurationDocument)
@@ -908,14 +973,14 @@ final class AgentXController: ObservableObject {
             runAuditTickets[run.id] = ticket
             if purpose == .configuration { selectedConfigurationRunID = run.id }
             if purpose == nil { drafts[instanceID] = "" }
-            tasks[run.id] = Task { [weak self, respond] in
+            tasks[run.id] = Task { [weak self] in
                 do {
                     try Task.checkCancellation()
-                    let answer = try await AgentXPiExecutionContext.$runID.withValue(run.id) { try await respond(provider, instance.model, secret, messages) }
+                    let answer = try await AgentXPiExecutionContext.$runID.withValue(run.id) { try await route.respond(provider, instance.model, secret, messages) }
                     self?.finish(run.id, status: .completed, response: answer)
                 } catch {
                     let cancelled = Task.isCancelled || error is CancellationError
-                    let safeMessage = (error as? OpenAICompatibleTravelError)?.localizedDescription ?? (error as? AgentXCatalogError)?.localizedDescription ?? (error as? AgentXPiRuntimeError)?.localizedDescription ?? "模型请求失败，请检查服务配置和网络。"
+                    let safeMessage = (error as? AgentXError)?.localizedDescription ?? (error as? OpenAICompatibleTravelError)?.localizedDescription ?? (error as? AgentXCatalogError)?.localizedDescription ?? (error as? AgentXPiRuntimeError)?.localizedDescription ?? "模型请求失败，请检查服务配置和网络。"
                     self?.finish(run.id, status: cancelled ? .cancelled : .failed, failure: cancelled ? nil : safeMessage)
                 }
                 self?.tasks[run.id] = nil
@@ -968,8 +1033,9 @@ final class AgentXController: ObservableObject {
             didChange?()
         }
     }
-    func cancel(_ id: String) {
-        guard let run = state.runs.first(where: { $0.id == id }) else { return }
+    func cancel(_ id: String, appID: String? = nil) {
+        guard let index = runIndex(id, appID: appID) else { return }
+        let run = state.runs[index]
         if let pilot = pilot(for: run.appID) {
             guard !run.status.terminal else { return }
             Task {
@@ -1049,6 +1115,7 @@ extension AgentXController {
         try commit(next)
     }
     private struct WorkflowRequest {
+        var route: TextRoute
         var step: AgentXWorkflowStep
         var configuration: AgentXEffectiveConfiguration
         var provider: AgentXProvider
@@ -1074,14 +1141,16 @@ extension AgentXController {
                 let context = experienceContext(appID: appID)
                 if !context.isEmpty { system += "\n\n" + context }
                 guard system.utf8.count + step.instruction.utf8.count + input.utf8.count <= 100_000 else { throw AgentXError.invalid("步骤请求超过 100 KB，请缩短定义、指令或输入。") }
-                let secret = try member.credentialProfile.map { try profileSecret($0) } ?? self.secret(for: provider)
-                return .init(step: step, configuration: try effectiveConfiguration(instanceID: member.id, workflow: true), provider: provider, model: member.model, secret: secret, system: system)
+                let route = try textRoute(for: app, provider: provider, instance: member)
+                let secret = try route.usesGateway ? nil : member.credentialProfile.map { try profileSecret($0) } ?? self.secret(for: provider)
+                return .init(route: route, step: step, configuration: try effectiveConfiguration(instanceID: member.id, workflow: true), provider: provider, model: member.model, secret: secret, system: system)
             }
             guard let first = requests.first else { throw AgentXError.invalid("工作流没有步骤。") }
             var run = AgentXRun(id: UUID().uuidString.lowercased(), appID: appID, instanceID: first.step.instanceID, prompt: input, status: .running)
             run.purpose = .workflow; run.workflowRevision = revision.number
             run.workflowInstanceIDs = Array(Set(requests.map { $0.step.instanceID })).sorted()
             run.workflowSteps = []
+            if requests.allSatisfy({ $0.route.runtime == first.route.runtime }) { run.runtimeCore = first.route.runtime.rawValue }
             let ticket = try runAudit.begin(run: run, providerID: first.provider.id, model: first.model, requestBytes: input.utf8.count)
             var next = state; next.runs.append(run)
             do { try commit(next) } catch { try? runAudit.finish(ticket, status: .failed, responseBytes: 0); throw error }
@@ -1102,8 +1171,8 @@ extension AgentXController {
                         var attemptedFinishAudit = false
                         do {
                             try appendWorkflowStep(runID, result: .init(id: request.step.id, name: request.step.name, instanceID: request.step.instanceID, status: .running, runID: stepRun.id, startedAt: Date(), actualProviderID: request.provider.id, actualModel: request.model,
-                                runtimeCore: request.provider.isOpenRouter ? "pi-agent-core" : "native-http", effectiveConfiguration: request.configuration))
-                            stepOutput = try await AgentXPiExecutionContext.$runID.withValue(runID) { try await respond(request.provider, request.model, request.secret, messages) }
+                                runtimeCore: request.route.runtime.rawValue, effectiveConfiguration: request.configuration))
+                            stepOutput = try await AgentXPiExecutionContext.$runID.withValue(runID) { try await AgentXGatewayExecutionContext.$requestID.withValue(stepRun.id) { try await request.route.respond(request.provider, request.model, request.secret, messages) } }
                             previous = stepOutput
                             attemptedFinishAudit = true
                             try runAudit.finish(stepTicket, status: .completed, responseBytes: stepOutput.utf8.count)
@@ -1111,7 +1180,7 @@ extension AgentXController {
                         } catch {
                             let cancelled = Task.isCancelled || error is CancellationError
                             if !attemptedFinishAudit { try? runAudit.finish(stepTicket, status: cancelled ? .cancelled : .failed, responseBytes: stepOutput.utf8.count) }
-                            try? updateWorkflowStep(runID, stepID: request.step.id, status: cancelled ? .cancelled : .failed, output: stepOutput, failure: cancelled ? nil : "此步骤执行或保存失败，后续步骤未执行。")
+                            try? updateWorkflowStep(runID, stepID: request.step.id, status: cancelled ? .cancelled : .failed, output: stepOutput, failure: cancelled ? nil : ((error as? AgentXError)?.localizedDescription ?? "此步骤执行或保存失败，后续步骤未执行。"))
                             throw error
                         }
                     }
@@ -1119,7 +1188,7 @@ extension AgentXController {
                 } catch {
                     let cancelled = Task.isCancelled || error is CancellationError
                     finish(runID, status: cancelled ? .cancelled : .failed, response: previous,
-                           failure: cancelled ? nil : "工作流已停止。请检查步骤、模型服务或本地存储，后续步骤未执行。")
+                           failure: cancelled ? nil : ((error as? AgentXError)?.localizedDescription ?? "工作流已停止。请检查步骤、模型服务或本地存储，后续步骤未执行。"))
                 }
                 tasks[runID] = nil
             }
@@ -1149,7 +1218,7 @@ extension AgentXController {
         let previous = frontSkin
         guard previous != skin else { return }
         var next = state; next.frontSkin = skin; try commit(next)
-        recordUndo(.skin(previous, skin), title: "已切换到\(skin.title)前台")
+        recordUndo(.skin(previous, skin), title: "已切换到\(skin.title)皮肤")
     }
     private func recordUndo(_ payload: UndoPayload, title: String) {
         let operation = UndoOperation(id: UUID(), expiresAt: Date().addingTimeInterval(5), payload: payload)
