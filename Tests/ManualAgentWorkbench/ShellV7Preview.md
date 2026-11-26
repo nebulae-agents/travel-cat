@@ -3,12 +3,12 @@
 先完成 `Scripts/travel-cat-swift.sh test --filter AgentX`，确认没有其他 Swift 进程再启动：
 
 ```sh
-AGENTX_SHELL_V7_PREVIEW=1 AGENTX_SHELL_V7_SECONDS=900 Scripts/travel-cat-swift.sh test --skip-build --filter AgentXAppShellTests/testShellV7InteractivePreview
+AGENTX_SHELL_V7_SECONDS=900 Scripts/preview-agentx-shell-v7.sh
 ```
 
-窗口：`AgentX Shell v7 — 隔离预览`。关闭窗口或超时即退出测试；结束时请求取消预览任务，移除本测试生成的临时 root。测试代码位于 `Tests/TravelCatAppTests/AgentXAppShellTests.swift`。
+窗口：`AgentX Shell v7 — 隔离预览`。关闭窗口或超时即退出；结束时请求取消预览任务，移除本预览生成的临时 root。入口位于 `Tests/ManualAgentWorkbench/ShellV7Preview.swift`，使用独立 `NSApplication.run()`，不运行正式应用入口。脚本先运行壳测试，再链接 Xcode Debug testable 生产对象；需要本机 Xcode Swift 工具链。
 
-数据边界：`/private/tmp/AppShell-<UUID>`，内存 `AgentXTestCredentials`，禁用自动模型目录刷新。两个应用、成员和场景均为明确标记的测试数据；响应为 20 秒后返回的本地模拟文本，真实控制器负责草稿、运行、取消、发布和导航。没有正式模型、网络请求或钥匙串读取。生成修改入口会接收模拟文本，不能据此声称真实模型建议解析验收通过。
+数据边界：`/private/tmp/AppShell-<UUID>`，内存 `PreviewCredentials`，禁用自动模型目录刷新。两个应用、成员和场景均为明确标记的测试数据；响应为 20 秒后返回的本地模拟文本，真实控制器负责草稿、运行、取消、发布和导航。预置运行使用本地模拟响应，不自动请求模型目录，也不读取钥匙串。手动模型目录刷新仍属于控制器现有能力；本预览配置只指向本机模拟地址，不代表任意配置下都离线。生成修改入口会接收模拟文本，不能据此声称真实模型建议解析验收通过。
 
 验收顺序：
 
@@ -21,8 +21,10 @@ AGENTX_SHELL_V7_PREVIEW=1 AGENTX_SHELL_V7_SECONDS=900 Scripts/travel-cat-swift.s
 
 正式数据前后清单由父任务比对；这里的临时预览成功不代表安装版或正式模型验收。
 
-## CUA 无法发现裸 XCTest 进程时
+## 预览启动与存活证据
 
-本轮提供临时独立包 `/private/tmp/AgentXShellV7Preview.app`，bundle ID `local.agentx.shell-v7.preview`。包内为本机 Xcode 的 XCTest runner，本轮已构建测试作为参数；通过 LaunchServices `open` 启动，且显式设置 `AGENTX_SHELL_V7_PREVIEW=1`、`AGENTX_SHELL_V7_SECONDS=900`。XCTest 框架路径来自本机 Xcode 的 MacOSX Developer/Library/Frameworks 与 PrivateFrameworks；`DYLD_LIBRARY_PATH` 指向该平台 Developer/usr/lib，以加载 `libXCTestSwiftSupport.dylib`。不读取正式应用数据或钥匙串。
+旧的 XCTest 交互入口已删除。它虽然创建窗口，但只等待异步测试完成，主线程采样为 `XCTWaiter → CFRunLoop`，没有 AppKit 事件派发循环；测试通过不能证明窗口可以操作。不要再使用复制 XCTest runner 的 `/private/tmp/AgentXShellV7Preview.app`。
 
-裸 XCTest 与临时包不可同时运行。CUA 通过上述 bundle ID 或 `.app` 绝对路径选择；界面操作仅使用 CUA。临时包不安装进 Applications，也不属于发布产物。
+新脚本每次生成独立的 `/private/tmp/agentx-shell-v7.XXXXXX/AgentXShellV7Preview.app`，不安装进 Applications。正式 UI 和控制器来自当前构建对象，进程不链接 XCTest。标准错误立即输出 `SHELL_V7_PREVIEW_READY`（PID、临时 root、`appRunning=true`），前 3 秒及此后每 30 秒输出 `SHELL_V7_HEARTBEAT`，退出输出 `SHELL_V7_PREVIEW_EXIT`。可用 `AGENTX_SHELL_V7_SECONDS=8` 做有界启动/退出检查。
+
+心跳只证明 AppKit 主循环仍在运行，不代替人工输入、点击、快捷键验收。用户手工操作；未经明确授权不使用任何自动界面操作。
