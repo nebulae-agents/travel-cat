@@ -47,6 +47,74 @@ struct AgentXPiRuntimeTests {
         let result = try await runtime(directory).respond(provider: selected, model: "new/model", secret: "private-fixture-key", messages: messages)
         #expect(result == "confirmed")
     }
+    @Test func streamingDeliversBeforeExitAndDrainsFinalBufferedRecords() async throws {
+        let directory = try fixture(#"""
+        [ "$1" = "--stream-loopback" ] || exit 1
+        /bin/cat >/dev/null
+        printf '%s' '{"event":"text",'
+        printf '%s\n' '"text":"一"}'
+        while [ ! -f acknowledged ]; do /bin/sleep 0.01; done
+        printf '%s\n' '{"event":"text","text":"二"}' '{"event":"usage","input":9,"output":2}' '{"version":1,"ok":true,"text":"一二"}'
+        """#)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let instance = runtime(directory)
+        let local = AgentXProvider(id: "loop", name: "Loop", baseURL: "http://127.0.0.1:1/v1", models: ["model"])
+        let payload = try instance.prepare(provider: local, model: "model", secret: nil, messages: messages)
+        let adapter: any AgentXRunAdapter = instance
+        #expect(adapter.runtimeCore == "pi-agent-core")
+        var events = [String]()
+        let answer = try await adapter.execute(runID: "stream-test", payload: payload) { progress in
+            switch progress {
+            case .text(let text):
+                events.append(text)
+                if events.count == 1 { try Data().write(to: directory.appendingPathComponent("acknowledged")) }
+            case .usage(let input, let output):
+                events.append("\(input)/\(output)")
+            }
+        }
+        #expect(events == ["一", "二", "9/2"])
+        #expect(answer == "一二")
+    }
+
+    @Test func streamingChecksBothEndpointAndCredentialBeforeLaunching() async throws {
+        let directory = try fixture("touch launched")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let instance = runtime(directory)
+        let local = AgentXProvider(id: "local", name: "Loop", baseURL: "http://127.0.0.1:1/v1", models: ["model"])
+        for (endpoint, pipeSecret, explicitSecret) in [(provider, "test-key", ""), (local, "test-key", ""), (local, "", "test-key")] {
+            let payload = try instance.prepare(provider: endpoint, model: "model", secret: pipeSecret, messages: messages)
+            await #expect(throws: AgentXPiRuntimeError.invalidRequest) {
+                try await instance.respond(payload: payload, secret: explicitSecret) { _ in Issue.record("Unexpected progress") }
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launched").path))
+    }
+
+    @Test func streamingCallbackFailureReapsChildAndDropsQueuedProgress() async throws {
+        let directory = try fixture(#"""
+        trap '' TERM
+        /bin/cat >/dev/null
+        printf '%s' $$ > child.pid
+        printf '%s\n' '{"event":"text","text":"first"}' '{"event":"text","text":"second"}'
+        while :; do :; done
+        """#)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let instance = runtime(directory)
+        let local = AgentXProvider(id: "loop", name: "Loop", baseURL: "http://127.0.0.1:1/v1", models: ["model"])
+        let payload = try instance.prepare(provider: local, model: "model", secret: nil, messages: messages)
+        var calls = 0
+        struct JournalFailure: Error {}
+        await #expect(throws: JournalFailure.self) {
+            try await instance.respond(payload: payload, secret: nil) { _ in
+                calls += 1
+                throw JournalFailure()
+            }
+        }
+        #expect(calls == 1)
+        let pid = try #require(Int32(String(contentsOf: directory.appendingPathComponent("child.pid"), encoding: .utf8)))
+        #expect(kill(pid, 0) == -1 && errno == ESRCH)
+    }
+
     @Test func invalidProtocolAndNonzeroExitAreGenericErrors() async throws {
         for script in ["/bin/cat >/dev/null; printf 'private-fixture-key'", "/bin/cat >/dev/null; printf '%s' '{\"version\":1,\"ok\":true,\"text\":\"bad\"}'; exit 4", "/bin/cat >/dev/null; printf '%s' '{\"version\":2,\"ok\":true,\"text\":\"bad\"}'", "/bin/cat >/dev/null; printf '%s' '{\"version\":1,\"ok\":false,\"code\":\"private-fixture-key\"}'"] {
             let directory = try fixture(script)

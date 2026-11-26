@@ -18,7 +18,8 @@ enum AgentXPiRuntimeError: Error, LocalizedError, Equatable, Sendable {
 /// Each turn reconstructs the official Pi Agent from the host transcript and current model.
 /// There is deliberately no PATH, developer checkout, or environment credential fallback.
 @MainActor
-struct AgentXPiRuntime {
+struct AgentXPiRuntime: AgentXRunAdapter {
+    let runtimeCore = "pi-agent-core"
     private let nodeURL: URL?
     private let runnerURL: URL?
     private let timeout: TimeInterval
@@ -39,8 +40,29 @@ struct AgentXPiRuntime {
         self.nodeURL = nodeURL; self.runnerURL = runnerURL
         self.timeout = timeout.isFinite ? max(0.01, min(timeout, 300)) : 65
     }
-    func respond(provider: AgentXProvider, model: String, secret: String?, messages: [AgentXMessage]) async throws -> String {
-        try Task.checkCancellation()
+    var localHealth: String {
+        let files = FileManager.default
+        func isRegularFile(_ url: URL) -> Bool {
+            (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }
+        guard let nodeURL, isRegularFile(nodeURL), files.isExecutableFile(atPath: nodeURL.path),
+              let runnerURL else { return "missing_runtime" }
+
+        // These are the two direct imports in runner.mjs and their pinned package manifests.
+        let sdk = runnerURL.deletingLastPathComponent().appendingPathComponent("node_modules/@earendil-works")
+        let required = [runnerURL, sdk.appendingPathComponent("pi-agent-core/package.json"),
+                        sdk.appendingPathComponent("pi-agent-core/dist/index.js"),
+                        sdk.appendingPathComponent("pi-ai/package.json"),
+                        sdk.appendingPathComponent("pi-ai/dist/api/openai-completions.js")]
+        return required.allSatisfy { isRegularFile($0) && files.isReadableFile(atPath: $0.path) }
+            ? "ready" : "missing_runtime"
+    }
+
+    func capabilities(streaming: Bool) -> [String: Bool] {
+        ["start": true, "stop": true, "stream": streaming, "usage": streaming, "tools": false, "step": false]
+    }
+
+    func prepare(provider: AgentXProvider, model: String, secret: String?, messages: [AgentXMessage]) throws -> Data {
         if provider.isOpenRouter && (secret?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
             throw AgentXPiRuntimeError.missingCredential
         }
@@ -49,17 +71,65 @@ struct AgentXPiRuntime {
               messages.reduce(0, { $0 + $1.content.utf8.count }) <= PiChildProcess.maximumRequest else {
             throw AgentXPiRuntimeError.invalidRequest
         }
-        guard let nodeURL, let runnerURL,
-              FileManager.default.isExecutableFile(atPath: nodeURL.path),
-              FileManager.default.isReadableFile(atPath: runnerURL.path) else { throw AgentXPiRuntimeError.missingRuntime }
         let metadata = provider.modelSelection?.models.first(where: { $0.id == model })
         let request = Request(version: 1, baseURL: provider.baseURL, model: model, secret: secret ?? "", messages: messages,
                               metadata: .init(contextLength: metadata?.contextLength))
-        var payload = try JSONEncoder().encode(request)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        var payload = try encoder.encode(request)
         payload.append(10)
         guard payload.count <= PiChildProcess.maximumRequest else { throw AgentXPiRuntimeError.invalidRequest }
+        return payload
+    }
+
+    func respond(provider: AgentXProvider, model: String, secret: String?, messages: [AgentXMessage]) async throws -> String {
+        let payload = try prepare(provider: provider, model: model, secret: secret, messages: messages)
+        return try await respond(payload: payload, secret: secret)
+    }
+
+    func respond(payload: Data, secret: String?) async throws -> String {
+        try await run(payload: payload, secret: secret, progress: nil)
+    }
+
+    func respond(payload: Data, secret: String?, onProgress: @escaping @MainActor @Sendable (AgentXRunProgress) throws -> Void) async throws -> String {
+        struct Endpoint: Decodable { let baseURL: String; let secret: String }
+        guard (secret ?? "").isEmpty, payload.count <= PiChildProcess.maximumRequest,
+              let endpoint = try? JSONDecoder().decode(Endpoint.self, from: payload), endpoint.secret.isEmpty,
+              let url = URLComponents(string: endpoint.baseURL), url.scheme?.lowercased() == "http",
+              ["127.0.0.1", "[::1]", "::1"].contains(url.host ?? ""), url.user == nil, url.password == nil,
+              url.query == nil, url.fragment == nil else { throw AgentXPiRuntimeError.invalidRequest }
+        return try await run(payload: payload, secret: secret, progress: onProgress)
+    }
+
+    func execute(runID: String, payload: Data, progress: AgentXRunProgressHandler?) async throws -> String {
+        try await AgentXPiExecutionContext.$runID.withValue(runID) {
+            if let progress {
+                return try await respond(payload: payload, secret: nil, onProgress: progress)
+            }
+            return try await respond(payload: payload, secret: nil)
+        }
+    }
+
+    func confirmedExit(runID: String) -> Bool {
+        guard let ledgerRoot, let owner = AgentXStopProcessIdentity.read(getpid()) else { return false }
+        return (try? AgentXPiProcessLedger(root: ledgerRoot).confirmedExited(owner: owner, runID: runID)) == true
+    }
+
+    private func run(payload: Data, secret: String?, progress: AgentXRunProgressHandler?) async throws -> String {
+        try Task.checkCancellation()
+        guard let nodeURL, let runnerURL,
+              FileManager.default.isExecutableFile(atPath: nodeURL.path),
+              FileManager.default.isReadableFile(atPath: runnerURL.path) else { throw AgentXPiRuntimeError.missingRuntime }
+        struct GatewayLimits: Decodable { let gatewayToken: String; let timeoutSeconds: Int; let secret: String; let baseURL: String }
+        var executionTimeout = timeout
+        if let limits = try? JSONDecoder().decode(GatewayLimits.self, from: payload) {
+            guard progress != nil, limits.secret.isEmpty, (1...300).contains(limits.timeoutSeconds),
+                  limits.gatewayToken.wholeMatch(of: /[a-f0-9-]{72}/) != nil,
+                  let url = URLComponents(string: limits.baseURL), url.scheme == "http", url.host == "127.0.0.1" else { throw AgentXPiRuntimeError.invalidRequest }
+            executionTimeout = Double(limits.timeoutSeconds) + 5
+        }
         let cancellation = PiCancellation()
-        let configuration = PiChildProcess(nodeURL: nodeURL, runnerURL: runnerURL, payload: payload, timeout: timeout, ledgerRoot: ledgerRoot, runID: AgentXPiExecutionContext.runID)
+        let configuration = PiChildProcess(nodeURL: nodeURL, runnerURL: runnerURL, payload: payload, timeout: executionTimeout, ledgerRoot: ledgerRoot, runID: AgentXPiExecutionContext.runID, progress: progress)
         let output: Data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -67,6 +137,7 @@ struct AgentXPiRuntime {
                 }
             }
         } onCancel: { cancellation.cancel() }
+        try Task.checkCancellation()
         guard let response = try? JSONDecoder().decode(Response.self, from: output), response.version == 1 else {
             throw AgentXPiRuntimeError.invalidResponse
         }
@@ -100,6 +171,67 @@ private final class PiCancellation: @unchecked Sendable {
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
 
+/// Streaming stdout uses one JSON object per line, ending with the existing response envelope.
+private struct PiProgressFrames {
+    private var partial = Data()
+    private var visible = ""
+    private var visibleBytes = 0
+    private var receivedUsage = false
+    private var totalBytes = 0
+    private(set) var terminal: Data?
+
+    private struct Frame: Decodable {
+        var event: String?
+        var text: String?
+        var input: Int?
+        var output: Int?
+        var version: Int?
+        var ok: Bool?
+    }
+
+    mutating func append(_ bytes: ArraySlice<UInt8>, deliver: (AgentXRunProgress) throws -> Void) throws {
+        totalBytes += bytes.count
+        guard totalBytes <= 2_097_152 else { throw AgentXPiRuntimeError.invalidResponse }
+        var remaining = bytes
+        while !remaining.isEmpty {
+            guard terminal == nil else { throw AgentXPiRuntimeError.invalidResponse }
+            let newline = remaining.firstIndex(of: 10)
+            let end = newline ?? remaining.endIndex
+            guard partial.count + remaining.distance(from: remaining.startIndex, to: end) <= 131_072 else {
+                throw AgentXPiRuntimeError.invalidResponse
+            }
+            partial.append(contentsOf: remaining[..<end])
+            guard let newline else { break }
+            guard let frame = try? JSONDecoder().decode(Frame.self, from: partial) else { throw AgentXPiRuntimeError.invalidResponse }
+            switch frame.event {
+            case "text":
+                guard let delta = frame.text, !delta.isEmpty, delta.utf8.count <= 4096 else {
+                    throw AgentXPiRuntimeError.invalidResponse
+                }
+                visibleBytes += delta.utf8.count
+                guard visibleBytes <= 65_536 else { throw AgentXPiRuntimeError.invalidResponse }
+                visible += delta
+                try deliver(.text(delta))
+            case "usage":
+                guard !receivedUsage, let input = frame.input, let output = frame.output, input >= 0, output >= 0 else {
+                    throw AgentXPiRuntimeError.invalidResponse
+                }
+                receivedUsage = true
+                try deliver(.usage(input: input, output: output))
+            case nil:
+                guard frame.version == 1, let ok = frame.ok, !ok || frame.text?.utf8.elementsEqual(visible.utf8) == true else {
+                    throw AgentXPiRuntimeError.invalidResponse
+                }
+                terminal = partial
+            default:
+                throw AgentXPiRuntimeError.invalidResponse
+            }
+            partial.removeAll(keepingCapacity: true)
+            remaining = remaining[remaining.index(after: newline)...]
+        }
+    }
+}
+
 /// A dedicated worker owns the process and all pipe descriptors until it is reaped.
 /// Nonblocking reads/writes prevent a large request or noisy stderr from deadlocking.
 private struct PiChildProcess: Sendable {
@@ -107,6 +239,7 @@ private struct PiChildProcess: Sendable {
     private static let maximumOutput = 131_072
     var nodeURL: URL; var runnerURL: URL; var payload: Data; var timeout: TimeInterval
     var ledgerRoot: URL?; var runID: String?
+    var progress: AgentXRunProgressHandler?
 
     func run(cancellation: PiCancellation) throws -> Data {
         if cancellation.isCancelled { throw CancellationError() }
@@ -121,9 +254,10 @@ private struct PiChildProcess: Sendable {
         var didReap = false
         let input = Pipe(), output = Pipe(), diagnostic = Pipe()
         process.executableURL = nodeURL
-        process.arguments = [runnerURL.path]
+        process.arguments = progress == nil ? [runnerURL.path] : [runnerURL.path, "--stream-loopback"]
         process.currentDirectoryURL = runnerURL.deletingLastPathComponent()
-        process.environment = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "TMPDIR": "/private/tmp"]
+        process.environment = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "TMPDIR": "/private/tmp",
+                               "AGENTX_PI_OWNER_PID": String(getpid())]
         process.standardInput = input; process.standardOutput = output; process.standardError = diagnostic
         defer {
             if didLaunch && !didReap {
@@ -161,6 +295,7 @@ private struct PiChildProcess: Sendable {
         let started = ProcessInfo.processInfo.systemUptime
         var sent = 0; var inputClosed = false; var outputEOF = false; var errorEOF = false
         var received = Data()
+        var frames = PiProgressFrames()
         var failure: (any Error)?
         var terminatedAt: TimeInterval?
         var didKill = false
@@ -193,7 +328,18 @@ private struct PiChildProcess: Sendable {
                     let count = Darwin.read(descriptor, &buffer, buffer.count)
                     if count > 0 {
                         if isOutput, failure == nil {
-                            if received.count + count > Self.maximumOutput { failure = AgentXPiRuntimeError.invalidResponse }
+                            if let progress {
+                                do {
+                                    try frames.append(buffer.prefix(count)) { event in
+                                        // The pipe worker waits for each callback, including any journal write.
+                                        // This preserves order and propagates callback failures before the next record.
+                                        try DispatchQueue.main.sync {
+                                            guard !cancellation.isCancelled else { throw CancellationError() }
+                                            try MainActor.assumeIsolated { try progress(event) }
+                                        }
+                                    }
+                                } catch { failure = error }
+                            } else if received.count + count > Self.maximumOutput { failure = AgentXPiRuntimeError.invalidResponse }
                             else { received.append(contentsOf: buffer.prefix(count)) }
                         }
                     } else {
@@ -210,6 +356,10 @@ private struct PiChildProcess: Sendable {
                     if cancellation.isCancelled { throw CancellationError() }
                     if let failure { throw failure }
                     guard process.terminationReason == .exit && process.terminationStatus == 0 else { throw AgentXPiRuntimeError.processFailed }
+                    if progress != nil {
+                        guard let terminal = frames.terminal else { throw AgentXPiRuntimeError.invalidResponse }
+                        return terminal
+                    }
                     return received
                 }
             }
