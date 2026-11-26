@@ -8,6 +8,25 @@ import TravelUI
 
 @MainActor
 final class PetTravelBubbleControllerTests: XCTestCase {
+    func testTransientTravelSlipDisappearsBeforeReleasingQueue() throws {
+        let scheduler = ManualBubbleScheduler()
+        let controller = PetTravelBubbleController(locator: StubBubbleLocator(selection: mascotSelection()).locate,
+                                                   scheduler: scheduler)
+        defer { controller.close() }
+        var released = 0
+        XCTAssertTrue(controller.show(delivery: .prompt(returnPrompt()), dismissAfterDelay: true,
+            onTap: { XCTFail("Expiring a slip must not navigate") }, onAvailableForReplacement: {
+                XCTAssertEqual(controller.presentation, .hidden)
+                XCTAssertFalse(controller.window?.isVisible == true)
+                released += 1
+            }))
+        scheduler.advance(by: 7)
+        XCTAssertEqual(controller.presentation, .slip)
+        scheduler.advance(by: 1)
+        XCTAssertEqual(released, 1)
+        XCTAssertEqual(scheduler.activeCount, 0)
+    }
+
     func testLostMouseUpCancelsDragAndAllowsNextClickWithoutSaving() throws {
         let suite = "LostMouseUp-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

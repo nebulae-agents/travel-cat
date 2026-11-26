@@ -32,6 +32,7 @@ final class JourneyTestPresentation {
                 return bubble?.show(
                     delivery: delivery,
                     isTestJourney: true,
+                    dismissAfterDelay: true,
                     onTap: { [weak self] in
                         guard self?.isAllowed == true else { return }
                         onTap()

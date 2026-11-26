@@ -221,6 +221,7 @@ final class TravelCatEnvironment: ObservableObject {
             showBubble: { [weak bubbleController, route] delivery, onTap, onAvailableForReplacement in
                 bubbleController?.show(
                     delivery: delivery,
+                    dismissAfterDelay: true,
                     onTap: onTap,
                     onRouteSelected: route,
                     onTestRequested: testRequest,
